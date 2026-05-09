@@ -65,6 +65,9 @@ Sem confirmacao explicita do usuario, nao executar:
   - em macOS, usar `scripts/dev_phase_stack.sh restart` como padrao durante desenvolvimento;
   - `launchd` so deve ser usado quando solicitado explicitamente pelo usuario;
   - em qualquer fase futura (F6+), manter as fases homologadas anteriores ativas durante validacao real.
+  - NUNCA misturar `launchd` e stack manual (`scripts/dev_phase_stack.sh`/TTY) ao mesmo tempo.
+  - Antes de validar E2E, confirmar quem esta na porta `7777` e quais workers/beats estao ativos para evitar processo com codigo antigo.
+  - Se houver conflito/duvida de processo stale, parar tudo e subir novamente de forma limpa (fonte unica de execucao).
 
 ## Referencias operacionais
 
