@@ -29,9 +29,16 @@ class Settings:
     celery_result_backend: str | None
     celery_dispatch_interval_seconds: int
     celery_dispatch_batch_size: int
+    celery_dispatch_queue: str
+    celery_execute_queue: str
+    celery_heartbeat_queue: str
+    celery_beat_dispatch_enabled: bool
+    celery_dispatch_workspace_uuid: str | None
     celery_task_always_eager: bool
     celery_health_heartbeat_key: str
     celery_health_heartbeat_ttl_seconds: int
+    orch_lab_workspace_uuid: str | None
+    orch_default_workspace_uuid: str | None
 
     @property
     def psycopg_dsn(self) -> str:
@@ -144,7 +151,17 @@ def get_settings() -> Settings:
         celery_result_backend=result_backend,
         celery_dispatch_interval_seconds=_read_env_int("CELERY_DISPATCH_INTERVAL_SECONDS", 2),
         celery_dispatch_batch_size=_read_env_int("CELERY_DISPATCH_BATCH_SIZE", 100),
+        celery_dispatch_queue=_read_env_optional("CELERY_DISPATCH_QUEUE", "orch_dispatch") or "orch_dispatch",
+        celery_execute_queue=_read_env_optional("CELERY_EXECUTE_QUEUE", "orch_execute") or "orch_execute",
+        celery_heartbeat_queue=_read_env_optional("CELERY_HEARTBEAT_QUEUE", "orch_heartbeat") or "orch_heartbeat",
+        celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
+        celery_dispatch_workspace_uuid=_read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
         celery_task_always_eager=_read_env_bool("CELERY_TASK_ALWAYS_EAGER", False),
         celery_health_heartbeat_key=_read_env_optional("CELERY_HEARTBEAT_KEY", "orch:beat:heartbeat") or "orch:beat:heartbeat",
         celery_health_heartbeat_ttl_seconds=_read_env_int("CELERY_HEARTBEAT_TTL_SECONDS", 30),
+        orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
+        orch_default_workspace_uuid=_read_env_optional(
+            "ORCH_DEFAULT_WORKSPACE_UUID",
+            _read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
+        ),
     )

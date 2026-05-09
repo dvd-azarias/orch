@@ -52,4 +52,11 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     session_factory = get_session_factory()
     async with session_factory() as session:
-        yield session
+        try:
+            yield session
+            if session.in_transaction():
+                await session.commit()
+        except Exception:
+            if session.in_transaction():
+                await session.rollback()
+            raise

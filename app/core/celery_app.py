@@ -29,6 +29,20 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+beat_schedule: dict[str, dict[str, Any]] = {
+    "orch-beat-heartbeat": {
+        "task": "app.tasks.workflow.beat_heartbeat",
+        "schedule": max(2, settings.celery_dispatch_interval_seconds),
+        "options": {"queue": settings.celery_heartbeat_queue},
+    },
+}
+if settings.celery_beat_dispatch_enabled:
+    beat_schedule["orch-dispatch-pending-sessions"] = {
+        "task": "app.tasks.workflow.dispatch_pending_sessions",
+        "schedule": max(1, settings.celery_dispatch_interval_seconds),
+        "options": {"queue": settings.celery_dispatch_queue},
+    }
+
 celery_app = Celery(
     "orch",
     broker=settings.celery_broker_url,
@@ -44,14 +58,10 @@ celery_app.conf.update(
     enable_utc=True,
     task_ignore_result=True,
     task_always_eager=settings.celery_task_always_eager,
-    beat_schedule={
-        "orch-dispatch-pending-sessions": {
-            "task": "app.tasks.workflow.dispatch_pending_sessions",
-            "schedule": max(1, settings.celery_dispatch_interval_seconds),
-        },
-        "orch-beat-heartbeat": {
-            "task": "app.tasks.workflow.beat_heartbeat",
-            "schedule": max(2, settings.celery_dispatch_interval_seconds),
-        },
+    task_routes={
+        "app.tasks.workflow.dispatch_pending_sessions": {"queue": settings.celery_dispatch_queue},
+        "app.tasks.workflow.beat_heartbeat": {"queue": settings.celery_heartbeat_queue},
+        "app.tasks.workflow.advance_session": {"queue": settings.celery_execute_queue},
     },
+    beat_schedule=beat_schedule,
 )

@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_sessions_alarms_repository import fetch_alarms
 
 
@@ -60,8 +60,7 @@ async def list_alarms(
     limit: int,
     cursor: str | None,
 ) -> PagedAlarmsResult:
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     safe_limit = _sanitize_limit(limit)
     cursor_created_at, cursor_id = _decode_cursor(cursor)
 

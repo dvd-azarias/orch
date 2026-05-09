@@ -4,7 +4,7 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.core.config import get_settings
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_sessions_repository import (
     fetch_session_by_uuid,
     fetch_sessions_by_entity,
@@ -53,8 +53,7 @@ def _encode_cursor(row: dict | None) -> str | None:
 
 
 async def get_session_by_uuid(db_session: AsyncSession, *, session_uuid: str) -> dict | None:
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
 
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:
@@ -69,8 +68,7 @@ async def list_sessions_by_flow_uuid(
     limit: int,
     cursor: str | None,
 ) -> PagedSessionsResult:
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     safe_limit = _sanitize_limit(limit)
     cursor_created_at, cursor_id = _decode_cursor(cursor)
 
@@ -99,8 +97,7 @@ async def list_sessions_by_entity(
     limit: int,
     cursor: str | None,
 ) -> PagedSessionsResult:
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     safe_limit = _sanitize_limit(limit)
     cursor_created_at, cursor_id = _decode_cursor(cursor)
 

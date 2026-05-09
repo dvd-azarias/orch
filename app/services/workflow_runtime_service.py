@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_sessions_repository import fetch_session_workflow_state, update_session_workflow_position
 from app.services.workflow_engine import build_bootstrap
@@ -63,7 +64,7 @@ async def bootstrap_workflow_for_session(
             next_card_uuid=None,
         )
 
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:
         await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))

@@ -6,13 +6,17 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.core.config as core_config
+from app.core.config import get_settings
 from app.core.database import get_db_session
 from app.core.logging import get_logger
-from app.core.request_context import get_request_id
-from app.core.config import get_settings
+from app.core.request_context import get_request_id, set_workspace_context
+from app.core.workspace import normalize_workspace_uuid, workspace_schema_from_uuid
 from app.schemas.orch import (
     OrchAlarmListResponse,
     OrchAlarmSummary,
+    OrchMigrateAllResponse,
+    OrchMigrateWorkspaceResponse,
     OrchSessionListResponse,
     OrchSessionSummary,
     OrchTriggerAccepted,
@@ -26,7 +30,9 @@ from app.services.session_query_service import (
     list_sessions_by_entity,
     list_sessions_by_flow_uuid,
 )
+from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
 from app.services.session_service import persist_session
+from app.services.workspace_service import bind_workspace_context, ensure_active_workspace
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.tasks.workflow_tasks import advance_session_task
@@ -75,16 +81,52 @@ def _m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] |
     return None
 
 
-@router.post(
-    "/{flow_uuid}",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=OrchTriggerAccepted,
-)
-async def trigger_orch(
+def _legacy_workspace_context() -> tuple[str | None, str]:
+    settings = core_config.get_settings()
+    fallback_workspace_uuid = settings.orch_default_workspace_uuid or settings.orch_lab_workspace_uuid
+    if fallback_workspace_uuid:
+        safe_workspace_uuid = normalize_workspace_uuid(fallback_workspace_uuid)
+        return safe_workspace_uuid, workspace_schema_from_uuid(safe_workspace_uuid)
+    return None, settings.database_schema
+
+
+async def _trigger_orch_for_workspace(
+    *,
+    workspace_uuid: str | None,
     flow_uuid: UUID,
-    payload: dict[str, Any] = Body(...),
-    db_session: AsyncSession = Depends(get_db_session),
+    payload: dict[str, Any],
+    db_session: AsyncSession,
+    validate_workspace: bool = True,
+    schema_override: str | None = None,
 ) -> OrchTriggerAccepted:
+    safe_workspace_uuid: str | None = None
+    if schema_override is not None:
+        workspace_schema = schema_override
+        if workspace_uuid:
+            safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
+        set_workspace_context(
+            workspace_uuid=safe_workspace_uuid or "legacy",
+            workspace_schema=workspace_schema,
+        )
+    else:
+        if workspace_uuid is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="workspace_uuid obrigatório para esta operação.",
+            )
+        safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
+
+    if validate_workspace:
+        if safe_workspace_uuid is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="workspace_uuid obrigatório para validação do workspace.",
+            )
+        await ensure_active_workspace(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+        )
+
     app_name: str | None = None
     extracted = None
     try:
@@ -132,6 +174,8 @@ async def trigger_orch(
         extra={
             "event": "orch.trigger.accepted",
             "request_id": get_request_id(),
+            "workspace_uuid": safe_workspace_uuid,
+            "workspace_schema": workspace_schema,
             "flow_uuid": str(flow_uuid),
             "app": app_name,
             "entity": extracted.entity,
@@ -206,6 +250,27 @@ async def trigger_orch(
         settings = get_settings()
         if settings.celery_enabled:
             try:
+                enqueue_workspace_uuid = safe_workspace_uuid
+                if enqueue_workspace_uuid is None and settings.orch_default_workspace_uuid:
+                    enqueue_workspace_uuid = normalize_workspace_uuid(settings.orch_default_workspace_uuid)
+                if enqueue_workspace_uuid is not None:
+                    advance_session_task.delay(
+                        workspace_uuid=enqueue_workspace_uuid,
+                        flow_uuid=str(flow_uuid),
+                        session_id=persisted.session_id,
+                    )
+                else:
+                    advance_session_task.delay(
+                        flow_uuid=str(flow_uuid),
+                        session_id=persisted.session_id,
+                    )
+                workflow_execution = {
+                    "mode": "async",
+                    "enqueued": True,
+                    "dispatcher": "celery",
+                    "workspace_uuid": enqueue_workspace_uuid,
+                }
+            except TypeError:
                 advance_session_task.delay(
                     flow_uuid=str(flow_uuid),
                     session_id=persisted.session_id,
@@ -214,6 +279,7 @@ async def trigger_orch(
                     "mode": "async",
                     "enqueued": True,
                     "dispatcher": "celery",
+                    "workspace_uuid": safe_workspace_uuid,
                 }
             except Exception as exc:
                 await persist_alarm(
@@ -236,6 +302,7 @@ async def trigger_orch(
                     "mode": "async",
                     "enqueued": False,
                     "dispatcher": "celery",
+                    "workspace_uuid": safe_workspace_uuid,
                 }
         else:
             try:
@@ -331,6 +398,50 @@ async def trigger_orch(
     )
 
 
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchTriggerAccepted,
+)
+async def trigger_orch_by_workspace(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    payload: dict[str, Any] = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchTriggerAccepted:
+    return await _trigger_orch_for_workspace(
+        workspace_uuid=str(workspace_uuid),
+        flow_uuid=flow_uuid,
+        payload=payload,
+        db_session=db_session,
+    )
+
+
+@router.post(
+    "/{flow_uuid}",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchTriggerAccepted,
+)
+async def trigger_orch(
+    flow_uuid: UUID,
+    payload: dict[str, Any] = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchTriggerAccepted:
+    fallback_workspace_uuid, fallback_workspace_schema = _legacy_workspace_context()
+    set_workspace_context(
+        workspace_uuid=normalize_workspace_uuid(fallback_workspace_uuid) if fallback_workspace_uuid else "legacy",
+        workspace_schema=fallback_workspace_schema,
+    )
+    return await _trigger_orch_for_workspace(
+        workspace_uuid=fallback_workspace_uuid,
+        flow_uuid=flow_uuid,
+        payload=payload,
+        db_session=db_session,
+        validate_workspace=False,
+        schema_override=fallback_workspace_schema,
+    )
+
+
 @router.get(
     "/sessions/{session_uuid}",
     response_model=OrchSessionSummary,
@@ -340,6 +451,11 @@ async def get_orch_session(
     session_uuid: UUID,
     db_session: AsyncSession = Depends(get_db_session),
 ) -> OrchSessionSummary:
+    fallback_workspace_uuid, fallback_workspace_schema = _legacy_workspace_context()
+    set_workspace_context(
+        workspace_uuid=normalize_workspace_uuid(fallback_workspace_uuid) if fallback_workspace_uuid else "legacy",
+        workspace_schema=fallback_workspace_schema,
+    )
     session_data = await get_session_by_uuid(db_session, session_uuid=str(session_uuid))
     if session_data is None:
         raise HTTPException(
@@ -360,6 +476,11 @@ async def get_sessions_by_flow(
     cursor: str | None = Query(default=None),
     db_session: AsyncSession = Depends(get_db_session),
 ) -> OrchSessionListResponse:
+    fallback_workspace_uuid, fallback_workspace_schema = _legacy_workspace_context()
+    set_workspace_context(
+        workspace_uuid=normalize_workspace_uuid(fallback_workspace_uuid) if fallback_workspace_uuid else "legacy",
+        workspace_schema=fallback_workspace_schema,
+    )
     try:
         page = await list_sessions_by_flow_uuid(
             db_session,
@@ -398,6 +519,11 @@ async def get_sessions_by_entity(
     cursor: str | None = Query(default=None),
     db_session: AsyncSession = Depends(get_db_session),
 ) -> OrchSessionListResponse:
+    fallback_workspace_uuid, fallback_workspace_schema = _legacy_workspace_context()
+    set_workspace_context(
+        workspace_uuid=normalize_workspace_uuid(fallback_workspace_uuid) if fallback_workspace_uuid else "legacy",
+        workspace_schema=fallback_workspace_schema,
+    )
     try:
         page = await list_sessions_by_entity(
             db_session,
@@ -443,6 +569,11 @@ async def get_alarms(
     cursor: str | None = Query(default=None),
     db_session: AsyncSession = Depends(get_db_session),
 ) -> OrchAlarmListResponse:
+    fallback_workspace_uuid, fallback_workspace_schema = _legacy_workspace_context()
+    set_workspace_context(
+        workspace_uuid=normalize_workspace_uuid(fallback_workspace_uuid) if fallback_workspace_uuid else "legacy",
+        workspace_schema=fallback_workspace_schema,
+    )
     try:
         page = await list_alarms(
             db_session,
@@ -461,4 +592,51 @@ async def get_alarms(
         total=len(page.items),
         items=[OrchAlarmSummary(**item) for item in page.items],
         next_cursor=page.next_cursor,
+    )
+
+
+@router.post(
+    "/admin/workspaces/{workspace_uuid}/migrate",
+    response_model=OrchMigrateWorkspaceResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def migrate_workspace_orch(
+    workspace_uuid: UUID,
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchMigrateWorkspaceResponse:
+    safe_workspace_uuid = normalize_workspace_uuid(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    result = await migrate_workspace(
+        db_session,
+        workspace_uuid=safe_workspace_uuid,
+    )
+    return OrchMigrateWorkspaceResponse(
+        workspace_uuid=result.workspace_uuid,
+        workspace_schema=result.schema,
+        applied_versions=result.applied_versions,
+        skipped_versions=result.skipped_versions,
+    )
+
+
+@router.post(
+    "/admin/workspaces/migrate-all",
+    response_model=OrchMigrateAllResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def migrate_all_workspaces_orch(
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchMigrateAllResponse:
+    results = await migrate_all_active_workspaces(db_session)
+    items = [
+        OrchMigrateWorkspaceResponse(
+            workspace_uuid=item.workspace_uuid,
+            workspace_schema=item.schema,
+            applied_versions=item.applied_versions,
+            skipped_versions=item.skipped_versions,
+        )
+        for item in results
+    ]
+    return OrchMigrateAllResponse(
+        total=len(items),
+        items=items,
     )
