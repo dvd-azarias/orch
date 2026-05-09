@@ -27,7 +27,9 @@ from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_sessions_repository import fetch_session_workflow_state, replace_session_workflow_state
+from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
+from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workflow_engine import (
     component_kind,
@@ -1277,6 +1279,171 @@ def _run_api_call(
     return "success" if 200 <= status_code < 300 else "error"
 
 
+def _unwrap_option(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("id", "value", "name", "label"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+    if isinstance(value, list) and value:
+        return _unwrap_option(value[0])
+    if isinstance(value, str):
+        token = value.strip()
+        return token or None
+    return None
+
+
+def _parse_intelligent_agent_exit_function(raw: Any) -> tuple[str | None, dict[str, Any] | None]:
+    if isinstance(raw, dict):
+        output_var_name = raw.get("output_var_name")
+        output_var = str(output_var_name).strip() if output_var_name is not None else None
+        schema = raw.get("json")
+        if isinstance(schema, dict):
+            return output_var or None, dict(schema)
+        return output_var or None, None
+    if isinstance(raw, str):
+        candidate = raw.strip()
+        if not candidate:
+            return None, None
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return None, None
+        if isinstance(parsed, dict):
+            return None, parsed
+    return None, None
+
+
+def _map_ai_output_to_schema(*, parsed: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(schema, dict) or not schema:
+        return dict(parsed)
+
+    mapped: dict[str, Any] = {}
+    for key in schema.keys():
+        if key in parsed:
+            mapped[key] = parsed.get(key)
+
+    if mapped:
+        return mapped
+
+    data = parsed.get("dados_extraidos")
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("chave") or "").strip()
+            if key in schema:
+                mapped[key] = item.get("valor")
+    if mapped:
+        return mapped
+
+    if len(schema.keys()) == 1:
+        only_key = next(iter(schema.keys()))
+        text_value = (
+            parsed.get("value")
+            or parsed.get("resultado")
+            or parsed.get("answer")
+            or parsed.get("output")
+            or parsed.get("text")
+        )
+        if text_value is not None:
+            return {only_key: text_value}
+    return {}
+
+
+async def _run_intelligent_agent(
+    *,
+    db_session: AsyncSession,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    variables = _ensure_variables(runtime_variables)
+
+    prompt_rendered = _render_value(params.get("user_prompt"), variables)
+    user_prompt = "" if prompt_rendered is None else str(prompt_rendered).strip()
+    if not user_prompt:
+        raise WorkflowExecutionError("intelligent_agent_missing_prompt", "Componente intelligent_agent sem user_prompt.")
+
+    output_var_name, output_schema = _parse_intelligent_agent_exit_function(params.get("exit_function"))
+    selected_model = _unwrap_option(params.get("llm")) or "gpt-5"
+    schema_text = json.dumps(output_schema, ensure_ascii=False) if isinstance(output_schema, dict) else None
+
+    system_prompt_parts = [
+        "Você é um agente inteligente do orquestrador.",
+        "Responda APENAS com JSON válido, sem markdown, sem texto fora do JSON.",
+    ]
+    if schema_text:
+        system_prompt_parts.append(
+            "O JSON de saída deve respeitar EXATAMENTE este schema (mesmas chaves):\n"
+            f"{schema_text}"
+        )
+    system_prompt = "\n\n".join(system_prompt_parts)
+
+    workspace_uuid: str | None = None
+    workspace_api_key: str | None = None
+    try:
+        workspace_uuid = get_current_workspace_uuid()
+    except Exception:
+        workspace_uuid = None
+    if workspace_uuid:
+        workspace_api_key = await fetch_workspace_otima_billing_api_key(
+            db_session,
+            workspace_uuid=workspace_uuid,
+        )
+
+    try:
+        llm_result = execute_otima_llm_prompt(
+            model=selected_model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            workspace_uuid=workspace_uuid,
+            workspace_api_key=workspace_api_key,
+        )
+    except Exception as exc:
+        raise WorkflowExecutionError("intelligent_agent_provider_error", f"Falha na Otima LLM: {exc}") from exc
+
+    parsed = llm_result.get("parsed_json")
+    if not isinstance(parsed, dict):
+        raise WorkflowExecutionError("intelligent_agent_invalid_response", "Resposta da LLM não retornou JSON válido.")
+
+    mapped = _map_ai_output_to_schema(parsed=parsed, schema=output_schema)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+
+    intelligent_agent_ref = str(component.get("ref_id") or component.get("id") or "intelligent_agent").strip()
+    ia_state = customs.setdefault("intelligent_agent", {})
+    if isinstance(ia_state, dict):
+        ia_state[intelligent_agent_ref] = {
+            "model": selected_model,
+            "output_var_name": output_var_name,
+            "schema": output_schema,
+            "result": mapped if mapped else parsed,
+        }
+
+    if output_var_name:
+        customs[output_var_name] = mapped if mapped else parsed
+        _set_by_path(variables, output_var_name, mapped if mapped else parsed)
+    if isinstance(mapped, dict):
+        for key, value in mapped.items():
+            if isinstance(key, str) and key.strip():
+                _set_by_path(variables, key.strip(), value)
+                customs[key.strip()] = value
+
+    runtime_variables["intelligent_agent_last_result"] = {
+        "model": selected_model,
+        "output_var_name": output_var_name,
+        "result": mapped if mapped else parsed,
+        "raw_text": llm_result.get("raw_text"),
+        "endpoint": llm_result.get("endpoint"),
+        "status_code": llm_result.get("status_code"),
+    }
+    return None
+
+
 async def execute_workflow_m2_for_session(
     db_session: AsyncSession,
     *,
@@ -1491,6 +1658,12 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                         session_id=session_id,
+                    )
+                elif kind == "intelligent_agent":
+                    branch_label = await _run_intelligent_agent(
+                        db_session=db_session,
+                        component=component,
+                        runtime_variables=runtime_variables,
                     )
                 elif kind in {"wait", "scheduling_moment", "scheduling-moment"}:
                     resolved_next = resolve_next_card_uuid(definition, next_card_uuid)

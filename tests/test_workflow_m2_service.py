@@ -10,6 +10,7 @@ from app.services.workflow_m2_service import (
     _run_code_editor,
     _run_condition,
     _run_generate_file,
+    _run_intelligent_agent,
     _run_set_variables,
 )
 
@@ -464,3 +465,90 @@ async def test_generate_file_uses_api_call_last_result_body_as_fallback(monkeypa
     assert captured["row_payload"]["cpf"] == "09089978634"
     assert captured["row_payload"]["telefone"] == "+5511988887777"
     assert captured["row_payload"]["nome"] == "Bruna"
+
+
+@pytest.mark.asyncio
+async def test_intelligent_agent_maps_schema_output_to_customs(monkeypatch) -> None:
+    runtime_variables = {"variables": {"payload": {"valor": 144}, "customs": {}}}
+    component = {
+        "ref_id": "ia-1",
+        "component_id": "intelligent_agent",
+        "parameters": {
+            "llm": {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini"},
+            "user_prompt": "Qual a raiz quadrada de {{payload.valor}}?",
+            "exit_function": {
+                "json": {"resultado_raiz_quadrada": None},
+                "output_var_name": "dados_ia",
+            },
+            "bargein": [],
+        },
+    }
+
+    async def fake_fetch_workspace_api_key(db_session, *, workspace_uuid):  # noqa: ANN001
+        return "workspace-key"
+
+    def fake_execute_otima_llm_prompt(**kwargs):  # noqa: ANN003
+        assert kwargs["model"] == "gpt-4.1-mini"
+        assert "Qual a raiz quadrada de 144?" in kwargs["user_prompt"]
+        return {
+            "status_code": 200,
+            "endpoint": "http://llm.test/v1/chat/completions",
+            "raw_text": '{"resultado_raiz_quadrada": 12}',
+            "parsed_json": {"resultado_raiz_quadrada": 12},
+            "response_json": {},
+        }
+
+    monkeypatch.setattr(workflow_m2_service, "fetch_workspace_otima_billing_api_key", fake_fetch_workspace_api_key)
+    monkeypatch.setattr(workflow_m2_service, "execute_otima_llm_prompt", fake_execute_otima_llm_prompt)
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "ba7eb0ec-e565-447c-8c11-8f870cf72a60")
+
+    branch = await _run_intelligent_agent(
+        db_session=None,
+        component=component,
+        runtime_variables=runtime_variables,
+    )
+
+    assert branch is None
+    assert runtime_variables["variables"]["customs"]["dados_ia"]["resultado_raiz_quadrada"] == 12
+    assert runtime_variables["variables"]["customs"]["resultado_raiz_quadrada"] == 12
+    assert runtime_variables["intelligent_agent_last_result"]["result"]["resultado_raiz_quadrada"] == 12
+
+
+@pytest.mark.asyncio
+async def test_intelligent_agent_raises_when_llm_response_not_json(monkeypatch) -> None:
+    runtime_variables = {"variables": {"payload": {"valor": 144}, "customs": {}}}
+    component = {
+        "ref_id": "ia-1",
+        "component_id": "intelligent_agent",
+        "parameters": {
+            "llm": {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini"},
+            "user_prompt": "Qual a raiz quadrada de {{payload.valor}}?",
+            "exit_function": {"json": {"resultado_raiz_quadrada": None}, "output_var_name": "dados_ia"},
+            "bargein": ["yes"],
+        },
+    }
+
+    async def fake_fetch_workspace_api_key(db_session, *, workspace_uuid):  # noqa: ANN001
+        return "workspace-key"
+
+    def fake_execute_otima_llm_prompt(**kwargs):  # noqa: ANN003
+        return {
+            "status_code": 200,
+            "endpoint": "http://llm.test/v1/chat/completions",
+            "raw_text": "12",
+            "parsed_json": None,
+            "response_json": {},
+        }
+
+    monkeypatch.setattr(workflow_m2_service, "fetch_workspace_otima_billing_api_key", fake_fetch_workspace_api_key)
+    monkeypatch.setattr(workflow_m2_service, "execute_otima_llm_prompt", fake_execute_otima_llm_prompt)
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "ba7eb0ec-e565-447c-8c11-8f870cf72a60")
+
+    with pytest.raises(Exception) as exc:
+        await _run_intelligent_agent(
+            db_session=None,
+            component=component,
+            runtime_variables=runtime_variables,
+        )
+
+    assert getattr(exc.value, "code", "") == "intelligent_agent_invalid_response"
