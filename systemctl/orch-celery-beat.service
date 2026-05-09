@@ -12,6 +12,7 @@ WorkingDirectory=/opt/orch
 EnvironmentFile=/etc/orch/orch.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/orch
+Environment=CELERY_GENERATE_FILE_SCAN_ENABLED=false
 
 # scheduler file fora do código para facilitar operação
 ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app beat \

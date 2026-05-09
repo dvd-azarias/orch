@@ -27,6 +27,14 @@ Garantir mudanças de schema com segurança em ambiente multi-workspace (`ws_*`)
   - `POST /v1/orch/admin/workspaces/{workspace_uuid}/migrate`
   - `POST /v1/orch/admin/workspaces/migrate-all`
 
+## Nota operacional (Fase 5 / generate_file)
+
+- A migration `0006_create_orch_generate_file_tables` cria tabelas isoladas do `orch`:
+  - `orch_generate_file_job`
+  - `orch_generate_file_row_buffer`
+  - `orch_generate_file_dispatch_audit`
+- Essas tabelas existem para evitar interferência com tabelas legadas de outras aplicações no mesmo ambiente.
+
 ## Fluxo obrigatório para criar/alterar tabelas
 
 1. Criar novo arquivo SQL em `sql/` com próximo número sequencial (`006_...sql`, `007_...sql`, etc.).

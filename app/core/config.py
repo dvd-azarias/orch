@@ -32,11 +32,20 @@ class Settings:
     celery_dispatch_queue: str
     celery_execute_queue: str
     celery_heartbeat_queue: str
+    celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
     celery_dispatch_workspace_uuid: str | None
     celery_task_always_eager: bool
     celery_health_heartbeat_key: str
     celery_health_heartbeat_ttl_seconds: int
+    celery_generate_file_enabled: bool
+    celery_generate_file_scan_enabled: bool
+    celery_generate_file_scan_interval_seconds: int
+    celery_generate_file_run_queue: str
+    celery_generate_file_scan_queue: str
+    celery_generate_file_scan_batch_size: int
+    celery_generate_file_stale_processing_minutes: int
+    celery_generate_file_workspace_uuid: str | None
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
 
@@ -154,11 +163,26 @@ def get_settings() -> Settings:
         celery_dispatch_queue=_read_env_optional("CELERY_DISPATCH_QUEUE", "orch_dispatch") or "orch_dispatch",
         celery_execute_queue=_read_env_optional("CELERY_EXECUTE_QUEUE", "orch_execute") or "orch_execute",
         celery_heartbeat_queue=_read_env_optional("CELERY_HEARTBEAT_QUEUE", "orch_heartbeat") or "orch_heartbeat",
+        celery_beat_heartbeat_enabled=_read_env_bool("CELERY_BEAT_HEARTBEAT_ENABLED", True),
         celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
         celery_dispatch_workspace_uuid=_read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
         celery_task_always_eager=_read_env_bool("CELERY_TASK_ALWAYS_EAGER", False),
         celery_health_heartbeat_key=_read_env_optional("CELERY_HEARTBEAT_KEY", "orch:beat:heartbeat") or "orch:beat:heartbeat",
         celery_health_heartbeat_ttl_seconds=_read_env_int("CELERY_HEARTBEAT_TTL_SECONDS", 30),
+        celery_generate_file_enabled=_read_env_bool("CELERY_GENERATE_FILE_ENABLED", True),
+        celery_generate_file_scan_enabled=_read_env_bool("CELERY_GENERATE_FILE_SCAN_ENABLED", True),
+        celery_generate_file_scan_interval_seconds=_read_env_int("CELERY_GENERATE_FILE_SCAN_INTERVAL_SECONDS", 10),
+        celery_generate_file_run_queue=(
+            _read_env_optional("CELERY_GENERATE_FILE_RUN_QUEUE", "orch_component_generate_file_run")
+            or "orch_component_generate_file_run"
+        ),
+        celery_generate_file_scan_queue=(
+            _read_env_optional("CELERY_GENERATE_FILE_SCAN_QUEUE", "orch_component_generate_file_scan")
+            or "orch_component_generate_file_scan"
+        ),
+        celery_generate_file_scan_batch_size=_read_env_int("CELERY_GENERATE_FILE_SCAN_BATCH_SIZE", 200),
+        celery_generate_file_stale_processing_minutes=_read_env_int("CELERY_GENERATE_FILE_STALE_PROCESSING_MINUTES", 5),
+        celery_generate_file_workspace_uuid=_read_env_optional("CELERY_GENERATE_FILE_WORKSPACE_UUID"),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
             "ORCH_DEFAULT_WORKSPACE_UUID",

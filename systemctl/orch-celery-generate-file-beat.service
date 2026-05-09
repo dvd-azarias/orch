@@ -1,0 +1,40 @@
+[Unit]
+Description=Orch Celery Beat (Component Generate File)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orch
+Group=orch
+WorkingDirectory=/opt/orch
+
+EnvironmentFile=/etc/orch/orch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/orch
+Environment=CELERY_ENABLED=true
+Environment=CELERY_BEAT_HEARTBEAT_ENABLED=false
+Environment=CELERY_BEAT_DISPATCH_ENABLED=false
+Environment=CELERY_GENERATE_FILE_ENABLED=true
+Environment=CELERY_GENERATE_FILE_SCAN_ENABLED=true
+Environment=CELERY_GENERATE_FILE_SCAN_INTERVAL_SECONDS=15
+Environment=CELERY_GENERATE_FILE_RUN_QUEUE=orch_component_generate_file_run
+Environment=CELERY_GENERATE_FILE_SCAN_QUEUE=orch_component_generate_file_scan
+
+ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app beat \
+  --loglevel=INFO \
+  --schedule=/var/lib/orch/celerybeat-generate-file-schedule
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

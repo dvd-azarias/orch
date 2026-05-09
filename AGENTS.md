@@ -48,10 +48,23 @@ Sem confirmacao explicita do usuario, nao executar:
   - `python -m app.cli migrate-workspace <workspace_uuid>`
 - Evitar procedimentos ad-hoc quando houver playbook documentado.
 - Quando houver divergencia entre execucao e documentacao, atualizar a documentacao no mesmo trabalho.
+- Regra padrao de filas (OBRIGATORIA): a menos que o usuario solicite explicitamente, NUNCA reutilizar nomes de filas que ja existam em outras aplicacoes/servicos do ambiente compartilhado.
+  - Para novos fluxos/componentes/testes locais, criar filas dedicadas com sufixo/prefixo claro de isolamento (ex.: `*_f5_local`, `*_dev_<feature>`).
+  - Objetivo: evitar impacto cruzado, backlog/ruidos de terceiros e diagnostico confuso no Celery Flower.
 - Em testes com Celery, evitar fila global compartilhada:
-  - usar filas dedicadas do `orch` (`orch_dispatch`, `orch_execute`);
+  - usar filas dedicadas e isoladas por contexto (ex.: `orch_dispatch_f5_local`, `orch_execute_f5_local`);
   - usar `CELERY_DISPATCH_WORKSPACE_UUID` quando o escopo for um workspace especifico;
   - quando necessario, usar `CELERY_BEAT_DISPATCH_ENABLED=false` para impedir dispatch global.
+- Regra de progressao entre fases (OBRIGATORIA):
+  - fases novas devem ser validadas com a stack das fases anteriores em execucao;
+  - antes de declarar regressao, repetir a subida padronizada e checar `status`;
+  - para DEV local, usar `scripts/dev_phase_stack.sh` (`start`, `status`, `smoke`, `stop`) como sequencia canonical de retomada;
+  - nao considerar fase validada sem passar pelo smoke encadeado (fluxo A + fluxo B no workspace alvo).
+- Regra de manutencao de servicos (OBRIGATORIA):
+  - apos intervencao em codigo/config da API, workers, beats ou filas, reiniciar os servicos antes de testar;
+  - em macOS, usar `scripts/dev_phase_stack.sh restart` como padrao durante desenvolvimento;
+  - `launchd` so deve ser usado quando solicitado explicitamente pelo usuario;
+  - em qualquer fase futura (F6+), manter as fases homologadas anteriores ativas durante validacao real.
 
 ## Referencias operacionais
 

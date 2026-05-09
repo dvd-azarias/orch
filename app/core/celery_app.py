@@ -29,25 +29,31 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-beat_schedule: dict[str, dict[str, Any]] = {
-    "orch-beat-heartbeat": {
+beat_schedule: dict[str, dict[str, Any]] = {}
+if settings.celery_beat_heartbeat_enabled:
+    beat_schedule["orch-beat-heartbeat"] = {
         "task": "app.tasks.workflow.beat_heartbeat",
         "schedule": max(2, settings.celery_dispatch_interval_seconds),
         "options": {"queue": settings.celery_heartbeat_queue},
-    },
-}
+    }
 if settings.celery_beat_dispatch_enabled:
     beat_schedule["orch-dispatch-pending-sessions"] = {
         "task": "app.tasks.workflow.dispatch_pending_sessions",
         "schedule": max(1, settings.celery_dispatch_interval_seconds),
         "options": {"queue": settings.celery_dispatch_queue},
     }
+if settings.celery_generate_file_enabled and settings.celery_generate_file_scan_enabled:
+    beat_schedule["orch-generate-file-scan-due"] = {
+        "task": "app.tasks.component_generate_file.scan_due",
+        "schedule": max(5, settings.celery_generate_file_scan_interval_seconds),
+        "options": {"queue": settings.celery_generate_file_scan_queue},
+    }
 
 celery_app = Celery(
     "orch",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.workflow_tasks"],
+    include=["app.tasks.workflow_tasks", "app.tasks.generate_file_tasks"],
 )
 
 celery_app.conf.update(
@@ -62,6 +68,8 @@ celery_app.conf.update(
         "app.tasks.workflow.dispatch_pending_sessions": {"queue": settings.celery_dispatch_queue},
         "app.tasks.workflow.beat_heartbeat": {"queue": settings.celery_heartbeat_queue},
         "app.tasks.workflow.advance_session": {"queue": settings.celery_execute_queue},
+        "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},
+        "app.tasks.component_generate_file.run": {"queue": settings.celery_generate_file_run_queue},
     },
     beat_schedule=beat_schedule,
 )

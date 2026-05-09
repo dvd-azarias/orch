@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 import app.services.workflow_m2_service as workflow_m2_service
-from app.services.workflow_m2_service import _compute_frozen_until, _run_api_call, _run_code_editor, _run_condition, _run_set_variables
+from app.services.workflow_m2_service import (
+    _compute_frozen_until,
+    _run_api_call,
+    _run_code_editor,
+    _run_condition,
+    _run_generate_file,
+    _run_set_variables,
+)
 
 
 def test_set_variables_renders_template_into_runtime() -> None:
@@ -235,3 +243,111 @@ def test_api_call_retry_exhausted_returns_error(monkeypatch) -> None:
     assert calls["n"] == 2
     assert runtime_variables["api_call_last_result"]["attempts"] == 2
     assert runtime_variables["variables"]["customs"]["api_status"] == 503
+
+
+@pytest.mark.asyncio
+async def test_generate_file_enqueue_success_maps_runtime(monkeypatch) -> None:
+    runtime_variables = {"variables": {"customs": {"valor_recebido": 114}, "payload": {"external_id": "x1"}}}
+    component = {
+        "parameters": {
+            "destination_type": "sftp",
+            "host": "storage.otima.io",
+            "port": 45884,
+            "user": "usr",
+            "password": "pwd",
+            "destination_path": "exports",
+            "file_name_template": "arquivo_teste",
+            "format_type": "csv",
+            "write_mode": "overwrite",
+            "scheduling_run_mode": "agendado",
+            "scheduling_date": "2099-01-01",
+            "scheduling_time_agendado": "00:00",
+            "include_header": True,
+            "fields_mapping": [
+                {"column": "external_id", "source": "payload.external_id", "data_type": "text"},
+                {"column": "valor", "source": "customs.valor_recebido", "data_type": "integer"},
+            ],
+            "response": {
+                "status": "gf_status",
+                "path": "gf_path",
+                "file_name": "gf_name",
+                "md5": "gf_md5",
+                "error": "gf_error",
+            },
+            "output_var_prefix": "arquivo",
+        }
+    }
+
+    captured = {}
+
+    async def fake_upsert_job_and_buffer_row(
+        db_session, *, workspace_uuid, flow_id, component_ref_id, session_id, config, row_payload
+    ):  # noqa: ANN001
+        captured.update(
+            {
+                "workspace_uuid": workspace_uuid,
+                "flow_id": flow_id,
+                "component_ref_id": component_ref_id,
+                "session_id": session_id,
+                "config": config,
+                "row_payload": row_payload,
+            }
+        )
+        return {"job_id": "job-123", "queued_row": True, "mode": "agendado", "next_run_at": "2099-01-01T03:00:00+00:00"}
+
+    monkeypatch.setattr(workflow_m2_service, "upsert_job_and_buffer_row", fake_upsert_job_and_buffer_row)
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "ba7eb0ec-e565-447c-8c11-8f870cf72a60")
+
+    branch = await _run_generate_file(
+        db_session=None,
+        flow_uuid="2cb9482a-131e-4b2a-8507-484745661836",
+        component=component,
+        runtime_variables=runtime_variables,
+        session_id=77,
+    )
+
+    assert branch == "success"
+    assert captured["workspace_uuid"] is not None
+    assert captured["flow_id"] == "2cb9482a-131e-4b2a-8507-484745661836"
+    assert captured["session_id"] == 77
+
+    result = runtime_variables["generate_file_last_result"]
+    customs = runtime_variables["variables"]["customs"]
+    assert result["destination_type"] == "sftp"
+    assert result["status"] == "queued"
+    assert result["job_id"] == "job-123"
+    assert customs["gf_status"] == "queued"
+    assert customs["gf_path"] is None
+    assert customs["gf_name"] == result["file_name"]
+    assert customs["gf_md5"] is None
+    assert customs["gf_error"] is None
+    assert customs["arquivo"]["job_id"] == "job-123"
+
+
+@pytest.mark.asyncio
+async def test_generate_file_missing_mapping_raises() -> None:
+    runtime_variables = {"variables": {"customs": {}, "payload": {}}}
+    component = {
+        "parameters": {
+            "destination_type": "sftp",
+            "host": "storage.otima.io",
+            "port": 45884,
+            "user": "usr",
+            "password": "pwd",
+            "destination_path": "exports",
+            "file_name_template": "arquivo_teste",
+            "format_type": "csv",
+        }
+    }
+
+    try:
+        await _run_generate_file(
+            db_session=None,
+            flow_uuid="2cb9482a-131e-4b2a-8507-484745661836",
+            component=component,
+            runtime_variables=runtime_variables,
+            session_id=10,
+        )
+        assert False, "esperava exceção por mapping ausente"
+    except Exception as exc:
+        assert getattr(exc, "code", "") == "generate_file_missing_mapping"
