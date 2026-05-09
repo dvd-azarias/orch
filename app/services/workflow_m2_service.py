@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_sessions_repository import fetch_session_workflow_state, replace_session_workflow_state
 from app.services.session_metrics_service import persist_session_metrics
@@ -706,7 +707,7 @@ async def execute_workflow_m2_for_session(
             next_card_uuid=None,
         )
 
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     max_steps = _read_max_steps(settings)
     execution_started_at = datetime.now(timezone.utc)
     execution_started_perf = time.perf_counter()

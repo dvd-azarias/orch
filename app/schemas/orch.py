@@ -82,3 +82,17 @@ class OrchErrorResponse(BaseModel):
     code: str
     detail: str
     request_id: str | None
+
+
+class OrchMigrateWorkspaceResponse(BaseModel):
+    api_version: str = "v1"
+    workspace_uuid: str
+    workspace_schema: str
+    applied_versions: list[str]
+    skipped_versions: list[str]
+
+
+class OrchMigrateAllResponse(BaseModel):
+    api_version: str = "v1"
+    total: int
+    items: list[OrchMigrateWorkspaceResponse]

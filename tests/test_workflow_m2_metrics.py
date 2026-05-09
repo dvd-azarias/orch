@@ -179,7 +179,15 @@ async def test_deve_persistir_metricas_por_card_e_workflow(monkeypatch) -> None:
     inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(flow_uuid=flow_uuid, definition=definition)
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
-    monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=False))
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=False,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
 
     try:
         session_factory = get_session_factory()

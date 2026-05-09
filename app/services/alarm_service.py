@@ -5,9 +5,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.request_context import get_request_id
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_sessions_alarms_repository import insert_alarm
 
 logger = get_logger(__name__)
@@ -27,8 +27,7 @@ async def persist_alarm(
     entity_address: str | None = None,
     session_uuid: str | None = None,
 ) -> None:
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     request_id = get_request_id()
 
     try:

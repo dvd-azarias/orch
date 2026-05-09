@@ -5,8 +5,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_session_metrics_repository import insert_session_metrics
 
 logger = get_logger(__name__)
@@ -19,8 +19,7 @@ async def persist_session_metrics(
 ) -> None:
     if not metrics:
         return
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     try:
         tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
         async with tx_context:

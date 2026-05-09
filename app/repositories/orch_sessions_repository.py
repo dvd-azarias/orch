@@ -290,6 +290,7 @@ async def upsert_active_session(
         whatsapp_timestamps=whatsapp_timestamps,
         dialer_timestamps=dialer_timestamps,
     )
+    allow_finished_reuse_by_session_id = app_name in {"WhatsApp", "DialerApp"}
 
     await db_session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -387,6 +388,7 @@ async def upsert_active_session(
                     AND entity_type = :entity_type
                     AND entity_address = :entity_address
                     AND entity_session_id = :entity_session_id
+                    AND (:allow_finished_reuse_by_session_id OR state <> 3)
                 ORDER BY created_at DESC
                 LIMIT 1
             )
@@ -399,6 +401,7 @@ async def upsert_active_session(
             "entity_type": entity_type,
             "entity_address": entity_address,
             "entity_session_id": entity_session_id,
+            "allow_finished_reuse_by_session_id": allow_finished_reuse_by_session_id,
             "entity_origin_app": app_name,
             "state": state_update.state,
             "ended_at": state_update.ended_at,

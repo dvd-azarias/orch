@@ -201,7 +201,15 @@ async def test_deve_executar_workflow_m2_ate_finish_por_trigger_genericapp(monke
     inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(flow_uuid=flow_uuid, definition=definition)
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
-    monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=True))
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
 
     enqueued: list[dict] = []
 
@@ -279,7 +287,15 @@ async def test_deve_congelar_execucao_em_wait_por_trigger_genericapp(monkeypatch
     inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(flow_uuid=flow_uuid, definition=definition)
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
-    monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=True))
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
     monkeypatch.setattr(orch_api.advance_session_task, "delay", lambda **kwargs: None)
 
     payload = {"external_id": f"generic-wait-{flow_uuid[:8]}", "valor_recebido": 7}
@@ -343,7 +359,15 @@ async def test_deve_preservar_bootstrap_e_respeitar_frozen_until_em_trigger_segu
     inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(flow_uuid=flow_uuid, definition=definition)
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
-    monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=True))
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
     monkeypatch.setattr(orch_api.advance_session_task, "delay", lambda **kwargs: None)
 
     payload = {"external_id": f"generic-rewait-{flow_uuid[:8]}", "valor_recebido": 7}

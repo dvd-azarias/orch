@@ -5,7 +5,9 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
+from types import SimpleNamespace
 
+import app.api.v1.orch as orch_api
 import app.services.workflow_m2_service as workflow_m2_service
 import app.services.workflow_runtime_service as workflow_runtime_service
 from app.api.v1.orch import trigger_orch
@@ -197,6 +199,15 @@ async def test_deve_persistir_warning_quando_componente_nao_suportado_no_m2(monk
     inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(flow_uuid=flow_uuid, definition=definition)
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=False,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
     before = await _count_alarm_by_code(flow_uuid=flow_uuid, code="workflow_m2_component_not_supported")
 
     try:
@@ -249,6 +260,15 @@ async def test_deve_persistir_warning_quando_m2_atinge_max_steps(monkeypatch) ->
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_max_steps", lambda _settings: 2)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=False,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
     before = await _count_alarm_by_code(flow_uuid=flow_uuid, code="workflow_m2_max_steps_reached")
 
     try:

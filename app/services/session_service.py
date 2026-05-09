@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_sessions_repository import PersistResult, upsert_active_session
 
 
@@ -26,8 +26,7 @@ async def persist_session(
     extracted: dict[str, Any],
     payload: dict[str, Any],
 ) -> SessionPersistResponse:
-    settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
 
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:

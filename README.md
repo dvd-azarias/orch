@@ -146,7 +146,32 @@ source .venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
 ```
 
+## Comandos de migration (CLI)
+
+Aplicar migrations do `orch` em todos os workspaces ativos:
+
+```bash
+source .venv/bin/activate
+python -m app.cli migrate-all
+```
+
+Aplicar migrations do `orch` em um workspace específico:
+
+```bash
+source .venv/bin/activate
+python -m app.cli migrate-workspace <workspace_uuid>
+```
+
+Guia obrigatório de processo (cirúrgico) para mudanças estruturais:
+- `docs/MIGRATIONS_PLAYBOOK.md`
+
 ## Testes (concorrência de eventos)
+
+### ATENCAO (OBRIGATORIO)
+
+- TESTES COM DEPENDENCIA DE REDE/DB/API EXTERNA DEVEM RODAR FORA DA SANDBOX.
+- SE A SANDBOX BLOQUEAR ACESSO, PEDIR ELEVACAO E REEXECUTAR.
+- SEM EVIDENCIA EXTERNA (EX.: POST RECEBIDO NA API DE DESTINO), O TESTE NAO E CONSIDERADO CONCLUIDO.
 
 ```bash
 source .venv/bin/activate
@@ -584,13 +609,34 @@ Migrar a movimentação de cards do workflow para execução assíncrona com Cel
   - `CELERY_RESULT_BACKEND` (opcional; padrão usa `REDIS_URL`)
   - `CELERY_DISPATCH_INTERVAL_SECONDS` (padrão: `2`)
   - `CELERY_DISPATCH_BATCH_SIZE` (padrão: `100`)
+  - `CELERY_DISPATCH_QUEUE` (padrão: `orch_dispatch`)
+  - `CELERY_EXECUTE_QUEUE` (padrão: `orch_execute`)
+  - `CELERY_HEARTBEAT_QUEUE` (padrão: `orch_heartbeat`)
+  - `CELERY_BEAT_DISPATCH_ENABLED` (padrão: `true`; quando `false`, beat envia somente heartbeat)
+  - `CELERY_DISPATCH_WORKSPACE_UUID` (opcional; restringe dispatcher a um workspace específico)
   - `CELERY_TASK_ALWAYS_EAGER` (padrão: `false`; útil para testes locais)
   - `CELERY_HEARTBEAT_KEY` (padrão: `orch:beat:heartbeat`)
   - `CELERY_HEARTBEAT_TTL_SECONDS` (padrão: `30`)
 - Subir worker:
-  - `celery -A app.core.celery_app:celery_app worker -l INFO`
+  - `celery -A app.core.celery_app:celery_app worker -Q orch_dispatch,orch_execute,orch_heartbeat -l INFO`
 - Subir beat:
   - `celery -A app.core.celery_app:celery_app beat -l INFO`
+
+#### Modo controlado para testes exclusivos por workspace
+
+- Definir `CELERY_DISPATCH_WORKSPACE_UUID=<workspace_uuid>` para evitar varredura global.
+- Para teste manual sem gerar dispatch automático global:
+  - `CELERY_BEAT_DISPATCH_ENABLED=false`
+  - executar somente triggers da rota com workspace: `POST /v1/orch/{workspace_uuid}/{flow_uuid}`.
+
+#### Regra operacional de filas para Beat/Tasks
+
+- Tasks de Beat devem usar fila naturalmente relacionada, porém separada da fila de execução principal.
+- Regra recomendada:
+  - dispatch em `orch_dispatch`;
+  - execução de sessão em `orch_execute`;
+  - heartbeat/rotinas de beat em `orch_heartbeat`.
+- Objetivo: evitar ruído operacional, reduzir confusão de suporte e melhorar diagnóstico em produção.
 
 ### Healthchecks operacionais (fase 3)
 
@@ -618,3 +664,55 @@ Migrar a movimentação de cards do workflow para execução assíncrona com Cel
   - Ação: inspecionar `orch_sessions_alarms` e logs de worker; validar broker/redis.
 - **Recovery após indisponibilidade**
   - Estratégia: ao voltar worker/beat, o dispatcher retoma sessões `pending` elegíveis automaticamente.
+
+## Política Git de Trabalho (acordo operacional)
+
+Para proteger os resultados já alcançados e profissionalizar a evolução do projeto:
+
+- O agente (Codex) é quem executa os comandos Git no dia a dia.
+- Antes de qualquer ação que altere histórico/local/remoto, o agente deve pedir sua confirmação explícita.
+- Sem confirmação, o agente não deve executar:
+  - criação de branch;
+  - commit;
+  - push;
+  - merge/rebase;
+  - tag/release;
+  - reset/revert.
+
+### Fluxo padrão por mudança
+
+1. Atualizar `main` local.
+2. Criar branch de trabalho (`feat/...`, `fix/...`, `chore/...`).
+3. Implementar e validar.
+4. Commitar na branch.
+5. Push da branch.
+6. Abrir PR para `main`.
+7. Merge apenas após validação/review.
+
+## Planejamento — Fase 4 (checklist)
+
+### Objetivo da fase 4
+
+Adaptar o `orch` para arquitetura por workspace/schema (`ws_{workspace_uuid}`), removendo dependência de schema fixo por `.env` no caminho principal da API.
+
+### Checklist técnico (fase 4)
+
+- [x] Ajustar endpoint principal para receber `workspace_uuid`:
+  - `POST /v1/orch/{workspace_uuid}/{flow_uuid}`
+- [x] Manter compatibilidade temporária com rota legada (`/v1/orch/{flow_uuid}`) usando workspace padrão do `.env`.
+- [x] Introduzir contexto de workspace/schema por request/task.
+- [x] Resolver schema dinamicamente com prefixo `ws_`.
+- [x] Validar workspace ativo em `target.workspaces` antes de processar trigger/migrate.
+- [x] Implementar controle de migração próprio em `orch_alembic_version` (sem tocar `alembic_version` da outra aplicação).
+- [x] Criar endpoint para migrate por workspace:
+  - `POST /v1/orch/admin/workspaces/{workspace_uuid}/migrate`
+- [x] Criar endpoint para migrate all workspaces ativos:
+  - `POST /v1/orch/admin/workspaces/migrate-all`
+- [x] Incluir migration incremental para suportar métricas assíncronas (`dispatch`/`executor`).
+- [x] Executar migrate-all em todos os workspaces ativos do ambiente-alvo.
+- [x] Isolar filas do Celery por responsabilidade (dispatch/execute/heartbeat) para operação clara e suporte em produção.
+
+### Variáveis (fase 4)
+
+- `ORCH_LAB_WORKSPACE_UUID` (LAB atual)
+- `ORCH_DEFAULT_WORKSPACE_UUID` (fallback da rota legada)

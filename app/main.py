@@ -14,6 +14,7 @@ from app.core.config import get_settings
 from app.core.database import get_db_session
 from app.core.logging import configure_logging, get_logger
 from app.core.request_context import get_request_id, set_request_id
+from app.core.workspace import workspace_schema_from_uuid
 from app.services.celery_health_service import check_celery_health
 
 configure_logging()
@@ -123,6 +124,9 @@ async def health_ready(
 ) -> dict[str, str | bool]:
     settings = get_settings()
     schema = settings.database_schema
+    fallback_workspace_uuid = settings.orch_default_workspace_uuid or settings.orch_lab_workspace_uuid
+    if fallback_workspace_uuid:
+        schema = workspace_schema_from_uuid(fallback_workspace_uuid)
 
     try:
         safe_schema = schema.replace('"', '""')

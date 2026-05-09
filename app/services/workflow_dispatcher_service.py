@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_sessions_repository import (
     claim_pending_sessions_for_dispatch,
     mark_session_finished,
@@ -31,7 +32,7 @@ async def claim_pending_sessions(
     db_session: AsyncSession,
 ) -> list[dict[str, str | int]]:
     settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:
         await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
@@ -62,7 +63,7 @@ async def advance_session_once(
     session_id: int,
 ) -> str:
     settings = get_settings()
-    safe_schema = settings.database_schema.replace('"', '""')
+    safe_schema = get_current_workspace_schema().replace('"', '""')
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:
         await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))

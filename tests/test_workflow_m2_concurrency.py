@@ -180,7 +180,15 @@ export default async function main(ctx) {
 
     monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: False)
-    monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=False))
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=False,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
 
     original_replace = workflow_m2_service.replace_session_workflow_state
 

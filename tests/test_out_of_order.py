@@ -169,3 +169,56 @@ async def test_dialer_terminal_before_started_reuses_same_finished_session() -> 
     assert int(row["min_state"]) == 3
     assert bool(row["has_busy"]) is True
     assert bool(row["has_ended"]) is True
+
+
+@pytest.mark.asyncio
+async def test_generic_finished_session_with_same_external_id_creates_new_session() -> None:
+    flow_uuid = uuid4()
+    payload = {"external_id": "generic-test-1412", "valor_recebido": 100}
+
+    session_factory = get_session_factory()
+
+    async with session_factory() as s1:
+        first = await trigger_orch(flow_uuid=flow_uuid, payload=payload, db_session=s1)
+
+    schema = get_settings().database_schema.replace('"', '""')
+    async with session_factory() as mark_finished_session:
+        await mark_finished_session.execute(
+            text(
+                f'''
+                UPDATE "{schema}".orch_sessions
+                SET state = 3,
+                    ended_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :session_id
+                '''
+            ),
+            {"session_id": first.session_id},
+        )
+        await mark_finished_session.commit()
+
+    async with session_factory() as s2:
+        second = await trigger_orch(flow_uuid=flow_uuid, payload=payload, db_session=s2)
+
+    async with session_factory() as db_session:
+        row = (
+            await db_session.execute(
+                text(
+                    f'''
+                    SELECT COUNT(*) AS total,
+                           COUNT(*) FILTER (WHERE state = 3) AS finished_total
+                    FROM "{schema}".orch_sessions
+                    WHERE flow_uuid = :flow_uuid
+                      AND entity = :entity
+                      AND entity_type = 'api_request'
+                      AND entity_address = :entity
+                    '''
+                ),
+                {"flow_uuid": str(flow_uuid), "entity": "generic-test-1412"},
+            )
+        ).mappings().one()
+
+    assert first.session_id != second.session_id
+    assert second.session_created is True
+    assert int(row["total"]) == 2
+    assert int(row["finished_total"]) == 1
