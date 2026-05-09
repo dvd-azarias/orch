@@ -130,9 +130,9 @@ def _render_value(template: Any, variables: dict[str, Any]) -> Any:
             if resolved is None:
                 customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
                 payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
-                resolved = customs.get(token)
+                resolved = _get_by_dot_path(customs, token)
                 if resolved is None:
-                    resolved = payload.get(token)
+                    resolved = _get_by_dot_path(payload, token)
             return resolved
 
         rendered = template
@@ -142,9 +142,9 @@ def _render_value(template: Any, variables: dict[str, Any]) -> Any:
             if value is None:
                 customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
                 payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
-                value = customs.get(token)
+                value = _get_by_dot_path(customs, token)
                 if value is None:
-                    value = payload.get(token)
+                    value = _get_by_dot_path(payload, token)
             rendered = rendered.replace(match.group(0), "" if value is None else str(value))
         return rendered
 
@@ -318,9 +318,9 @@ def _run_condition(component: dict[str, Any], runtime_variables: dict[str, Any])
                     if actual is None:
                         customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
                         payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
-                        actual = customs.get(field)
+                        actual = _get_by_dot_path(customs, field)
                         if actual is None:
-                            actual = payload.get(field)
+                            actual = _get_by_dot_path(payload, field)
             results.append(_compare_values(actual, op, expected))
 
         if not results:
@@ -596,7 +596,42 @@ def _resolve_generate_file_source(source: str, variables: dict[str, Any]) -> Any
         return resolved
     customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
     payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
-    return customs.get(candidate, payload.get(candidate, candidate))
+    resolved = _get_by_dot_path(customs, candidate)
+    if resolved is not None:
+        return resolved
+    resolved = _get_by_dot_path(payload, candidate)
+    if resolved is not None:
+        return resolved
+    return candidate
+
+
+def _build_generate_file_resolution_scope(
+    *,
+    runtime_variables: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
+    customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
+
+    scope: dict[str, Any] = dict(variables)
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            scope.setdefault(key, value)
+        scope["payload"] = payload
+    if isinstance(customs, dict):
+        for key, value in customs.items():
+            scope[key] = value
+        scope["customs"] = customs
+
+    api_last_result = runtime_variables.get("api_call_last_result")
+    if isinstance(api_last_result, dict):
+        api_body = api_last_result.get("body")
+        if isinstance(api_body, dict):
+            scope.setdefault("api_body", api_body)
+            if isinstance(customs, dict):
+                customs.setdefault("api_body", api_body)
+
+    return scope
 
 
 def _serialize_generate_file_rows(
@@ -762,6 +797,10 @@ async def _run_generate_file(
 ) -> str:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_generate_file_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
 
     raw_mapping = params.get("fields_mapping") or params.get("mapping") or []
     mapping_fields = _normalize_generate_file_mapping(raw_mapping)
@@ -807,14 +846,16 @@ async def _run_generate_file(
     else:
         raise WorkflowExecutionError("generate_file_invalid_compression", "Compressão não suportada.")
 
-    file_name_raw = _render_value(params.get("file_name_template") or params.get("file_name") or "", variables)
+    file_name_raw = _render_value(params.get("file_name_template") or params.get("file_name") or "", resolution_scope)
     file_name = _safe_filename("" if file_name_raw is None else str(file_name_raw))
     file_name = _ensure_file_extension(file_name, format_type)
     if write_mode == "create_per_session":
         file_name = _append_session_suffix(file_name, session_id)
 
     destination_path = _safe_relpath(
-        "" if _render_value(params.get("destination_path") or "", variables) is None else str(_render_value(params.get("destination_path") or "", variables))
+        ""
+        if _render_value(params.get("destination_path") or "", resolution_scope) is None
+        else str(_render_value(params.get("destination_path") or "", resolution_scope))
     )
     if_exists_policy = str(_unwrap_option(params.get("if_exists_policy") or "replace")).strip().lower()
     if if_exists_policy not in {"replace", "fail", "rename"}:
@@ -822,7 +863,7 @@ async def _run_generate_file(
 
     row: dict[str, Any] = {}
     for field in mapping_fields:
-        raw_value = _resolve_generate_file_source(field["source"], variables)
+        raw_value = _resolve_generate_file_source(field["source"], resolution_scope)
         row[field["column"]] = _coerce_generate_file_value(raw_value, field["data_type"])
 
     file_text, lines_written = _serialize_generate_file_rows(
@@ -832,10 +873,10 @@ async def _run_generate_file(
         include_header=include_header,
         line_break=line_break,
     )
-    host = str(_render_value(params.get("host"), variables) or "").strip() or None
-    port = _coerce_int(_render_value(params.get("port"), variables), 22)
-    username = str(_render_value(params.get("user") or params.get("username"), variables) or "").strip() or None
-    password = _resolve_secret_reference(_render_value(params.get("password"), variables))
+    host = str(_render_value(params.get("host"), resolution_scope) or "").strip() or None
+    port = _coerce_int(_render_value(params.get("port"), resolution_scope), 22)
+    username = str(_render_value(params.get("user") or params.get("username"), resolution_scope) or "").strip() or None
+    password = _resolve_secret_reference(_render_value(params.get("password"), resolution_scope))
     if destination_type == "sftp" and (not host or not username or not password):
         raise WorkflowExecutionError("generate_file_missing_sftp_credentials", "Credenciais SFTP incompletas.")
 
@@ -1199,18 +1240,29 @@ def _run_api_call(
     body_var = response_map.get("body")
     headers_var = response_map.get("headers")
     error_var = response_map.get("error")
+    parsed_body: Any = None
+    if resp_body:
+        try:
+            parsed_body = json.loads(resp_body)
+        except Exception:
+            parsed_body = resp_body
 
     if isinstance(status_var, str) and status_var.strip():
-        customs[status_var.strip()] = status_code
+        target = status_var.strip()
+        customs[target] = status_code
+        _set_by_path(variables, target, status_code)
     if isinstance(body_var, str) and body_var.strip():
-        try:
-            customs[body_var.strip()] = json.loads(resp_body) if resp_body else None
-        except Exception:
-            customs[body_var.strip()] = resp_body
+        target = body_var.strip()
+        customs[target] = parsed_body
+        _set_by_path(variables, target, parsed_body)
     if isinstance(headers_var, str) and headers_var.strip():
-        customs[headers_var.strip()] = resp_headers
+        target = headers_var.strip()
+        customs[target] = resp_headers
+        _set_by_path(variables, target, resp_headers)
     if isinstance(error_var, str) and error_var.strip():
-        customs[error_var.strip()] = error_msg
+        target = error_var.strip()
+        customs[target] = error_msg
+        _set_by_path(variables, target, error_msg)
 
     runtime_variables["api_call_last_result"] = {
         "status_code": status_code,
@@ -1218,6 +1270,8 @@ def _run_api_call(
         "error": error_msg,
         "attempts": attempt,
         "max_attempts": max_attempts,
+        "body": parsed_body,
+        "headers": resp_headers,
     }
 
     return "success" if 200 <= status_code < 300 else "error"

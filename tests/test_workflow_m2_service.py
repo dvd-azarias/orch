@@ -170,6 +170,9 @@ def test_api_call_maps_response_into_customs(monkeypatch) -> None:
     assert customs["api_body"] == {"ok": True}
     assert customs["api_headers"] == {"x-a": "b"}
     assert customs["api_error"] is None
+    assert runtime_variables["variables"]["api_body"] == {"ok": True}
+    assert runtime_variables["api_call_last_result"]["body"] == {"ok": True}
+    assert runtime_variables["api_call_last_result"]["headers"] == {"x-a": "b"}
 
 
 def test_api_call_retry_succeeds_after_transient_failures(monkeypatch) -> None:
@@ -351,3 +354,113 @@ async def test_generate_file_missing_mapping_raises() -> None:
         assert False, "esperava exceção por mapping ausente"
     except Exception as exc:
         assert getattr(exc, "code", "") == "generate_file_missing_mapping"
+
+
+@pytest.mark.asyncio
+async def test_generate_file_resolves_dot_paths_inside_templates(monkeypatch) -> None:
+    runtime_variables = {
+        "variables": {
+            "payload": {"file": {"content": {"cpf": "09089978634"}}},
+            "customs": {"api_body": {"name": "Ana", "phone": "+5511999999999"}},
+        }
+    }
+    component = {
+        "parameters": {
+            "destination_type": "sftp",
+            "host": "storage.otima.io",
+            "port": 45884,
+            "user": "usr",
+            "password": "pwd",
+            "destination_path": "exports",
+            "file_name_template": "arquivo_teste",
+            "format_type": "csv",
+            "write_mode": "overwrite",
+            "scheduling_run_mode": "agendado",
+            "scheduling_date": "2099-01-01",
+            "scheduling_time_agendado": "00:00",
+            "include_header": True,
+            "mapping": [
+                {"key": "cpf", "value": "{{payload.file.content.cpf}}"},
+                {"key": "telefone", "value": "{{customs.api_body.phone}}"},
+                {"key": "nome", "value": "{{api_body.name}}"},
+            ],
+        }
+    }
+
+    captured = {}
+
+    async def fake_upsert_job_and_buffer_row(
+        db_session, *, workspace_uuid, flow_id, component_ref_id, session_id, config, row_payload
+    ):  # noqa: ANN001
+        captured["row_payload"] = row_payload
+        return {"job_id": "job-123", "queued_row": True, "mode": "agendado", "next_run_at": "2099-01-01T03:00:00+00:00"}
+
+    monkeypatch.setattr(workflow_m2_service, "upsert_job_and_buffer_row", fake_upsert_job_and_buffer_row)
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "ba7eb0ec-e565-447c-8c11-8f870cf72a60")
+
+    branch = await _run_generate_file(
+        db_session=None,
+        flow_uuid="2cb9482a-131e-4b2a-8507-484745661836",
+        component=component,
+        runtime_variables=runtime_variables,
+        session_id=77,
+    )
+
+    assert branch == "success"
+    assert captured["row_payload"]["cpf"] == "09089978634"
+    assert captured["row_payload"]["telefone"] == "+5511999999999"
+    assert captured["row_payload"]["nome"] == "Ana"
+
+
+@pytest.mark.asyncio
+async def test_generate_file_uses_api_call_last_result_body_as_fallback(monkeypatch) -> None:
+    runtime_variables = {
+        "variables": {"payload": {"file": {"content": {"cpf": "09089978634"}}}, "customs": {}},
+        "api_call_last_result": {"body": {"name": "Bruna", "phone": "+5511988887777"}},
+    }
+    component = {
+        "parameters": {
+            "destination_type": "sftp",
+            "host": "storage.otima.io",
+            "port": 45884,
+            "user": "usr",
+            "password": "pwd",
+            "destination_path": "exports",
+            "file_name_template": "arquivo_teste",
+            "format_type": "csv",
+            "write_mode": "overwrite",
+            "scheduling_run_mode": "agendado",
+            "scheduling_date": "2099-01-01",
+            "scheduling_time_agendado": "00:00",
+            "include_header": True,
+            "mapping": [
+                {"key": "cpf", "value": "{{file.content.cpf}}"},
+                {"key": "telefone", "value": "{{api_body.phone}}"},
+                {"key": "nome", "value": "{{api_body.name}}"},
+            ],
+        }
+    }
+
+    captured = {}
+
+    async def fake_upsert_job_and_buffer_row(
+        db_session, *, workspace_uuid, flow_id, component_ref_id, session_id, config, row_payload
+    ):  # noqa: ANN001
+        captured["row_payload"] = row_payload
+        return {"job_id": "job-123", "queued_row": True, "mode": "agendado", "next_run_at": "2099-01-01T03:00:00+00:00"}
+
+    monkeypatch.setattr(workflow_m2_service, "upsert_job_and_buffer_row", fake_upsert_job_and_buffer_row)
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "ba7eb0ec-e565-447c-8c11-8f870cf72a60")
+
+    branch = await _run_generate_file(
+        db_session=None,
+        flow_uuid="2cb9482a-131e-4b2a-8507-484745661836",
+        component=component,
+        runtime_variables=runtime_variables,
+        session_id=77,
+    )
+
+    assert branch == "success"
+    assert captured["row_payload"]["cpf"] == "09089978634"
+    assert captured["row_payload"]["telefone"] == "+5511988887777"
+    assert captured["row_payload"]["nome"] == "Bruna"
