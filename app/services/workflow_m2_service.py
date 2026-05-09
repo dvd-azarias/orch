@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import csv
+import gzip
+import hashlib
+import io
 import json
+import os
+import posixpath
 import re
 import subprocess
 import textwrap
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
@@ -17,9 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.core.workspace import get_current_workspace_schema
+from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_sessions_repository import fetch_session_workflow_state, replace_session_workflow_state
+from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workflow_engine import (
     component_kind,
@@ -398,6 +406,530 @@ def _coerce_timeout_ms(raw_value: Any, default: int = 400) -> int:
     except Exception:
         parsed = default
     return max(100, min(10_000, parsed))
+
+
+def _unwrap_option(value: Any) -> Any:
+    if isinstance(value, dict):
+        for key in ("id", "value", "name", "label"):
+            if key in value and value.get(key) is not None:
+                return value.get(key)
+    if isinstance(value, list) and value:
+        return _unwrap_option(value[0])
+    return value
+
+
+def _normalize_delimiter(value: Any) -> str:
+    raw = str(_unwrap_option(value) or "").strip().lower()
+    if raw in {"", "pipe", "|"}:
+        return "|"
+    if raw in {"virgula", "vírgula", ",", "comma"}:
+        return ","
+    if raw in {"ponto e virgula", "ponto-e-virgula", ";", "semicolon"}:
+        return ";"
+    if raw in {"tab", "\\t", "t"}:
+        return "\t"
+    return str(_unwrap_option(value) or "|")
+
+
+def _normalize_line_break(value: Any) -> str:
+    raw = str(_unwrap_option(value) or "").strip().upper()
+    if raw in {"CRLF", "WINDOWS"}:
+        return "\r\n"
+    return "\n"
+
+
+def _ensure_file_extension(file_name: str, format_type: str) -> str:
+    if "." in Path(file_name).name:
+        return file_name
+    extension_map = {
+        "csv": ".csv",
+        "json": ".json",
+        "jsonl": ".jsonl",
+        "txt": ".txt",
+    }
+    suffix = extension_map.get(format_type, "")
+    return f"{file_name}{suffix}" if suffix else file_name
+
+
+def _append_session_suffix(file_name: str, session_id: int) -> str:
+    token = str(session_id).strip()
+    if "." not in file_name:
+        return f"{file_name}-{token}"
+    stem, suffix = file_name.rsplit(".", 1)
+    return f"{stem}-{token}.{suffix}"
+
+
+def _safe_relpath(value: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    raw = raw.lstrip("/")
+    normalized = posixpath.normpath(raw)
+    if normalized in {"", "."}:
+        return ""
+    if normalized.startswith("..") or "/../" in f"/{normalized}/":
+        raise WorkflowExecutionError("generate_file_invalid_destination_path", "destination_path inválido.")
+    return normalized
+
+
+def _safe_filename(value: str) -> str:
+    name = str(value or "").strip()
+    if not name:
+        raise WorkflowExecutionError("generate_file_missing_file_name", "Nome do arquivo não informado.")
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        raise WorkflowExecutionError("generate_file_invalid_file_name", "Nome do arquivo inválido.")
+    return name
+
+
+def _resolve_secret_reference(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    token = raw
+    if raw.startswith("{{") and raw.endswith("}}"):
+        token = raw[2:-2].strip()
+    if token.lower().startswith("env."):
+        env_name = token[4:].strip()
+        return os.getenv(env_name, "").strip() or raw
+    if token.lower().startswith("env:"):
+        env_name = token[4:].strip()
+        return os.getenv(env_name, "").strip() or raw
+    return os.getenv(token, "").strip() or raw
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    token = str(_unwrap_option(value)).strip().lower()
+    if token in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    if token in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    return default
+
+
+def _normalize_generate_file_mapping(raw_mapping: Any) -> list[dict[str, str]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(raw_mapping, dict):
+        for key in ("items", "rows", "value", "mapping"):
+            candidate = raw_mapping.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+    elif isinstance(raw_mapping, list):
+        rows = raw_mapping
+
+    normalized: list[dict[str, str]] = []
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        column = str(
+            entry.get("column")
+            or entry.get("header_name")
+            or entry.get("name")
+            or entry.get("key")
+            or ""
+        ).strip()
+        source = str(
+            entry.get("source")
+            or entry.get("variable")
+            or entry.get("path")
+            or entry.get("value")
+            or entry.get("source_value")
+            or ""
+        ).strip()
+        data_type = str(
+            entry.get("data_type")
+            or entry.get("type")
+            or entry.get("field_type")
+            or "text"
+        ).strip().lower()
+        if column and source:
+            normalized.append({"column": column, "source": source, "data_type": data_type})
+    return normalized
+
+
+def _coerce_generate_file_value(value: Any, data_type: str) -> Any:
+    normalized = (data_type or "text").strip().lower()
+    if normalized in {"text", "string", ""}:
+        return "" if value is None else str(value)
+    if normalized in {"number", "float", "double", "decimal"}:
+        try:
+            return float(str(value).replace(".", "").replace(",", "."))
+        except Exception:
+            return "" if value is None else str(value)
+    if normalized in {"integer", "int"}:
+        try:
+            return int(float(str(value).replace(".", "").replace(",", ".")))
+        except Exception:
+            return "" if value is None else str(value)
+    if normalized in {"bool", "boolean"}:
+        return _coerce_bool(value)
+    if normalized in {"json", "object"}:
+        if isinstance(value, (dict, list)):
+            return value
+        text = "" if value is None else str(value).strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:
+            return {"value": text}
+    return "" if value is None else str(value)
+
+
+def _resolve_generate_file_source(source: str, variables: dict[str, Any]) -> Any:
+    candidate = source.strip()
+    if not candidate:
+        return ""
+    if "{{" in candidate and "}}" in candidate:
+        return _render_value(candidate, variables)
+    resolved = _get_by_dot_path(variables, candidate)
+    if resolved is not None:
+        return resolved
+    customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
+    payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
+    return customs.get(candidate, payload.get(candidate, candidate))
+
+
+def _serialize_generate_file_rows(
+    *,
+    rows: list[dict[str, Any]],
+    format_type: str,
+    delimiter: str,
+    include_header: bool,
+    line_break: str,
+) -> tuple[str, int]:
+    if format_type == "csv":
+        field_names = list(rows[0].keys()) if rows else []
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=field_names, delimiter=delimiter, lineterminator=line_break)
+        if include_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({k: "" if v is None else str(v) for k, v in row.items()})
+        text_value = buffer.getvalue()
+        return text_value, len(text_value.splitlines()) if text_value else 0
+
+    if format_type == "json":
+        text_value = json.dumps(rows, ensure_ascii=False)
+        return text_value, len(text_value.splitlines()) if text_value else 0
+
+    if format_type == "jsonl":
+        lines = [json.dumps(row, ensure_ascii=False) for row in rows]
+        text_value = line_break.join(lines)
+        if text_value:
+            text_value += line_break
+        return text_value, len(text_value.splitlines()) if text_value else 0
+
+    if format_type == "txt":
+        lines: list[str] = []
+        for row in rows:
+            values = ["" if value is None else str(value) for value in row.values()]
+            lines.append(delimiter.join(values))
+        text_value = line_break.join(lines)
+        if text_value:
+            text_value += line_break
+        return text_value, len(text_value.splitlines()) if text_value else 0
+
+    raise WorkflowExecutionError("generate_file_invalid_format", "Formato de arquivo não suportado.")
+
+
+def _gzip_if_needed(*, payload: bytes, compression: str, file_name: str) -> tuple[bytes, str]:
+    if compression == "none":
+        return payload, file_name
+    if compression == "gzip":
+        output_name = file_name if file_name.endswith(".gz") else f"{file_name}.gz"
+        return gzip.compress(payload), output_name
+    raise WorkflowExecutionError("generate_file_invalid_compression", "Compressão não suportada.")
+
+
+def _resolve_renamed_filename(*, existing_names: set[str], original_name: str) -> str:
+    if original_name not in existing_names:
+        return original_name
+    stem = original_name
+    suffix = ""
+    if "." in original_name:
+        stem, suffix = original_name.rsplit(".", 1)
+        suffix = f".{suffix}"
+    for idx in range(2, 10_000):
+        candidate = f"{stem}_{idx}{suffix}"
+        if candidate not in existing_names:
+            return candidate
+    raise WorkflowExecutionError("generate_file_rename_failed", "Não foi possível gerar nome alternativo.")
+
+
+def _sftp_upload_bytes(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    destination_path: str,
+    file_name: str,
+    write_mode: str,
+    if_exists_policy: str,
+    payload: bytes,
+    encoding: str,
+    line_break: str,
+) -> dict[str, Any]:
+    try:
+        import paramiko
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "generate_file_missing_dependency",
+            "Dependência paramiko ausente para upload SFTP.",
+        ) from exc
+
+    transport = paramiko.Transport((host, int(port)))
+    try:
+        transport.connect(username=username, password=password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        try:
+            remote_dir = _safe_relpath(destination_path)
+            if remote_dir:
+                current = ""
+                for chunk in [part for part in remote_dir.split("/") if part]:
+                    current = f"{current}/{chunk}" if current else f"/{chunk}"
+                    try:
+                        sftp.stat(current)
+                    except Exception:
+                        sftp.mkdir(current)
+            base = f"/{remote_dir}" if remote_dir else ""
+            remote_file = f"{base}/{file_name}" if base else f"/{file_name}"
+
+            existing_names: set[str] = set()
+            if base:
+                try:
+                    existing_names = set(sftp.listdir(base))
+                except Exception:
+                    existing_names = set()
+
+            exists_before = file_name in existing_names
+
+            target_name = file_name
+            if exists_before and if_exists_policy == "fail" and write_mode != "append":
+                raise WorkflowExecutionError("generate_file_file_exists", "Arquivo já existe no destino.")
+            if exists_before and if_exists_policy == "rename" and write_mode != "append":
+                target_name = _resolve_renamed_filename(existing_names=existing_names, original_name=file_name)
+                remote_file = f"{base}/{target_name}" if base else f"/{target_name}"
+
+            if write_mode in {"create", "create_per_session"} and exists_before and target_name == file_name:
+                raise WorkflowExecutionError("generate_file_create_exists", "Arquivo já existe para write_mode=create.")
+
+            if write_mode == "append":
+                if exists_before and target_name == file_name:
+                    with sftp.open(remote_file, "rb") as remote_reader:
+                        previous = remote_reader.read()
+                    previous_text = previous.decode(encoding, errors="ignore")
+                    append_text = payload.decode(encoding, errors="ignore")
+                    if previous_text and append_text and not previous_text.endswith(line_break):
+                        append_text = f"{line_break}{append_text}"
+                    payload = append_text.encode(encoding)
+                    with sftp.open(remote_file, "ab") as remote_writer:
+                        remote_writer.write(payload)
+                else:
+                    with sftp.open(remote_file, "wb") as remote_writer:
+                        remote_writer.write(payload)
+            else:
+                with sftp.open(remote_file, "wb") as remote_writer:
+                    remote_writer.write(payload)
+
+            return {
+                "file_name": target_name,
+                "remote_path": remote_file,
+            }
+        finally:
+            sftp.close()
+    finally:
+        transport.close()
+
+
+async def _run_generate_file(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    session_id: int,
+) -> str:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    variables = _ensure_variables(runtime_variables)
+
+    raw_mapping = params.get("fields_mapping") or params.get("mapping") or []
+    mapping_fields = _normalize_generate_file_mapping(raw_mapping)
+    if not mapping_fields:
+        raise WorkflowExecutionError("generate_file_missing_mapping", "Nenhum campo de mapeamento configurado.")
+
+    destination_type = str(_unwrap_option(params.get("destination_type") or "sftp")).strip().lower()
+    if destination_type not in {"local", "sftp"}:
+        raise WorkflowExecutionError("generate_file_invalid_destination", "destination_type deve ser local ou sftp.")
+
+    format_type = str(_unwrap_option(params.get("format_type") or params.get("file_type") or "csv")).strip().lower()
+    if format_type not in {"csv", "json", "jsonl", "txt"}:
+        raise WorkflowExecutionError("generate_file_invalid_format", "Formato de arquivo não suportado.")
+
+    encoding = str(_unwrap_option(params.get("encoding") or "utf-8")).strip().lower()
+    if encoding in {"utf8", "utf-8"}:
+        encoding = "utf-8"
+    elif encoding in {"latin1", "iso-8859-1"}:
+        encoding = "iso-8859-1"
+    elif encoding in {"windows-1252", "cp1252"}:
+        encoding = "cp1252"
+    elif encoding in {"utf-8 bom", "utf8 bom", "utf-8-sig"}:
+        encoding = "utf-8-sig"
+    else:
+        raise WorkflowExecutionError("generate_file_invalid_encoding", "Codificação não suportada.")
+
+    write_mode = str(_unwrap_option(params.get("write_mode") or "create")).strip().lower()
+    if write_mode not in {"create", "overwrite", "append", "create_per_session"}:
+        raise WorkflowExecutionError("generate_file_invalid_write_mode", "write_mode inválido.")
+
+    scheduling_mode = str(_unwrap_option(params.get("scheduling_run_mode") or "imediato")).strip().lower()
+    if scheduling_mode == "imediato":
+        write_mode = "create_per_session"
+
+    include_header = _coerce_bool(params.get("include_header"), default=True)
+    delimiter = _normalize_delimiter(params.get("delimiter") or params.get("separator"))
+    line_break = _normalize_line_break(params.get("line_break"))
+    compression = str(_unwrap_option(params.get("compression") or "none")).strip().lower()
+    if compression in {"", "none", "nenhuma"}:
+        compression = "none"
+    elif compression in {"gzip", "gz"}:
+        compression = "gzip"
+    else:
+        raise WorkflowExecutionError("generate_file_invalid_compression", "Compressão não suportada.")
+
+    file_name_raw = _render_value(params.get("file_name_template") or params.get("file_name") or "", variables)
+    file_name = _safe_filename("" if file_name_raw is None else str(file_name_raw))
+    file_name = _ensure_file_extension(file_name, format_type)
+    if write_mode == "create_per_session":
+        file_name = _append_session_suffix(file_name, session_id)
+
+    destination_path = _safe_relpath(
+        "" if _render_value(params.get("destination_path") or "", variables) is None else str(_render_value(params.get("destination_path") or "", variables))
+    )
+    if_exists_policy = str(_unwrap_option(params.get("if_exists_policy") or "replace")).strip().lower()
+    if if_exists_policy not in {"replace", "fail", "rename"}:
+        if_exists_policy = "replace"
+
+    row: dict[str, Any] = {}
+    for field in mapping_fields:
+        raw_value = _resolve_generate_file_source(field["source"], variables)
+        row[field["column"]] = _coerce_generate_file_value(raw_value, field["data_type"])
+
+    file_text, lines_written = _serialize_generate_file_rows(
+        rows=[row],
+        format_type=format_type,
+        delimiter=delimiter,
+        include_header=include_header,
+        line_break=line_break,
+    )
+    host = str(_render_value(params.get("host"), variables) or "").strip() or None
+    port = _coerce_int(_render_value(params.get("port"), variables), 22)
+    username = str(_render_value(params.get("user") or params.get("username"), variables) or "").strip() or None
+    password = _resolve_secret_reference(_render_value(params.get("password"), variables))
+    if destination_type == "sftp" and (not host or not username or not password):
+        raise WorkflowExecutionError("generate_file_missing_sftp_credentials", "Credenciais SFTP incompletas.")
+
+    output_name = file_name if compression == "none" else (file_name if file_name.endswith(".gz") else f"{file_name}.gz")
+    workspace_uuid = get_current_workspace_uuid()
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or output_name)
+
+    config = {
+        "destination_type": destination_type,
+        "destination_path": destination_path,
+        "file_name": output_name,
+        "if_exists_policy": if_exists_policy,
+        "sftp_host": host,
+        "sftp_port": port,
+        "sftp_user": username,
+        "sftp_password": password,
+        "format_type": format_type,
+        "encoding": encoding,
+        "write_mode": write_mode,
+        "include_header": include_header,
+        "delimiter": delimiter,
+        "line_break": line_break,
+        "compression": compression,
+        "scheduling_run_mode": scheduling_mode,
+        "scheduling_date": _unwrap_option(params.get("scheduling_date")),
+        "scheduling_time_agendado": _unwrap_option(params.get("scheduling_time_agendado")),
+        "scheduling_fuso_agandado": _unwrap_option(params.get("scheduling_fuso_agandado")) or "sp_utc_3",
+        "recurrence": _unwrap_option(params.get("recurrence")),
+        "scheduling_fuso_recorrente": _unwrap_option(params.get("scheduling_fuso_recorrente")) or "sp_utc_3",
+        "scheduling_time": _unwrap_option(params.get("scheduling_time")),
+    }
+    enqueue_result = await upsert_job_and_buffer_row(
+        db_session,
+        workspace_uuid=workspace_uuid,
+        flow_id=flow_uuid,
+        component_ref_id=component_ref_id,
+        session_id=session_id,
+        config=config,
+        row_payload=row,
+    )
+
+    if scheduling_mode == "imediato":
+        try:
+            from app.tasks.generate_file_tasks import generate_file_run_task
+
+            generate_file_run_task.delay(workspace_uuid=workspace_uuid, job_id=str(enqueue_result["job_id"]))
+        except Exception as exc:
+            raise WorkflowExecutionError(
+                "generate_file_dispatch_enqueue_failed",
+                f"Falha ao enfileirar generate_file.run: {exc}",
+            ) from exc
+
+    result_payload: dict[str, Any] = {
+        "status": "queued",
+        "destination_type": destination_type,
+        "format_type": format_type,
+        "write_mode": write_mode,
+        "lines_written": lines_written,
+        "queued_row": bool(enqueue_result.get("queued_row")),
+        "job_id": enqueue_result.get("job_id"),
+        "next_run_at": enqueue_result.get("next_run_at"),
+        "mode": enqueue_result.get("mode"),
+        "remote_path": None,
+        "file_name": output_name,
+        "size_bytes": len(file_text.encode(encoding)),
+        "md5": None,
+    }
+    runtime_variables["generate_file_last_result"] = result_payload
+
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    output_var_prefix = str(params.get("output_var_prefix") or "arquivo").strip() or "arquivo"
+    customs[output_var_prefix] = result_payload
+
+    response_cfg = params.get("response") if isinstance(params.get("response"), dict) else {}
+    status_var = response_cfg.get("status")
+    path_var = response_cfg.get("path")
+    file_var = response_cfg.get("file_name")
+    md5_var = response_cfg.get("md5")
+    error_var = response_cfg.get("error")
+    if isinstance(status_var, str) and status_var.strip():
+        customs[status_var.strip()] = "queued"
+    if isinstance(path_var, str) and path_var.strip():
+        customs[path_var.strip()] = result_payload.get("remote_path")
+    if isinstance(file_var, str) and file_var.strip():
+        customs[file_var.strip()] = result_payload.get("file_name")
+    if isinstance(md5_var, str) and md5_var.strip():
+        customs[md5_var.strip()] = None
+    if isinstance(error_var, str) and error_var.strip():
+        customs[error_var.strip()] = None
+
+    return "success"
 
 
 def _run_code_editor(
@@ -897,6 +1429,14 @@ async def execute_workflow_m2_for_session(
                     branch_label = _run_api_call(
                         component=component,
                         runtime_variables=runtime_variables,
+                    )
+                elif kind == "generate_file":
+                    branch_label = await _run_generate_file(
+                        db_session=db_session,
+                        flow_uuid=flow_uuid,
+                        component=component,
+                        runtime_variables=runtime_variables,
+                        session_id=session_id,
                     )
                 elif kind in {"wait", "scheduling_moment", "scheduling-moment"}:
                     resolved_next = resolve_next_card_uuid(definition, next_card_uuid)

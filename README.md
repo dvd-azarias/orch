@@ -632,6 +632,8 @@ Migrar a movimentação de cards do workflow para execução assíncrona com Cel
 #### Regra operacional de filas para Beat/Tasks
 
 - Tasks de Beat devem usar fila naturalmente relacionada, porém separada da fila de execução principal.
+- REGRA PADRÃO DO PROJETO: salvo pedido explícito, nunca reutilizar nomes de filas já existentes em outras aplicações/serviços do ambiente compartilhado.
+- Para novos componentes e testes de desenvolvimento, usar nomes isolados por contexto/feature (ex.: `orch_dispatch_f5_local`, `orch_execute_f5_local`, `orch_component_generate_file_run_f5_local`).
 - Regra recomendada:
   - dispatch em `orch_dispatch`;
   - execução de sessão em `orch_execute`;
@@ -664,6 +666,85 @@ Migrar a movimentação de cards do workflow para execução assíncrona com Cel
   - Ação: inspecionar `orch_sessions_alarms` e logs de worker; validar broker/redis.
 - **Recovery após indisponibilidade**
   - Estratégia: ao voltar worker/beat, o dispatcher retoma sessões `pending` elegíveis automaticamente.
+
+### Sequência manual de subida (pré-systemctl)
+
+Enquanto o `systemctl` não estiver consolidado para todas as fases, usar esta sequência padrão para subir os processos em desenvolvimento.
+
+### Protocolo de retomada entre fases (obrigatório)
+
+Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **encadeada** (fases anteriores em pé).
+
+- Script canônico de DEV local:
+  - `scripts/dev_phase_stack.sh start`
+  - `scripts/dev_phase_stack.sh status`
+  - `scripts/dev_phase_stack.sh smoke 5`
+  - `scripts/dev_phase_stack.sh stop`
+- O script já sobe API + worker/beat legado + worker/beat `generate_file`.
+- O script só dispara smoke após validar `workers ready`.
+- Em DEV local, os workers sobem com `--without-mingle --without-gossip` para evitar atraso de prontidão em brokers com muitos nós.
+- O script usa filas isoladas `*_f5_local` por padrão e workspace escopado em `ba7eb0ec-e565-447c-8c11-8f870cf72a60`.
+- Se `orch_generate_file_row_buffer` estiver vazio após smoke:
+  - primeiro validar `scripts/dev_phase_stack.sh status`;
+  - depois verificar se o flow realmente alcança o card `generate_file` na revisão publicada.
+- Se houver intervenção em código/config durante a sessão:
+  - reiniciar stack antes de novo teste real (`scripts/dev_phase_stack.sh restart`).
+
+### Serviços persistentes no macOS (`launchd`)
+
+`systemctl` é Linux-only. No macOS, o equivalente é `launchd` com `.plist`.
+
+**Importante (operação atual):**
+
+- Durante desenvolvimento/homologação das fases, o padrão canônico é **não usar launchd**.
+- Usar sempre `scripts/dev_phase_stack.sh` para manter controle explícito da stack.
+- `launchd` fica apenas como alternativa de operação persistente, mediante alinhamento explícito.
+
+- Templates: `launchd/*.plist`
+- Guia: `launchd/README.md`
+- Controle:
+  - `scripts/launchd_orch.sh start`
+  - `scripts/launchd_orch.sh status`
+  - `scripts/launchd_orch.sh restart`
+  - `scripts/launchd_orch.sh stop`
+
+Regra operacional:
+
+- As fases são encadeadas: para evoluir F6/F7/F8, manter F4/F5 de pé durante os testes.
+- Após qualquer mudança em API/worker/beat/filas, relançar serviços antes de validar.
+
+#### 0) Pré-requisito
+
+- Ativar ambiente:
+  - `source .venv/bin/activate`
+
+#### 1) API (porta 7777)
+
+- `uvicorn app.main:app --host 127.0.0.1 --port 7777`
+
+#### 2) Fase 4 — worker legado (dispatch/execute/heartbeat)
+
+- `celery -A app.core.celery_app:celery_app worker -Q orch_dispatch,orch_execute,orch_heartbeat -l INFO`
+
+#### 3) Fase 4 — beat legado (somente tarefas legadas)
+
+- `CELERY_GENERATE_FILE_ENABLED=false celery -A app.core.celery_app:celery_app beat --schedule=/tmp/orch-celerybeat-legacy-f5 -l INFO`
+
+#### 4) Fase 5 — worker generate_file
+
+- `CELERY_GENERATE_FILE_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 celery -A app.core.celery_app:celery_app worker -Q orch_component_generate_file_run,orch_component_generate_file_scan -l INFO`
+
+#### 5) Fase 5 — beat generate_file (somente scan do componente)
+
+- `CELERY_BEAT_DISPATCH_ENABLED=false CELERY_BEAT_HEARTBEAT_ENABLED=false CELERY_GENERATE_FILE_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 celery -A app.core.celery_app:celery_app beat --schedule=/tmp/orch-celerybeat-generate-file-f5 -l INFO`
+
+#### 6) Observações operacionais importantes
+
+- Manter **dois beats separados**:
+  - beat legado (fase 4) sem schedule de `generate_file`;
+  - beat `generate_file` (fase 5) sem `dispatch`/`heartbeat`.
+- Evita duplicidade de agendamento e ruído no Flower.
+- Em testes fora do workspace alvo, ajustar/remover `CELERY_GENERATE_FILE_WORKSPACE_UUID`.
 
 ## Política Git de Trabalho (acordo operacional)
 

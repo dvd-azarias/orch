@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.orch.celery.beat.legacy</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true CELERY_DISPATCH_QUEUE=orch_dispatch_launchd_local CELERY_HEARTBEAT_QUEUE=orch_heartbeat_launchd_local CELERY_DISPATCH_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 CELERY_GENERATE_FILE_ENABLED=false &amp;&amp; exec celery -A app.core.celery_app:celery_app beat --schedule=/tmp/orch-celerybeat-legacy-launchd-local -l INFO</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>__REPO_ROOT__/.runlogs/launchd/beat_legacy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_ROOT__/.runlogs/launchd/beat_legacy.err.log</string>
+</dict>
+</plist>

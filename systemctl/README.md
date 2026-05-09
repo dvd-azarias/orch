@@ -1,9 +1,14 @@
 # Systemd templates (produção)
 
+> Observação: estes arquivos são para Linux com `systemd` (`systemctl`).
+> Para macOS, usar `launchd` conforme `launchd/README.md`.
+
 Arquivos:
 - `systemctl/orch-api.service`
 - `systemctl/orch-celery-worker.service`
 - `systemctl/orch-celery-beat.service`
+- `systemctl/orch-celery-generate-file-worker.service`
+- `systemctl/orch-celery-generate-file-beat.service`
 
 ## Pré-requisitos
 
@@ -20,18 +25,22 @@ Arquivos:
 sudo cp systemctl/orch-api.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-worker.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-beat.service /etc/systemd/system/
+sudo cp systemctl/orch-celery-generate-file-worker.service /etc/systemd/system/
+sudo cp systemctl/orch-celery-generate-file-beat.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now orch-api orch-celery-worker orch-celery-beat
+sudo systemctl enable --now orch-api orch-celery-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 ```
 
 ## Comandos úteis
 
 ```bash
-sudo systemctl status orch-api orch-celery-worker orch-celery-beat
+sudo systemctl status orch-api orch-celery-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 sudo journalctl -u orch-api -f
 sudo journalctl -u orch-celery-worker -f
 sudo journalctl -u orch-celery-beat -f
-sudo systemctl restart orch-api orch-celery-worker orch-celery-beat
+sudo journalctl -u orch-celery-generate-file-worker -f
+sudo journalctl -u orch-celery-generate-file-beat -f
+sudo systemctl restart orch-api orch-celery-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 ```
 
 ## Ajustes recomendados de performance
