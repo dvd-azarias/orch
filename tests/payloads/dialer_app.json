@@ -1,0 +1,18 @@
+{
+  "uniqueid": "GW01-1778291275.2634",
+  "hangup": {
+    "Event": "Hangup",
+    "Disposition": "NO ANSWER",
+    "Cause": "490",
+    "Cause-txt": "kcpa_Silencio",
+    "CdrMailingData": "{'phone': '5511975620806'}",
+    "Uniqueid": "GW01-1778291275.2634",
+    "Linkedid": "GW01-1778291275.2634",
+    "EndTime": "2026-05-09 01:48:05"
+  },
+  "makecall": {
+    "Event": "DialBegin",
+    "DialString": "trunk-sbc-router106/5511975620806",
+    "DestUniqueid": "GW01-1778291275.2634"
+  }
+}

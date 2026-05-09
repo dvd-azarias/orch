@@ -1,0 +1,33 @@
+[Unit]
+Description=Orch Celery Beat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orch
+Group=orch
+WorkingDirectory=/opt/orch
+
+EnvironmentFile=/etc/orch/orch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/orch
+
+# scheduler file fora do código para facilitar operação
+ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app beat \
+  --loglevel=INFO \
+  --schedule=/var/lib/orch/celerybeat-schedule
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

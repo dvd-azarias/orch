@@ -1,0 +1,36 @@
+[Unit]
+Description=Orch API (Uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orch
+Group=orch
+WorkingDirectory=/opt/orch
+
+EnvironmentFile=/etc/orch/orch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/orch
+
+# Ajuste host/porta conforme topologia (Nginx/ALB/etc)
+ExecStart=/opt/orch/.venv/bin/uvicorn app.main:app \
+  --host 0.0.0.0 \
+  --port 7777 \
+  --workers 4 \
+  --proxy-headers \
+  --forwarded-allow-ips="*"
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "contacts": [
+              {
+                "wa_id": "5511982069650"
+              }
+            ],
+            "statuses": [
+              {
+                "status": "read",
+                "timestamp": "1778240350",
+                "recipient_id": "5511982069650"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

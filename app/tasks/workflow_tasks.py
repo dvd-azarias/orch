@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+import redis
+
+from app.core.celery_app import celery_app
+from app.core.config import get_settings
+from app.core.database import get_session_factory
+from app.core.logging import get_logger
+from app.services.alarm_service import persist_alarm
+from app.services.session_metrics_service import persist_session_metrics
+from app.services.workflow_dispatcher_service import advance_session_once, dispatch_pending_sessions
+
+logger = get_logger(__name__)
+
+
+@celery_app.task(name="app.tasks.workflow.advance_session", ignore_result=True)
+def advance_session_task(*, flow_uuid: str, session_id: int) -> None:
+    asyncio.run(_advance_session_task(flow_uuid=flow_uuid, session_id=session_id))
+
+
+@celery_app.task(name="app.tasks.workflow.dispatch_pending_sessions", ignore_result=True)
+def dispatch_pending_sessions_task() -> dict[str, int]:
+    claimed_count = asyncio.run(_dispatch_pending_sessions_task())
+    return {"claimed_count": claimed_count}
+
+
+@celery_app.task(name="app.tasks.workflow.beat_heartbeat", ignore_result=True)
+def beat_heartbeat_task() -> None:
+    settings = get_settings()
+    backend_url = settings.celery_result_backend
+    if not backend_url:
+        return
+    client = redis.Redis.from_url(backend_url)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    ttl = max(5, settings.celery_health_heartbeat_ttl_seconds)
+    client.set(settings.celery_health_heartbeat_key, str(now_ts), ex=ttl)
+
+
+async def _dispatch_pending_sessions_task() -> int:
+    settings = get_settings()
+    if not settings.celery_enabled:
+        return 0
+
+    task_started_at = datetime.now(timezone.utc)
+    session_factory = get_session_factory()
+    async with session_factory() as db_session:
+        try:
+            claimed = await dispatch_pending_sessions(db_session)
+        except Exception as exc:
+            await persist_alarm(
+                db_session,
+                level="error",
+                code="workflow_dispatch_task_failed",
+                message="Falha inesperada no dispatcher assíncrono.",
+                details={
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+                app_name="Celery",
+            )
+            raise
+
+        metrics: list[dict[str, Any]] = []
+        for item in claimed:
+            flow_uuid = str(item["flow_uuid"])
+            session_id = int(item["id"])
+            session_uuid = str(item["uuid"])
+            pending_since = item.get("pending_since")
+            item_started = datetime.now(timezone.utc)
+            queue_lag_ms = 0.0
+            if isinstance(pending_since, datetime):
+                pending_dt = pending_since if pending_since.tzinfo else pending_since.replace(tzinfo=timezone.utc)
+                queue_lag_ms = max(0.0, (item_started - pending_dt).total_seconds() * 1000)
+            try:
+                advance_session_task.delay(flow_uuid=flow_uuid, session_id=session_id)
+                status = "success"
+                stopped_reason = None
+            except Exception as exc:
+                status = "error"
+                stopped_reason = "enqueue_failed"
+                await persist_alarm(
+                    db_session,
+                    level="error",
+                    code="workflow_dispatch_enqueue_failed",
+                    message="Falha ao enfileirar sessão para execução.",
+                    details={
+                        "session_id": session_id,
+                        "flow_uuid": flow_uuid,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                    flow_uuid=flow_uuid,
+                    app_name="Celery",
+                    session_uuid=session_uuid,
+                )
+
+            item_finished = datetime.now(timezone.utc)
+            metrics.append(
+                {
+                    "session_id": session_id,
+                    "session_uuid": session_uuid,
+                    "flow_uuid": flow_uuid,
+                    "revision_id": None,
+                    "metric_type": "dispatch",
+                    "step_index": None,
+                    "card_uuid": None,
+                    "card_cursor": None,
+                    "component_kind": "dispatcher",
+                    "status": status,
+                    "stopped_reason": stopped_reason,
+                    "latency_ms": queue_lag_ms,
+                    "started_at": item_started,
+                    "finished_at": item_finished,
+                    "details": {
+                        "queue_lag_ms": round(queue_lag_ms, 2),
+                        "dispatch_duration_ms": round((item_finished - item_started).total_seconds() * 1000, 2),
+                    },
+                }
+            )
+
+        if claimed:
+            await persist_session_metrics(db_session, metrics=metrics)
+
+    total_ms = (datetime.now(timezone.utc) - task_started_at).total_seconds() * 1000
+    logger.info(
+        "workflow dispatch task finished",
+        extra={
+            "event": "orch.workflow.dispatch.task",
+            "claimed_count": len(claimed),
+            "duration_ms": round(total_ms, 2),
+        },
+    )
+    return len(claimed)
+
+
+async def _advance_session_task(*, flow_uuid: str, session_id: int) -> None:
+    settings = get_settings()
+    if not settings.celery_enabled:
+        return
+
+    started_at = datetime.now(timezone.utc)
+    session_factory = get_session_factory()
+    async with session_factory() as db_session:
+        try:
+            stopped_reason = await advance_session_once(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+            )
+            status = "success"
+        except Exception as exc:
+            stopped_reason = "task_exception"
+            status = "error"
+            await persist_alarm(
+                db_session,
+                level="error",
+                code="workflow_execute_task_failed",
+                message="Falha inesperada na execução assíncrona da sessão.",
+                details={
+                    "session_id": session_id,
+                    "flow_uuid": flow_uuid,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+                flow_uuid=flow_uuid,
+                app_name="Celery",
+            )
+            raise
+        finally:
+            finished_at = datetime.now(timezone.utc)
+            await persist_session_metrics(
+                db_session,
+                metrics=[
+                    {
+                        "session_id": session_id,
+                        "session_uuid": None,
+                        "flow_uuid": flow_uuid,
+                        "revision_id": None,
+                        "metric_type": "executor",
+                        "step_index": None,
+                        "card_uuid": None,
+                        "card_cursor": None,
+                        "component_kind": "executor",
+                        "status": status if "status" in locals() else "error",
+                        "stopped_reason": stopped_reason,
+                        "latency_ms": round((finished_at - started_at).total_seconds() * 1000, 2),
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                        "details": {},
+                    }
+                ],
+            )
+    logger.info(
+        "workflow session advanced",
+        extra={
+            "event": "orch.workflow.session.advanced",
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+            "stopped_reason": stopped_reason,
+        },
+    )

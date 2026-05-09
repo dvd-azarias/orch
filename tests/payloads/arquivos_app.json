@@ -1,0 +1,8 @@
+{
+  "EventName": "s3:ObjectCreated:Put",
+  "file": {
+    "id": "d5061f9a-0416-4719-886c-bfef5ff35696",
+    "folder_path": "xbank/enriquecimento",
+    "original_name": "mailing_1_contato_adriano_oficial.csv"
+  }
+}

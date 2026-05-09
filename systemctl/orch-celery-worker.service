@@ -1,0 +1,45 @@
+[Unit]
+Description=Orch Celery Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orch
+Group=orch
+WorkingDirectory=/opt/orch
+
+# Ajuste para o seu servidor (arquivo com variáveis de ambiente)
+EnvironmentFile=/etc/orch/orch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/orch
+
+# Ajuste de acordo com CPU/RAM do host:
+# --concurrency=8 (exemplo para máquina média)
+# --prefetch-multiplier=1 + -Ofair ajuda a reduzir "head-of-line blocking"
+# --max-tasks-per-child e --max-memory-per-child ajudam a estabilidade longa
+ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app worker \
+  --loglevel=INFO \
+  --pool=prefork \
+  --concurrency=8 \
+  --prefetch-multiplier=1 \
+  -Ofair \
+  --max-tasks-per-child=1000 \
+  --max-memory-per-child=350000 \
+  --without-gossip \
+  --without-mingle
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=180
+KillMode=mixed
+
+# Hardening básico de processo
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
