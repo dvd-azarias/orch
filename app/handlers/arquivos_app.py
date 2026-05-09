@@ -38,9 +38,34 @@ def extract_arquivos_session_fields(payload: dict[str, Any]) -> SessionExtractio
             ),
         )
 
+    content = file_data.get("content")
+    row_index = file_data.get("row_index")
+
+    row_identifier: str | None = None
+    if isinstance(content, dict):
+        for key in ("cpf", "code", "id", "external_id"):
+            value = content.get(key)
+            text_value = "" if value is None else str(value).strip()
+            if text_value:
+                row_identifier = text_value
+                break
+    if not row_identifier and row_index is not None:
+        text_row_index = str(row_index).strip()
+        if text_row_index:
+            row_identifier = f"row_{text_row_index}"
+
+    if row_identifier:
+        entity = f"{file_id}:{row_identifier}"
+        entity_address = f"{folder_path}/{original_name}#{row_identifier}"
+        entity_session_id = entity
+    else:
+        entity = file_id
+        entity_address = f"{folder_path}/{original_name}"
+        entity_session_id = file_id
+
     return SessionExtraction(
-        entity=file_id,
+        entity=entity,
         entity_type="file",
-        entity_address=f"{folder_path}/{original_name}",
-        entity_session_id=file_id,
+        entity_address=entity_address,
+        entity_session_id=entity_session_id,
     )

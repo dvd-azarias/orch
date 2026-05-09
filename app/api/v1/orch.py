@@ -23,7 +23,9 @@ from app.schemas.orch import (
 )
 from app.services.alarm_query_service import list_alarms
 from app.services.app_detector import detect_app
+from app.services.app_detector import APP_ARQUIVOS
 from app.services.alarm_service import persist_alarm
+from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.session_extractor import extract_session_fields
 from app.services.session_query_service import (
     get_session_by_uuid,
@@ -127,10 +129,53 @@ async def _trigger_orch_for_workspace(
             workspace_uuid=safe_workspace_uuid,
         )
 
-    app_name: str | None = None
+    app_name = detect_app(payload)
+    payloads_to_process = [payload]
+    if app_name == APP_ARQUIVOS:
+        payloads_to_process = await expand_arquivos_payload_into_rows(
+            payload,
+            settings=get_settings(),
+        )
+
+    first_response: OrchTriggerAccepted | None = None
+    for item_payload in payloads_to_process:
+        response = await _process_single_payload(
+            safe_workspace_uuid=safe_workspace_uuid,
+            workspace_schema=workspace_schema,
+            flow_uuid=flow_uuid,
+            payload=item_payload,
+            db_session=db_session,
+            app_name=app_name,
+        )
+        if first_response is None:
+            first_response = response
+
+    if first_response is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Nenhuma linha válida foi processada para este evento.",
+        )
+
+    if len(payloads_to_process) > 1:
+        first_response.workflow_execution = {
+            **(first_response.workflow_execution or {}),
+            "batch_rows": len(payloads_to_process),
+            "batch_mode": "file_rows",
+        }
+    return first_response
+
+
+async def _process_single_payload(
+    *,
+    safe_workspace_uuid: str | None,
+    workspace_schema: str,
+    flow_uuid: UUID,
+    payload: dict[str, Any],
+    db_session: AsyncSession,
+    app_name: str,
+) -> OrchTriggerAccepted:
     extracted = None
     try:
-        app_name = detect_app(payload)
         extracted = extract_session_fields(app_name, payload)
         persisted = await persist_session(
             db_session,
