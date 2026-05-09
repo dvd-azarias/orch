@@ -46,3 +46,29 @@ async def fetch_active_workspaces(
         )
     )
     return [dict(row) for row in result.mappings().all()]
+
+
+async def fetch_workspace_otima_billing_api_key(
+    db_session: AsyncSession,
+    *,
+    workspace_uuid: str,
+) -> str | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                otima_billing_api_key
+            FROM target.workspaces
+            WHERE
+                workspace_uuid = CAST(:workspace_uuid AS uuid)
+                AND deleted_at IS NULL
+            LIMIT 1
+            """
+        ),
+        {"workspace_uuid": workspace_uuid},
+    )
+    value = result.scalar_one_or_none()
+    if value is None:
+        return None
+    token = str(value).strip()
+    return token or None
