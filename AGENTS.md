@@ -43,6 +43,17 @@ Sem confirmacao explicita do usuario, nao executar:
 
 ## Convencoes praticas deste repositorio
 
+- Gatilho operacional (OBRIGATORIO):
+  - quando o usuario escrever `SUBA_O_AMBIENTE`, interpretar como ordem para:
+    1. subir toda a stack local homologada (API + workers + beats de todas as fases ja concluidas);
+    2. validar status dos processos e filas principais;
+    3. executar um smoke rapido de runtime (health + 1 curl real no workspace de teste);
+    4. reportar pronto para testes manuais.
+  - padrao de execucao:
+    - preferencial: `scripts/dev_phase_stack.sh restart && scripts/dev_phase_stack.sh status`;
+    - quando solicitado explicitamente pelo usuario: `scripts/launchd_orch.sh restart && scripts/launchd_orch.sh status`.
+  - apos qualquer mudanca em codigo de runtime (API/Celery/filas), repetir `SUBA_O_AMBIENTE` antes de concluir regressao.
+
 - Preferir comandos oficiais da aplicacao para migration:
   - `python -m app.cli migrate-all`
   - `python -m app.cli migrate-workspace <workspace_uuid>`
@@ -55,6 +66,16 @@ Sem confirmacao explicita do usuario, nao executar:
   - usar filas dedicadas e isoladas por contexto (ex.: `orch_dispatch_f5_local`, `orch_execute_f5_local`);
   - usar `CELERY_DISPATCH_WORKSPACE_UUID` quando o escopo for um workspace especifico;
   - quando necessario, usar `CELERY_BEAT_DISPATCH_ENABLED=false` para impedir dispatch global.
+- Regra padrao de hostname Celery (OBRIGATORIA):
+  - sempre subir workers com `--hostname` explicito para facilitar filtro no Flower;
+  - padrao DEV local (macOS): sufixo `@_macbook_deivid_dev`;
+  - padrao servidor `10.1.20.136`: sufixo `@136_01`;
+  - exemplos: `orch-celery-worker@...`, `orch-celery-fileapp-worker@...`, `orch-celery-generate-file-worker@...`.
+- Regra de perfil de filas (OBRIGATORIA):
+  - usar `ORCH_QUEUE_PROFILE` como chave primaria para selecao de filas por ambiente;
+  - `auto` (padrao): macOS -> `launchd_local`; Linux -> `prod`;
+  - perfis aceitos: `launchd_local`, `f5_local`, `prod`;
+  - evitar hardcode manual recorrente de filas no `.env`; usar override `CELERY_*_QUEUE` somente quando necessario.
 - Regra de progressao entre fases (OBRIGATORIA):
   - fases novas devem ser validadas com a stack das fases anteriores em execucao;
   - antes de declarar regressao, repetir a subida padronizada e checar `status`;
@@ -64,6 +85,9 @@ Sem confirmacao explicita do usuario, nao executar:
   - apos intervencao em codigo/config da API, workers, beats ou filas, reiniciar os servicos antes de testar;
   - em macOS, usar `scripts/dev_phase_stack.sh restart` como padrao durante desenvolvimento;
   - `launchd` so deve ser usado quando solicitado explicitamente pelo usuario;
+  - durante desenvolvimento, depuracao e ajuste fino, subir SEMPRE todos os processos das fases ja homologadas (API + workers + beats) antes de validar;
+  - nao usar servidor remoto como ambiente de debug continuo; usar servidor apenas para marco de homologacao/release;
+  - evitar ciclo \"erro pequeno -> deploy servidor\"; corrigir e validar primeiro na stack local completa;
   - em qualquer fase futura (F6+), manter as fases homologadas anteriores ativas durante validacao real.
   - NUNCA misturar `launchd` e stack manual (`scripts/dev_phase_stack.sh`/TTY) ao mesmo tempo.
   - Antes de validar E2E, confirmar quem esta na porta `7777` e quais workers/beats estao ativos para evitar processo com codigo antigo.

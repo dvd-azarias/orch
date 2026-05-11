@@ -12,6 +12,7 @@ WorkingDirectory=/opt/orch
 EnvironmentFile=/etc/orch/orch.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/orch
+Environment=ORCH_QUEUE_PROFILE=prod
 
 # Ajuste host/porta conforme topologia (Nginx/ALB/etc)
 ExecStart=/opt/orch/.venv/bin/uvicorn app.main:app \

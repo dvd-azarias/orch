@@ -14,7 +14,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true CELERY_GENERATE_FILE_ENABLED=true CELERY_GENERATE_FILE_SCAN_ENABLED=true CELERY_GENERATE_FILE_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 CELERY_GENERATE_FILE_RUN_QUEUE=orch_component_generate_file_run_launchd_local CELERY_GENERATE_FILE_SCAN_QUEUE=orch_component_generate_file_scan_launchd_local &amp;&amp; exec celery -A app.core.celery_app:celery_app worker -n orch-worker-gf@%h -Q orch_component_generate_file_run_launchd_local,orch_component_generate_file_scan_launchd_local --without-mingle --without-gossip -l INFO</string>
+    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=launchd_local CELERY_GENERATE_FILE_ENABLED=true CELERY_GENERATE_FILE_SCAN_ENABLED=true CELERY_GENERATE_FILE_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 CELERY_GENERATE_FILE_RUN_QUEUE=orch_component_generate_file_run_launchd_local CELERY_GENERATE_FILE_SCAN_QUEUE=orch_component_generate_file_scan_launchd_local &amp;&amp; exec celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-generate-file-worker@_macbook_deivid_dev -n orch-worker-gf@%h -Q orch_component_generate_file_run_launchd_local,orch_component_generate_file_scan_launchd_local --without-mingle --without-gossip -l INFO</string>
   </array>
   <key>StandardOutPath</key>
   <string>__REPO_ROOT__/.runlogs/launchd/worker_gf.out.log</string>

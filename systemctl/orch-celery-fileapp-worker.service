@@ -12,6 +12,7 @@ WorkingDirectory=/opt/orch
 EnvironmentFile=/etc/orch/orch.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/orch
+Environment=ORCH_QUEUE_PROFILE=prod
 Environment=CELERY_ENABLED=true
 Environment=CELERY_FILEAPP_INGEST_ENABLED=true
 Environment=CELERY_GENERATE_FILE_ENABLED=false
@@ -19,6 +20,7 @@ Environment=CELERY_S3_FILES_INGEST_QUEUE=orch_fileapp_ingest_events
 Environment=CELERY_SOURCE_LIST_INGEST_QUEUE=orch_fileapp_source_list_ingest
 
 ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app worker \
+  --hostname=orch-celery-fileapp-worker@136_01 \
   --loglevel=INFO \
   --pool=prefork \
   --queues=orch_fileapp_ingest_events,orch_fileapp_source_list_ingest \
