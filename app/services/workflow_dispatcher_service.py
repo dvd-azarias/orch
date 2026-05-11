@@ -18,8 +18,11 @@ logger = get_logger(__name__)
 RESUMABLE_STOP_REASONS = {
     "scheduled_wait",
     "frozen_wait_active",
-    "session_execution_locked",
     "max_steps_reached",
+}
+BLOCKING_RUNNING_STOP_REASONS = {
+    "blocked_send_with_whatsapp",
+    "blocked_process_whatsapp_response",
 }
 FINAL_STOP_REASONS = {
     "finished_by_component",
@@ -101,6 +104,18 @@ async def advance_session_once(
                 state=0,
                 only_if_not_finished=True,
             )
+            return stopped_reason
+
+        if stopped_reason in BLOCKING_RUNNING_STOP_REASONS:
+            await set_session_state(
+                db_session,
+                session_id=session_id,
+                state=1,
+                only_if_not_finished=True,
+            )
+            return stopped_reason
+
+        if stopped_reason == "session_execution_locked":
             return stopped_reason
 
         logger.warning(

@@ -41,6 +41,11 @@ from app.services.workflow_engine import (
 
 _TEMPLATE_PATTERN = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 logger = get_logger(__name__)
+WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
+    "send_with_whatsapp": "blocked_send_with_whatsapp",
+    "proccess_whatsapp_response": "blocked_process_whatsapp_response",
+    "process_whatsapp_response": "blocked_process_whatsapp_response",
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,16 @@ class WorkflowExecutionError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _blocking_stop_reason_for_component(kind: str) -> str | None:
+    return WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND.get(kind)
+
+
+def _mark_blocking_execution(runtime_variables: dict[str, Any], *, stopped_reason: str) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta["blocking_execution"] = True
+    workflow_meta["blocking_stop_reason"] = stopped_reason
 
 
 def _read_enabled(settings: Any) -> bool:
@@ -100,6 +115,17 @@ def _read_next_cursor(runtime_variables: dict[str, Any]) -> str | None:
         return None
     text = str(raw).strip()
     return text or None
+
+
+def _read_blocking_stop_reason(runtime_variables: dict[str, Any]) -> str | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    if not workflow_meta.get("blocking_execution"):
+        return None
+    raw = workflow_meta.get("blocking_stop_reason")
+    if raw is None:
+        return "blocked_send_with_whatsapp"
+    text = str(raw).strip()
+    return text or "blocked_send_with_whatsapp"
 
 
 def _set_cursors(runtime_variables: dict[str, Any], *, last_cursor: str | None, next_cursor: str | None) -> None:
@@ -1504,10 +1530,17 @@ async def execute_workflow_m2_for_session(
     async def _finalize(result: WorkflowExecutionResult) -> WorkflowExecutionResult:
         finished_at = datetime.now(timezone.utc)
         total_latency_ms = (time.perf_counter() - execution_started_perf) * 1000
+        success_stop_reasons = {
+            "finished_by_component",
+            "scheduled_wait",
+            "end_of_branch",
+            "blocked_send_with_whatsapp",
+            "blocked_process_whatsapp_response",
+        }
         workflow_status = "success"
         if result.stopped_reason == "session_execution_locked":
             workflow_status = "locked"
-        elif result.stopped_reason not in {"finished_by_component", "scheduled_wait", "end_of_branch"}:
+        elif result.stopped_reason not in success_stop_reasons:
             workflow_status = "stopped"
 
         _append_metric(
@@ -1599,6 +1632,16 @@ async def execute_workflow_m2_for_session(
         current_card_uuid = session_state.get("next_card_uuid")
         if current_card_uuid is None:
             current_card_uuid = _read_next_cursor(runtime_variables)
+        if (blocking_stop_reason := _read_blocking_stop_reason(runtime_variables)) is not None:
+            return await _finalize(
+                WorkflowExecutionResult(
+                    True,
+                    0,
+                    blocking_stop_reason,
+                    session_state.get("last_card_uuid"),
+                    current_card_uuid,
+                )
+            )
         if current_card_uuid is None:
             return await _finalize(WorkflowExecutionResult(True, 0, "no_next_card", session_state.get("last_card_uuid"), None))
 
@@ -1664,6 +1707,59 @@ async def execute_workflow_m2_for_session(
                         db_session=db_session,
                         component=component,
                         runtime_variables=runtime_variables,
+                    )
+                elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
+                    resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
+                    last_card_uuid = next_card_uuid
+                    next_card_uuid = resolved_next
+                    executed_steps += 1
+                    _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                    _mark_blocking_execution(runtime_variables, stopped_reason=blocking_stop_reason)
+
+                    await replace_session_workflow_state(
+                        db_session,
+                        session_id=session_id,
+                        runtime_variables=runtime_variables,
+                        last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                        next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                    )
+                    step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                    step_finished_at = datetime.now(timezone.utc)
+                    _append_metric(
+                        metric_type="card",
+                        status="success",
+                        started_at=step_started_at,
+                        finished_at=step_finished_at,
+                        latency_ms=step_latency_ms,
+                        stopped_reason=blocking_stop_reason,
+                        step_index=executed_steps,
+                        card_cursor=last_card_uuid,
+                        component_kind_value=kind,
+                        details={"next_card_uuid": next_card_uuid},
+                    )
+                    logger.info(
+                        "workflow m2 card blocking",
+                        extra={
+                            "event": "orch.workflow.m2.card.blocking",
+                            "flow_uuid": flow_uuid,
+                            "session_id": session_id,
+                            "session_uuid": session_uuid_for_metrics,
+                            "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
+                            "component_kind": kind,
+                            "step_index": executed_steps,
+                            "latency_ms": round(step_latency_ms, 2),
+                            "stopped_reason": blocking_stop_reason,
+                            "metric_type": "card",
+                        },
+                    )
+                    return await _finalize(
+                        WorkflowExecutionResult(
+                            True,
+                            executed_steps,
+                            blocking_stop_reason,
+                            last_card_uuid,
+                            next_card_uuid,
+                        )
                     )
                 elif kind in {"wait", "scheduling_moment", "scheduling-moment"}:
                     resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
