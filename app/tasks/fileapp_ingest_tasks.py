@@ -13,6 +13,7 @@ from app.services.app_detector import APP_ARQUIVOS, detect_app
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_service import (
     load_mapping_items,
+    resolve_person_ids_for_rows,
     resolve_mapping_template_id,
     upsert_persons_from_rows,
 )
@@ -253,10 +254,20 @@ async def _process_fileapp_tipo1_event_task(
                 rows=rows,
                 mapping_items=mapping_items,
             )
-            for item_payload in payloads:
+            person_ids = await resolve_person_ids_for_rows(
+                db_session,
+                workspace_schema=workspace_schema,
+                rows=rows,
+                mapping_items=mapping_items,
+            )
+            for idx, item_payload in enumerate(payloads):
                 try:
                     item_payload_with_type = dict(item_payload)
                     item_payload_with_type["mapping_template_id"] = mapping_template_uuid
+                    file_data = item_payload_with_type.get("file")
+                    person_id = person_ids[idx] if idx < len(person_ids) else None
+                    if isinstance(file_data, dict) and person_id:
+                        file_data["person_id"] = person_id
                     await process_single_payload(
                         safe_workspace_uuid=safe_workspace_uuid,
                         workspace_schema=workspace_schema,
