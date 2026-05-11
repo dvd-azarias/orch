@@ -13,6 +13,7 @@ WorkingDirectory=/opt/orch
 EnvironmentFile=/etc/orch/orch.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/orch
+Environment=ORCH_QUEUE_PROFILE=prod
 Environment=CELERY_ENABLED=true
 Environment=CELERY_DISPATCH_QUEUE=orch_dispatch
 Environment=CELERY_EXECUTE_QUEUE=orch_execute
@@ -25,6 +26,7 @@ Environment=CELERY_FILEAPP_INGEST_ENABLED=false
 # --prefetch-multiplier=1 + -Ofair ajuda a reduzir "head-of-line blocking"
 # --max-tasks-per-child e --max-memory-per-child ajudam a estabilidade longa
 ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app worker \
+  --hostname=orch-celery-worker@136_01 \
   --loglevel=INFO \
   --pool=prefork \
   --queues=orch_dispatch,orch_execute,orch_heartbeat \

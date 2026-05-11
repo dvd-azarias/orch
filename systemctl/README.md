@@ -17,6 +17,7 @@ Arquivos:
 - Virtualenv em `/opt/orch/.venv`
 - Usuário/grupo `orch`
 - Arquivo de ambiente em `/etc/orch/orch.env` (copiar variáveis do `.env` do projeto)
+  - manter `ORCH_QUEUE_PROFILE=prod`
 - Diretório para scheduler do beat:
   - `sudo mkdir -p /var/lib/orch && sudo chown orch:orch /var/lib/orch`
 
@@ -56,6 +57,16 @@ sudo systemctl restart orch-api orch-celery-worker orch-celery-fileapp-worker or
 - `orch-celery-generate-file-beat`: beat do `generate_file`.
 
 Essa separação evita competição de consumo com outras aplicações e melhora visibilidade no Flower.
+
+## Hostnames padronizados (Flower)
+
+Nos workers de produção deste projeto, usar `--hostname` explícito:
+
+- `orch-celery-worker@136_01`
+- `orch-celery-fileapp-worker@136_01`
+- `orch-celery-generate-file-worker@136_01`
+
+Benefício: filtros estáveis no Flower por responsabilidade e host.
 
 ## Ajustes recomendados de performance
 

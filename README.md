@@ -677,6 +677,23 @@ Migrar a movimentação de cards do workflow para execução assíncrona com Cel
 
 Enquanto o `systemctl` não estiver consolidado para todas as fases, usar esta sequência padrão para subir os processos em desenvolvimento.
 
+### Comando operacional rápido: `SUBA_O_AMBIENTE`
+
+Convenção para operação no dia a dia com o agente:
+
+- Ao receber `SUBA_O_AMBIENTE`, o agente deve:
+  1. subir a stack completa das fases já homologadas (API + workers + beats);
+  2. validar `status` dos processos;
+  3. validar filas principais do runtime;
+  4. executar 1 smoke real (HTTP/curl) no workspace de teste;
+  5. responder “ambiente pronto para testes manuais”.
+- Execução padrão em DEV local:
+  - `scripts/dev_phase_stack.sh restart`
+  - `scripts/dev_phase_stack.sh status`
+- Quando solicitado explicitamente:
+  - `scripts/launchd_orch.sh restart`
+  - `scripts/launchd_orch.sh status`
+
 ### Protocolo de retomada entre fases (obrigatório)
 
 Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **encadeada** (fases anteriores em pé).
@@ -686,7 +703,7 @@ Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **en
   - `scripts/dev_phase_stack.sh status`
   - `scripts/dev_phase_stack.sh smoke 5`
   - `scripts/dev_phase_stack.sh stop`
-- O script já sobe API + worker/beat legado + worker/beat `generate_file`.
+- O script já sobe API + worker/beat legado + worker FileApp + worker/beat `generate_file`.
 - Para FileApp, manter worker dedicado separado do worker legado.
 - O script só dispara smoke após validar `workers ready`.
 - Em DEV local, os workers sobem com `--without-mingle --without-gossip` para evitar atraso de prontidão em brokers com muitos nós.
@@ -696,6 +713,31 @@ Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **en
   - depois verificar se o flow realmente alcança o card `generate_file` na revisão publicada.
 - Se houver intervenção em código/config durante a sessão:
   - reiniciar stack antes de novo teste real (`scripts/dev_phase_stack.sh restart`).
+
+### Política de desenvolvimento vs homologação (obrigatória)
+
+- Desenvolvimento/depuração: usar stack local completa, com todos os processos das fases já homologadas em execução.
+- Não usar o servidor de homologação como ambiente de debug contínuo a cada erro pequeno.
+- Fluxo recomendado:
+  1. corrigir localmente;
+  2. subir/reiniciar stack completa local;
+  3. validar E2E local;
+  4. só então publicar e validar em homolog.
+- Objetivo: preservar velocidade de desenvolvimento, evitar confusão de branch/versionamento e reduzir tempo de ciclo.
+
+### Perfil automático de filas por ambiente (obrigatório)
+
+- Variável canônica: `ORCH_QUEUE_PROFILE`.
+- Valores aceitos:
+  - `auto` (recomendado no `.env`): detecta macOS como `launchd_local` e Linux como `prod`;
+  - `launchd_local`;
+  - `f5_local`;
+  - `prod`.
+- Regra prática:
+  - manter `ORCH_QUEUE_PROFILE=auto` no `.env` compartilhado;
+  - `launchd` e scripts DEV já forçam perfil local;
+  - `systemd` força perfil `prod`.
+- Se precisar override pontual, usar `CELERY_*_QUEUE` explícitas.
 
 ### Serviços persistentes no macOS (`launchd`)
 
@@ -724,6 +766,22 @@ Topologia esperada no `launchd`:
 - `com.orch.celery.worker.generate_file`
 - `com.orch.celery.beat.generate_file`
 
+Padrão de hostname no Flower (DEV local):
+
+- `orch-celery-worker@_macbook_deivid_dev`
+- `orch-celery-fileapp-worker@_macbook_deivid_dev`
+- `orch-celery-generate-file-worker@_macbook_deivid_dev`
+
+Observação importante (DEV local):
+
+- A API local deve exportar as mesmas filas locais dos workers (`orch_*_launchd_local`), incluindo:
+  - `CELERY_DISPATCH_QUEUE`
+  - `CELERY_EXECUTE_QUEUE`
+  - `CELERY_HEARTBEAT_QUEUE`
+  - `CELERY_S3_FILES_INGEST_QUEUE`
+  - `CELERY_SOURCE_LIST_INGEST_QUEUE`
+- Se a API publicar em fila diferente do worker local, a sessão fica em `state=0` e o fluxo não avança.
+
 ### Serviços persistentes no Linux (`systemd`)
 
 - Arquivos de unit: `systemctl/*.service`
@@ -731,6 +789,27 @@ Topologia esperada no `launchd`:
 - Exemplo de ambiente: `systemctl/orch.env.example`
 - Script de operação (instalação/start/stop/status/logs):
   - `scripts/systemd_orch.sh`
+
+Unidades de produção (fase atual):
+
+- `orch-api.service`
+- `orch-celery-worker.service`
+- `orch-celery-fileapp-worker.service`
+- `orch-celery-beat.service`
+- `orch-celery-generate-file-worker.service`
+- `orch-celery-generate-file-beat.service`
+
+Padrão de hostname no Flower (servidor `10.1.20.136`):
+
+- `orch-celery-worker@136_01`
+- `orch-celery-fileapp-worker@136_01`
+- `orch-celery-generate-file-worker@136_01`
+
+Regra de filas em produção (importante):
+
+- Em `systemd`, o perfil deve ser sempre `ORCH_QUEUE_PROFILE=prod`.
+- Não usar filas locais em produção (`*_launchd_local`, `*_f5_local`, `*_diag*`).
+- As units oficiais `systemctl/*.service` já devem subir com perfil `prod`; manter esse padrão evita cruzamento com filas de DEV.
 
 Regra operacional:
 
@@ -748,7 +827,11 @@ Regra operacional:
 
 #### 2) Fase 4 — worker legado (dispatch/execute/heartbeat)
 
-- `celery -A app.core.celery_app:celery_app worker -Q orch_dispatch,orch_execute,orch_heartbeat -l INFO`
+- `celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-worker@136_01 -Q orch_dispatch,orch_execute,orch_heartbeat -l INFO`
+
+#### 2.1) Fase 4/7 — worker FileApp (ingest/process)
+
+- `celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-fileapp-worker@136_01 -Q orch_fileapp_ingest_events,orch_fileapp_source_list_ingest -l INFO`
 
 #### 3) Fase 4 — beat legado (somente tarefas legadas)
 
@@ -756,7 +839,7 @@ Regra operacional:
 
 #### 4) Fase 5 — worker generate_file
 
-- `CELERY_GENERATE_FILE_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 celery -A app.core.celery_app:celery_app worker -Q orch_component_generate_file_run,orch_component_generate_file_scan -l INFO`
+- `CELERY_GENERATE_FILE_WORKSPACE_UUID=ba7eb0ec-e565-447c-8c11-8f870cf72a60 celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-generate-file-worker@136_01 -Q orch_component_generate_file_run,orch_component_generate_file_scan -l INFO`
 
 #### 5) Fase 5 — beat generate_file (somente scan do componente)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import HTTPException
@@ -17,6 +18,7 @@ from app.services.workflow_runtime_service import WorkflowBootstrapError, bootst
 from app.tasks.workflow_tasks import advance_session_task
 
 logger = get_logger(__name__)
+_CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
 
 
 def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | None:
@@ -188,19 +190,26 @@ async def process_single_payload(
     if workflow_bootstrap and workflow_bootstrap.get("loaded"):
         settings = get_settings()
         if settings.celery_enabled:
+            enqueue_workspace_uuid = safe_workspace_uuid
+
             try:
-                enqueue_workspace_uuid = safe_workspace_uuid
-                if enqueue_workspace_uuid is not None:
-                    advance_session_task.delay(
-                        workspace_uuid=enqueue_workspace_uuid,
-                        flow_uuid=flow_uuid,
-                        session_id=persisted.session_id,
-                    )
-                else:
-                    advance_session_task.delay(
-                        flow_uuid=flow_uuid,
-                        session_id=persisted.session_id,
-                    )
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: (
+                            advance_session_task.delay(
+                                workspace_uuid=enqueue_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                session_id=persisted.session_id,
+                            )
+                            if enqueue_workspace_uuid is not None
+                            else advance_session_task.delay(
+                                flow_uuid=flow_uuid,
+                                session_id=persisted.session_id,
+                            )
+                        )
+                    ),
+                    timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+                )
                 workflow_execution = {
                     "mode": "async",
                     "enqueued": True,
@@ -208,16 +217,45 @@ async def process_single_payload(
                     "workspace_uuid": enqueue_workspace_uuid,
                 }
             except TypeError:
-                advance_session_task.delay(
-                    flow_uuid=flow_uuid,
-                    session_id=persisted.session_id,
-                )
-                workflow_execution = {
-                    "mode": "async",
-                    "enqueued": True,
-                    "dispatcher": "celery",
-                    "workspace_uuid": safe_workspace_uuid,
-                }
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda: advance_session_task.delay(
+                                flow_uuid=flow_uuid,
+                                session_id=persisted.session_id,
+                            )
+                        ),
+                        timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+                    )
+                    workflow_execution = {
+                        "mode": "async",
+                        "enqueued": True,
+                        "dispatcher": "celery",
+                        "workspace_uuid": safe_workspace_uuid,
+                    }
+                except Exception as exc:
+                    await persist_alarm(
+                        db_session,
+                        level="error",
+                        code="workflow_m2_enqueue_failed",
+                        message="Falha ao enfileirar execução assíncrona do workflow.",
+                        details={
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                        },
+                        flow_uuid=flow_uuid,
+                        app_name=app_name,
+                        entity=extracted.entity,
+                        entity_type=extracted.entity_type,
+                        entity_address=extracted.entity_address,
+                        session_uuid=persisted.session_uuid,
+                    )
+                    workflow_execution = {
+                        "mode": "async",
+                        "enqueued": False,
+                        "dispatcher": "celery",
+                        "workspace_uuid": safe_workspace_uuid,
+                    }
             except Exception as exc:
                 await persist_alarm(
                     db_session,

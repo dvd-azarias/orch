@@ -12,6 +12,7 @@ WorkingDirectory=/opt/orch
 EnvironmentFile=/etc/orch/orch.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/orch
+Environment=ORCH_QUEUE_PROFILE=prod
 Environment=CELERY_ENABLED=true
 Environment=CELERY_BEAT_HEARTBEAT_ENABLED=false
 Environment=CELERY_BEAT_DISPATCH_ENABLED=false

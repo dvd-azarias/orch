@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -57,6 +58,7 @@ class Settings:
     otima_llm_api_gateway: str | None
     otima_llm_api_key: str | None
     otima_llm_api_timeout_seconds: float
+    orch_queue_profile: str
 
     @property
     def psycopg_dsn(self) -> str:
@@ -129,9 +131,66 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+def _resolve_queue_profile() -> str:
+    raw_profile = (_read_env_optional("ORCH_QUEUE_PROFILE", "auto") or "auto").strip().lower()
+    if raw_profile in {"prod", "production"}:
+        return "prod"
+    if raw_profile in {"launchd_local", "local_launchd", "dev_launchd"}:
+        return "launchd_local"
+    if raw_profile in {"f5_local", "dev_f5_local"}:
+        return "f5_local"
+    if raw_profile in {"local", "dev"}:
+        return "launchd_local"
+    if raw_profile != "auto":
+        raise ValueError(f"Valor inválido para ORCH_QUEUE_PROFILE: {raw_profile}")
+
+    is_darwin = platform.system().strip().lower() == "darwin"
+    return "launchd_local" if is_darwin else "prod"
+
+
+def _default_queue_by_profile(profile: str, queue_key: str) -> str:
+    base = {
+        "dispatch": "orch_dispatch",
+        "execute": "orch_execute",
+        "heartbeat": "orch_heartbeat",
+        "fileapp_ingest": "orch_fileapp_ingest_events",
+        "fileapp_process": "orch_fileapp_source_list_ingest",
+        "generate_file_run": "orch_component_generate_file_run",
+        "generate_file_scan": "orch_component_generate_file_scan",
+    }
+    if queue_key not in base:
+        raise ValueError(f"Queue key desconhecida: {queue_key}")
+    if profile == "prod":
+        return base[queue_key]
+    if profile == "launchd_local":
+        mapping = {
+            "dispatch": "orch_dispatch_launchd_local",
+            "execute": "orch_execute_launchd_local",
+            "heartbeat": "orch_heartbeat_launchd_local",
+            "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
+            "fileapp_process": "orch_fileapp_source_list_launchd_local",
+            "generate_file_run": "orch_component_generate_file_run_launchd_local",
+            "generate_file_scan": "orch_component_generate_file_scan_launchd_local",
+        }
+        return mapping[queue_key]
+    if profile == "f5_local":
+        mapping = {
+            "dispatch": "orch_dispatch_f5_local",
+            "execute": "orch_execute_f5_local",
+            "heartbeat": "orch_heartbeat_f5_local",
+            "fileapp_ingest": "orch_fileapp_ingest_f5_local",
+            "fileapp_process": "orch_fileapp_source_list_f5_local",
+            "generate_file_run": "orch_component_generate_file_run_f5_local",
+            "generate_file_scan": "orch_component_generate_file_scan_f5_local",
+        }
+        return mapping[queue_key]
+    raise ValueError(f"Perfil de fila não suportado: {profile}")
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     _load_dotenv(Path(".env"))
+    queue_profile = _resolve_queue_profile()
     rabbitmq_host = _read_env_optional("RABBITMQ_HOST")
     rabbitmq_port = _read_env_optional("RABBITMQ_PORT", "5672")
     rabbitmq_user = _read_env_optional("RABBITMQ_USER")
@@ -169,9 +228,18 @@ def get_settings() -> Settings:
         celery_result_backend=result_backend,
         celery_dispatch_interval_seconds=_read_env_int("CELERY_DISPATCH_INTERVAL_SECONDS", 2),
         celery_dispatch_batch_size=_read_env_int("CELERY_DISPATCH_BATCH_SIZE", 100),
-        celery_dispatch_queue=_read_env_optional("CELERY_DISPATCH_QUEUE", "orch_dispatch") or "orch_dispatch",
-        celery_execute_queue=_read_env_optional("CELERY_EXECUTE_QUEUE", "orch_execute") or "orch_execute",
-        celery_heartbeat_queue=_read_env_optional("CELERY_HEARTBEAT_QUEUE", "orch_heartbeat") or "orch_heartbeat",
+        celery_dispatch_queue=(
+            _read_env_optional("CELERY_DISPATCH_QUEUE", _default_queue_by_profile(queue_profile, "dispatch"))
+            or _default_queue_by_profile(queue_profile, "dispatch")
+        ),
+        celery_execute_queue=(
+            _read_env_optional("CELERY_EXECUTE_QUEUE", _default_queue_by_profile(queue_profile, "execute"))
+            or _default_queue_by_profile(queue_profile, "execute")
+        ),
+        celery_heartbeat_queue=(
+            _read_env_optional("CELERY_HEARTBEAT_QUEUE", _default_queue_by_profile(queue_profile, "heartbeat"))
+            or _default_queue_by_profile(queue_profile, "heartbeat")
+        ),
         celery_beat_heartbeat_enabled=_read_env_bool("CELERY_BEAT_HEARTBEAT_ENABLED", True),
         celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
         celery_dispatch_workspace_uuid=_read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
@@ -182,24 +250,24 @@ def get_settings() -> Settings:
         celery_generate_file_scan_enabled=_read_env_bool("CELERY_GENERATE_FILE_SCAN_ENABLED", True),
         celery_generate_file_scan_interval_seconds=_read_env_int("CELERY_GENERATE_FILE_SCAN_INTERVAL_SECONDS", 10),
         celery_generate_file_run_queue=(
-            _read_env_optional("CELERY_GENERATE_FILE_RUN_QUEUE", "orch_component_generate_file_run")
-            or "orch_component_generate_file_run"
+            _read_env_optional("CELERY_GENERATE_FILE_RUN_QUEUE", _default_queue_by_profile(queue_profile, "generate_file_run"))
+            or _default_queue_by_profile(queue_profile, "generate_file_run")
         ),
         celery_generate_file_scan_queue=(
-            _read_env_optional("CELERY_GENERATE_FILE_SCAN_QUEUE", "orch_component_generate_file_scan")
-            or "orch_component_generate_file_scan"
+            _read_env_optional("CELERY_GENERATE_FILE_SCAN_QUEUE", _default_queue_by_profile(queue_profile, "generate_file_scan"))
+            or _default_queue_by_profile(queue_profile, "generate_file_scan")
         ),
         celery_generate_file_scan_batch_size=_read_env_int("CELERY_GENERATE_FILE_SCAN_BATCH_SIZE", 200),
         celery_generate_file_stale_processing_minutes=_read_env_int("CELERY_GENERATE_FILE_STALE_PROCESSING_MINUTES", 5),
         celery_generate_file_workspace_uuid=_read_env_optional("CELERY_GENERATE_FILE_WORKSPACE_UUID"),
         celery_fileapp_ingest_enabled=_read_env_bool("CELERY_FILEAPP_INGEST_ENABLED", True),
         celery_s3_files_ingest_queue=(
-            _read_env_optional("CELERY_S3_FILES_INGEST_QUEUE", "orch_fileapp_ingest_events")
-            or "orch_fileapp_ingest_events"
+            _read_env_optional("CELERY_S3_FILES_INGEST_QUEUE", _default_queue_by_profile(queue_profile, "fileapp_ingest"))
+            or _default_queue_by_profile(queue_profile, "fileapp_ingest")
         ),
         celery_source_list_ingest_queue=(
-            _read_env_optional("CELERY_SOURCE_LIST_INGEST_QUEUE", "orch_fileapp_source_list_ingest")
-            or "orch_fileapp_source_list_ingest"
+            _read_env_optional("CELERY_SOURCE_LIST_INGEST_QUEUE", _default_queue_by_profile(queue_profile, "fileapp_process"))
+            or _default_queue_by_profile(queue_profile, "fileapp_process")
         ),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
@@ -212,4 +280,5 @@ def get_settings() -> Settings:
         otima_llm_api_gateway=_read_env_optional("OTIMA_LLM_API_GATEWAY"),
         otima_llm_api_key=_read_env_optional("OTIMA_LLM_API_KEY"),
         otima_llm_api_timeout_seconds=float(_read_env_optional("OTIMA_LLM_API_TIMEOUT_SECONDS", "10.0") or "10.0"),
+        orch_queue_profile=queue_profile,
     )

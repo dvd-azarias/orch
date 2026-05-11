@@ -26,6 +26,12 @@ FINAL_STOP_REASONS = {
     "end_of_branch",
     "no_next_card",
 }
+FATAL_NON_RESUMABLE_STOP_REASONS = {
+    "flow_not_found",
+    "revision_not_found",
+    "session_not_found",
+    "component_not_found",
+}
 
 
 async def claim_pending_sessions(
@@ -106,4 +112,10 @@ async def advance_session_once(
                 "stopped_reason": stopped_reason,
             },
         )
+        if stopped_reason in FATAL_NON_RESUMABLE_STOP_REASONS or stopped_reason.startswith("component_not_supported"):
+            await mark_session_finished(
+                db_session,
+                session_id=session_id,
+            )
+            return stopped_reason
         return result.stopped_reason

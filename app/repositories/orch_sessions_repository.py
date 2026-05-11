@@ -713,6 +713,11 @@ async def claim_pending_sessions_for_dispatch(
                     state = 0
                     AND next_card_uuid IS NOT NULL
                     AND ended_at IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM flow_v2 f
+                        WHERE f.id = orch_sessions.flow_uuid
+                    )
                     AND (
                         frozen_until IS NULL
                         OR frozen_until <= NOW()

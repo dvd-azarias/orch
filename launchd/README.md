@@ -30,6 +30,8 @@ Script:
 - `scripts/launchd_orch.sh uninstall`
 - `scripts/launchd_orch.sh logs`
 
+Os templates `launchd` forçam `ORCH_QUEUE_PROFILE=launchd_local`.
+
 ## Regra de manutenção (obrigatória)
 
 Sempre que houver intervenção de código em API, workers, beats, filas ou configuração:
@@ -37,3 +39,11 @@ Sempre que houver intervenção de código em API, workers, beats, filas ou conf
 1. reiniciar os serviços afetados (`scripts/launchd_orch.sh restart`);
 2. validar `status`;
 3. executar smoke real (`scripts/dev_phase_stack.sh smoke 5` ou equivalente).
+
+## Hostnames padronizados no Flower (DEV)
+
+Workers locais sobem com `--hostname` explícito:
+
+- `orch-celery-worker@_macbook_deivid_dev`
+- `orch-celery-fileapp-worker@_macbook_deivid_dev`
+- `orch-celery-generate-file-worker@_macbook_deivid_dev`

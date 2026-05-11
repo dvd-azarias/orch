@@ -110,9 +110,11 @@ wait_for_api() {
 
 wait_for_workers_ready() {
   local legacy_log="${RUN_DIR}/worker_legacy.log"
+  local fileapp_log="${RUN_DIR}/worker_fileapp.log"
   local gf_log="${RUN_DIR}/worker_generate_file.log"
   for _ in $(seq 1 60); do
     if rg -q "orch-worker-legacy@.* ready\\." "${legacy_log}" 2>/dev/null \
+      && rg -q "orch-worker-fileapp@.* ready\\." "${fileapp_log}" 2>/dev/null \
       && rg -q "orch-worker-gf@.* ready\\." "${gf_log}" 2>/dev/null; then
       echo "[ok] workers celery estão prontos."
       return 0
@@ -126,25 +128,30 @@ wait_for_workers_ready() {
 start_all() {
   show_env
   start_proc "api" \
-    "CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} uvicorn app.main:app --host ${API_HOST} --port ${API_PORT}"
+    "ORCH_QUEUE_PROFILE=f5_local CELERY_DISPATCH_QUEUE=${DISPATCH_QUEUE} CELERY_EXECUTE_QUEUE=${EXECUTE_QUEUE} CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE} CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} uvicorn app.main:app --host ${API_HOST} --port ${API_PORT}"
   wait_for_api
   start_proc "worker_legacy" \
-    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true \
+    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
 CELERY_DISPATCH_QUEUE=${DISPATCH_QUEUE} CELERY_EXECUTE_QUEUE=${EXECUTE_QUEUE} CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE} \
-CELERY_FILEAPP_INGEST_ENABLED=true CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} \
+CELERY_FILEAPP_INGEST_ENABLED=false CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} \
 CELERY_DISPATCH_WORKSPACE_UUID=${WORKSPACE_UUID} \
-celery -A app.core.celery_app:celery_app worker -n orch-worker-legacy@%h -Q ${DISPATCH_QUEUE},${EXECUTE_QUEUE},${HEARTBEAT_QUEUE},${FILEAPP_INGEST_QUEUE},${FILEAPP_PROCESS_QUEUE} --without-mingle --without-gossip -l INFO"
+celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-worker@_macbook_deivid_dev -n orch-worker-legacy@%h -Q ${DISPATCH_QUEUE},${EXECUTE_QUEUE},${HEARTBEAT_QUEUE} --without-mingle --without-gossip -l INFO"
+  start_proc "worker_fileapp" \
+    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
+CELERY_FILEAPP_INGEST_ENABLED=true CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} \
+CELERY_GENERATE_FILE_ENABLED=false \
+celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-fileapp-worker@_macbook_deivid_dev -n orch-worker-fileapp@%h -Q ${FILEAPP_INGEST_QUEUE},${FILEAPP_PROCESS_QUEUE} --without-mingle --without-gossip -l INFO"
   start_proc "beat_legacy" \
-    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true \
+    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
 CELERY_DISPATCH_QUEUE=${DISPATCH_QUEUE} CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE} \
 CELERY_DISPATCH_WORKSPACE_UUID=${WORKSPACE_UUID} \
 CELERY_GENERATE_FILE_ENABLED=false \
 celery -A app.core.celery_app:celery_app beat --schedule=/tmp/orch-celerybeat-legacy-f5-local -l INFO"
   start_proc "worker_generate_file" \
-    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true \
+    "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
 CELERY_GENERATE_FILE_ENABLED=true CELERY_GENERATE_FILE_WORKSPACE_UUID=${WORKSPACE_UUID} \
 CELERY_GENERATE_FILE_RUN_QUEUE=${GF_RUN_QUEUE} CELERY_GENERATE_FILE_SCAN_QUEUE=${GF_SCAN_QUEUE} \
-celery -A app.core.celery_app:celery_app worker -n orch-worker-gf@%h -Q ${GF_RUN_QUEUE},${GF_SCAN_QUEUE} --without-mingle --without-gossip -l INFO"
+celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-generate-file-worker@_macbook_deivid_dev -n orch-worker-gf@%h -Q ${GF_RUN_QUEUE},${GF_SCAN_QUEUE} --without-mingle --without-gossip -l INFO"
   start_proc "beat_generate_file" \
     "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true \
 CELERY_BEAT_DISPATCH_ENABLED=false CELERY_BEAT_HEARTBEAT_ENABLED=false \
@@ -158,6 +165,7 @@ stop_all() {
   stop_proc "beat_generate_file"
   stop_proc "worker_generate_file"
   stop_proc "beat_legacy"
+  stop_proc "worker_fileapp"
   stop_proc "worker_legacy"
   stop_proc "api"
 }
@@ -165,6 +173,7 @@ stop_all() {
 status_all() {
   status_proc "api"
   status_proc "worker_legacy"
+  status_proc "worker_fileapp"
   status_proc "beat_legacy"
   status_proc "worker_generate_file"
   status_proc "beat_generate_file"

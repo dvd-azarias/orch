@@ -14,7 +14,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true CELERY_FILEAPP_INGEST_ENABLED=true CELERY_S3_FILES_INGEST_QUEUE=orch_fileapp_ingest_launchd_local CELERY_SOURCE_LIST_INGEST_QUEUE=orch_fileapp_source_list_launchd_local CELERY_GENERATE_FILE_ENABLED=false &amp;&amp; exec celery -A app.core.celery_app:celery_app worker -n orch-worker-fileapp@%h -Q orch_fileapp_ingest_launchd_local,orch_fileapp_source_list_launchd_local --without-mingle --without-gossip -l INFO</string>
+    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=launchd_local CELERY_FILEAPP_INGEST_ENABLED=true CELERY_S3_FILES_INGEST_QUEUE=orch_fileapp_ingest_launchd_local CELERY_SOURCE_LIST_INGEST_QUEUE=orch_fileapp_source_list_launchd_local CELERY_GENERATE_FILE_ENABLED=false &amp;&amp; exec celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-fileapp-worker@_macbook_deivid_dev -n orch-worker-fileapp@%h -Q orch_fileapp_ingest_launchd_local,orch_fileapp_source_list_launchd_local --without-mingle --without-gossip -l INFO</string>
   </array>
   <key>StandardOutPath</key>
   <string>__REPO_ROOT__/.runlogs/launchd/worker_fileapp.out.log</string>
