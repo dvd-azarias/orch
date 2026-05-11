@@ -1003,3 +1003,41 @@ Em toda validação de FileApp, deve existir evidência de:
 3. Capturar `task_id` da resposta.
 4. Validar logs do worker para ingest/process desse `task_id`.
 5. Validar SQL no workspace alvo conforme a matriz canônica (`tipo_1`/`tipo_2`).
+
+## Fase 8 — Componentes WhatsApp (modo bloqueante inicial)
+
+### Escopo implementado nesta etapa
+
+Componentes adicionados no motor M2 com comportamento bloqueante:
+
+- `send_with_whatsapp`
+- `proccess_whatsapp_response` (compatível também com `process_whatsapp_response`)
+
+Importante:
+- nesta etapa, estes componentes **não** realizam envio efetivo;
+- a função é preparar o ponto de retomada do fluxo para etapas futuras da fase.
+
+### Regra de execução (intencional)
+
+Ao encontrar um dos componentes acima durante a execução:
+
+1. interrompe o avanço de cards;
+2. persiste `last_card_uuid` como o card atual (bloqueante);
+3. persiste `next_card_uuid` com o próximo card do grafo;
+4. mantém a sessão em execução (`state=1`, running);
+5. não finaliza sessão (`ended_at` permanece `NULL`).
+
+### Sinais de observabilidade esperados
+
+- `stopped_reason=blocked_send_with_whatsapp`
+- `stopped_reason=blocked_process_whatsapp_response`
+
+Esses motivos devem aparecer nas métricas/logs como parada controlada (não erro).
+
+### Motivação arquitetural
+
+Embora simples, este comportamento é proposital:
+
+- preserva cursor de retomada sem perda de contexto;
+- evita avanço automático indevido antes da resposta de canal;
+- prepara a evolução da Fase 8 para envio/retorno reais mantendo o motor estável.

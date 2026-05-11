@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 import pytest
 import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
+    _blocking_stop_reason_for_component,
     _compute_frozen_until,
+    _mark_blocking_execution,
+    _read_blocking_stop_reason,
     _run_api_call,
     _run_code_editor,
     _run_condition,
@@ -13,6 +16,24 @@ from app.services.workflow_m2_service import (
     _run_intelligent_agent,
     _run_set_variables,
 )
+
+
+def test_blocking_stop_reason_for_whatsapp_components() -> None:
+    assert _blocking_stop_reason_for_component("send_with_whatsapp") == "blocked_send_with_whatsapp"
+    assert _blocking_stop_reason_for_component("proccess_whatsapp_response") == "blocked_process_whatsapp_response"
+    assert _blocking_stop_reason_for_component("process_whatsapp_response") == "blocked_process_whatsapp_response"
+    assert _blocking_stop_reason_for_component("generate_file") is None
+
+
+def test_blocking_execution_roundtrip_in_runtime_meta() -> None:
+    runtime_variables: dict[str, object] = {}
+    assert _read_blocking_stop_reason(runtime_variables) is None
+
+    _mark_blocking_execution(
+        runtime_variables, stopped_reason="blocked_process_whatsapp_response"
+    )
+
+    assert _read_blocking_stop_reason(runtime_variables) == "blocked_process_whatsapp_response"
 
 
 def test_set_variables_renders_template_into_runtime() -> None:
