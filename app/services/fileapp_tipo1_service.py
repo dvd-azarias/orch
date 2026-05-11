@@ -230,3 +230,40 @@ async def upsert_persons_from_rows(
         )
         inserted_or_updated += 1
     return inserted_or_updated, skipped
+
+
+async def resolve_person_ids_for_rows(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    rows: list[dict[str, Any]],
+    mapping_items: list[MappingItem],
+) -> list[str | None]:
+    safe_schema = workspace_schema.replace('"', '""')
+    identifiers_by_index: list[str | None] = []
+    unique_identifiers: set[str] = set()
+
+    for row in rows:
+        mapped = _map_row_to_person_payload(row, mapping_items)
+        identifier = str(mapped.get("identifier")).strip() if mapped else ""
+        if identifier:
+            identifiers_by_index.append(identifier)
+            unique_identifiers.add(identifier)
+        else:
+            identifiers_by_index.append(None)
+
+    if not unique_identifiers:
+        return [None for _ in rows]
+
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT identifier, id
+            FROM "{safe_schema}".persons
+            WHERE identifier = ANY(CAST(:identifiers AS text[]))
+            """
+        ),
+        {"identifiers": list(unique_identifiers)},
+    )
+    person_id_by_identifier = {str(row[0]): str(row[1]) for row in result.fetchall()}
+    return [person_id_by_identifier.get(identifier) if identifier else None for identifier in identifiers_by_index]

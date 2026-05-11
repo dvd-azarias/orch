@@ -53,3 +53,21 @@ def test_extract_arquivos_tipo1_uses_person_entity_type() -> None:
     extracted = extract_arquivos_session_fields(payload)
     assert extracted.entity == "file-xyz:01392286840"
     assert extracted.entity_type == "person"
+
+
+def test_extract_arquivos_tipo1_prefers_person_id_for_entity() -> None:
+    payload = {
+        "mapping_template_id": "66fe246a-a60a-4c26-9363-199206bceabd",
+        "file": {
+            "id": "file-xyz",
+            "folder_path": "system/mailings",
+            "original_name": "mailing.csv",
+            "person_id": "920",
+            "content": {"cpf": "01392286840"},
+        },
+    }
+
+    extracted = extract_arquivos_session_fields(payload)
+    assert extracted.entity_type == "person"
+    assert extracted.entity == "920"
+    assert extracted.entity_session_id == "920"
