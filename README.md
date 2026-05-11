@@ -687,6 +687,7 @@ Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **en
   - `scripts/dev_phase_stack.sh smoke 5`
   - `scripts/dev_phase_stack.sh stop`
 - O script já sobe API + worker/beat legado + worker/beat `generate_file`.
+- Para FileApp, manter worker dedicado separado do worker legado.
 - O script só dispara smoke após validar `workers ready`.
 - Em DEV local, os workers sobem com `--without-mingle --without-gossip` para evitar atraso de prontidão em brokers com muitos nós.
 - O script usa filas isoladas `*_f5_local` por padrão e workspace escopado em `ba7eb0ec-e565-447c-8c11-8f870cf72a60`.
@@ -713,6 +714,23 @@ Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **en
   - `scripts/launchd_orch.sh status`
   - `scripts/launchd_orch.sh restart`
   - `scripts/launchd_orch.sh stop`
+
+Topologia esperada no `launchd`:
+
+- `com.orch.api`
+- `com.orch.celery.worker.legacy` (filas `dispatch/execute/heartbeat`)
+- `com.orch.celery.worker.fileapp` (filas `FileApp`)
+- `com.orch.celery.beat.legacy`
+- `com.orch.celery.worker.generate_file`
+- `com.orch.celery.beat.generate_file`
+
+### Serviços persistentes no Linux (`systemd`)
+
+- Arquivos de unit: `systemctl/*.service`
+- Serviço dedicado para FileApp: `systemctl/orch-celery-fileapp-worker.service`
+- Exemplo de ambiente: `systemctl/orch.env.example`
+- Script de operação (instalação/start/stop/status/logs):
+  - `scripts/systemd_orch.sh`
 
 Regra operacional:
 
@@ -824,5 +842,81 @@ Adicionar campos de controle de atribuição na `ws_*.orch_sessions` com migrati
 - [x] Registrar migration no pipeline oficial (`migrate-all` / `migrate-workspace`).
 - [x] Executar `python -m app.cli migrate-workspace ba7eb0ec-e565-447c-8c11-8f870cf72a60`.
 - [x] Aplicar em todos os workspaces ativos (cobertura confirmada: `80/80` com versão `0007`).
-- [ ] Aplicar correção `0008_fix_assigned_fields_to_timestamps` em todos os workspaces ativos.
-- [ ] Validar presença das colunas finais em `ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60.orch_sessions`.
+- [x] Aplicar correção `0008_fix_assigned_fields_to_timestamps` em todos os workspaces ativos.
+- [x] Validar presença das colunas finais em `ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60.orch_sessions`.
+
+## Fase 7 — FileAPP ingest na rota atual
+
+### Objetivo
+
+Migrar o mecanismo de ingestão por evento de arquivo para dentro do `orch`, sem criar nova rota.
+
+### Contrato de entrada (mantido)
+
+- Entrada via rota já existente:
+  - `POST /v1/orch/{workspace_uuid}/{flow_uuid}`
+- Comportamento especial quando `detect_app(payload) == ArquivosApp`:
+  - enfileira pipeline assíncrono de ingestão de arquivo;
+  - baixa arquivo via URL do evento (`file.url`) com headers `SYNC_WS_*`;
+  - com `mapping_template` (`tipo_1`): popula `persons` e também cria `orch_sessions` por linha;
+  - sem `mapping_template` (`tipo_2`): mantém ingestão linha a linha em `orch_sessions`.
+
+### Filas RabbitMQ (isoladas no ORCH)
+
+- `orch_fileapp_ingest_events` (default da aplicação):
+  - task de entrada: `app.tasks.fileapp.ingest_event`
+- `orch_fileapp_source_list_ingest` (default da aplicação):
+  - task de processamento: `app.tasks.fileapp.process_event`
+
+Observação:
+- em ambientes locais, usar nomes dedicados por stack (ex.: `*_launchd_local`, `*_f5_local`) para não compartilhar consumo com outras aplicações.
+
+### Observações operacionais
+
+- Não criar endpoint novo para webhook de arquivos nesta fase.
+- Decisão explícita:
+  - `tipo_1` (`mapping_template` presente): `persons` + `orch_sessions`;
+  - `tipo_2` (`mapping_template` ausente): somente `orch_sessions`.
+
+### Regra canônica de decisão (fonte de verdade)
+
+| Condição no evento FileApp | Tipo | Efeito obrigatório |
+|---|---|---|
+| `mapping_template` presente | `tipo_1` | Persistir em `persons` **e** `orch_sessions` |
+| `mapping_template` ausente | `tipo_2` | Persistir **somente** em `orch_sessions` |
+
+Critérios de implementação:
+- A decisão deve ser feita no início do fluxo e não pode ser ambígua.
+- Não deve haver fallback silencioso de `tipo_1` para `tipo_2`.
+- A rota de entrada permanece única: `POST /v1/orch/{workspace_uuid}/{flow_uuid}`.
+
+### Logs obrigatórios (anti-regressão)
+
+Em toda validação de FileApp, deve existir evidência de:
+- aceite da API com pipeline:
+  - `fileapp_tipo1_ingest` ou `fileapp_tipo2_ingest`;
+- ingest enfileirada/recebida no worker;
+- processamento finalizado no worker:
+  - `fileapp.tipo1.process_event.finished` ou `fileapp.process_event.finished`.
+
+### Definition of Done (FileApp)
+
+`tipo_1` (com `mapping_template`):
+- [ ] `202 accepted` com pipeline `fileapp_tipo1_ingest`
+- [ ] task de ingest/process concluídas nos logs
+- [ ] pelo menos 1 registro correspondente em `orch_sessions`
+- [ ] pelo menos 1 registro correspondente em `persons`
+
+`tipo_2` (sem `mapping_template`):
+- [ ] `202 accepted` com pipeline `fileapp_tipo2_ingest`
+- [ ] task de ingest/process concluídas nos logs
+- [ ] pelo menos 1 registro correspondente em `orch_sessions`
+- [ ] nenhuma exigência de escrita em `persons`
+
+### Runbook curto de teste E2E (5 passos)
+
+1. Subir stack (modo único: `launchd` **ou** `dev_phase_stack`, nunca ambos).
+2. Disparar `curl` na rota oficial com payload de FileApp.
+3. Capturar `task_id` da resposta.
+4. Validar logs do worker para ingest/process desse `task_id`.
+5. Validar SQL no workspace alvo conforme a matriz canônica (`tipo_1`/`tipo_2`).

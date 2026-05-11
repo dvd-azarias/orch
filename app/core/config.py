@@ -46,6 +46,9 @@ class Settings:
     celery_generate_file_scan_batch_size: int
     celery_generate_file_stale_processing_minutes: int
     celery_generate_file_workspace_uuid: str | None
+    celery_fileapp_ingest_enabled: bool
+    celery_s3_files_ingest_queue: str
+    celery_source_list_ingest_queue: str
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
@@ -189,6 +192,15 @@ def get_settings() -> Settings:
         celery_generate_file_scan_batch_size=_read_env_int("CELERY_GENERATE_FILE_SCAN_BATCH_SIZE", 200),
         celery_generate_file_stale_processing_minutes=_read_env_int("CELERY_GENERATE_FILE_STALE_PROCESSING_MINUTES", 5),
         celery_generate_file_workspace_uuid=_read_env_optional("CELERY_GENERATE_FILE_WORKSPACE_UUID"),
+        celery_fileapp_ingest_enabled=_read_env_bool("CELERY_FILEAPP_INGEST_ENABLED", True),
+        celery_s3_files_ingest_queue=(
+            _read_env_optional("CELERY_S3_FILES_INGEST_QUEUE", "orch_fileapp_ingest_events")
+            or "orch_fileapp_ingest_events"
+        ),
+        celery_source_list_ingest_queue=(
+            _read_env_optional("CELERY_SOURCE_LIST_INGEST_QUEUE", "orch_fileapp_source_list_ingest")
+            or "orch_fileapp_source_list_ingest"
+        ),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
             "ORCH_DEFAULT_WORKSPACE_UUID",

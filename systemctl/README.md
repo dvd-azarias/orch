@@ -6,6 +6,7 @@
 Arquivos:
 - `systemctl/orch-api.service`
 - `systemctl/orch-celery-worker.service`
+- `systemctl/orch-celery-fileapp-worker.service`
 - `systemctl/orch-celery-beat.service`
 - `systemctl/orch-celery-generate-file-worker.service`
 - `systemctl/orch-celery-generate-file-beat.service`
@@ -24,24 +25,37 @@ Arquivos:
 ```bash
 sudo cp systemctl/orch-api.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-worker.service /etc/systemd/system/
+sudo cp systemctl/orch-celery-fileapp-worker.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-beat.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-generate-file-worker.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-generate-file-beat.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now orch-api orch-celery-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
+sudo systemctl enable --now orch-api orch-celery-worker orch-celery-fileapp-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 ```
 
 ## Comandos úteis
 
 ```bash
-sudo systemctl status orch-api orch-celery-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
+sudo systemctl status orch-api orch-celery-worker orch-celery-fileapp-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 sudo journalctl -u orch-api -f
 sudo journalctl -u orch-celery-worker -f
+sudo journalctl -u orch-celery-fileapp-worker -f
 sudo journalctl -u orch-celery-beat -f
 sudo journalctl -u orch-celery-generate-file-worker -f
 sudo journalctl -u orch-celery-generate-file-beat -f
-sudo systemctl restart orch-api orch-celery-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
+sudo systemctl restart orch-api orch-celery-worker orch-celery-fileapp-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 ```
+
+## Topologia recomendada (fase atual)
+
+- `orch-api`: API FastAPI.
+- `orch-celery-worker`: filas de workflow (`orch_dispatch`, `orch_execute`, `orch_heartbeat`).
+- `orch-celery-fileapp-worker`: filas FileApp (`orch_fileapp_ingest_events`, `orch_fileapp_source_list_ingest`).
+- `orch-celery-beat`: beat do workflow (dispatch/heartbeat).
+- `orch-celery-generate-file-worker`: worker do componente `generate_file`.
+- `orch-celery-generate-file-beat`: beat do `generate_file`.
+
+Essa separação evita competição de consumo com outras aplicações e melhora visibilidade no Flower.
 
 ## Ajustes recomendados de performance
 

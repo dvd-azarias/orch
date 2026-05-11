@@ -4,6 +4,7 @@ Este diretório contém templates `.plist` para manter a stack local do `orch` d
 
 - `com.orch.api.plist`
 - `com.orch.celery.worker.legacy.plist`
+- `com.orch.celery.worker.fileapp.plist`
 - `com.orch.celery.beat.legacy.plist`
 - `com.orch.celery.worker.generate_file.plist`
 - `com.orch.celery.beat.generate_file.plist`
@@ -12,7 +13,7 @@ Este diretório contém templates `.plist` para manter a stack local do `orch` d
 
 Manter as fases já homologadas sempre ativas em DEV local:
 
-- Fase 4: API + worker/beat legado.
+- Fase 4: API + worker/beat legado + worker dedicado FileApp.
 - Fase 5: worker/beat `generate_file`.
 
 As fases são encadeadas: ao evoluir fase 6/7/8, as fases anteriores devem permanecer de pé para teste real.
@@ -36,4 +37,3 @@ Sempre que houver intervenção de código em API, workers, beats, filas ou conf
 1. reiniciar os serviços afetados (`scripts/launchd_orch.sh restart`);
 2. validar `status`;
 3. executar smoke real (`scripts/dev_phase_stack.sh smoke 5` ou equivalente).
-
