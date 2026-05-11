@@ -53,7 +53,7 @@ celery_app = Celery(
     "orch",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.workflow_tasks", "app.tasks.generate_file_tasks"],
+    include=["app.tasks.workflow_tasks", "app.tasks.generate_file_tasks", "app.tasks.fileapp_ingest_tasks"],
 )
 
 celery_app.conf.update(
@@ -70,6 +70,10 @@ celery_app.conf.update(
         "app.tasks.workflow.advance_session": {"queue": settings.celery_execute_queue},
         "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},
         "app.tasks.component_generate_file.run": {"queue": settings.celery_generate_file_run_queue},
+        "app.tasks.fileapp.ingest_event": {"queue": settings.celery_s3_files_ingest_queue},
+        "app.tasks.fileapp.ingest_tipo1_event": {"queue": settings.celery_s3_files_ingest_queue},
+        "app.tasks.fileapp.process_event": {"queue": settings.celery_source_list_ingest_queue},
+        "app.tasks.fileapp.process_tipo1_event": {"queue": settings.celery_source_list_ingest_queue},
     },
     beat_schedule=beat_schedule,
 )

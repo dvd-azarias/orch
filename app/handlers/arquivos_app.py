@@ -63,9 +63,14 @@ def extract_arquivos_session_fields(payload: dict[str, Any]) -> SessionExtractio
         entity_address = f"{folder_path}/{original_name}"
         entity_session_id = file_id
 
+    mapping_template_id = str(file_data.get("mapping_template_id", "")).strip()
+    if not mapping_template_id:
+        mapping_template_id = str(payload.get("mapping_template_id", "")).strip()
+    entity_type = "person" if mapping_template_id else "file"
+
     return SessionExtraction(
         entity=entity,
-        entity_type="file",
+        entity_type=entity_type,
         entity_address=entity_address,
         entity_session_id=entity_session_id,
     )

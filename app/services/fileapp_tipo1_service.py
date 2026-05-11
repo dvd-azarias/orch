@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@dataclass(frozen=True)
+class MappingItem:
+    header_name: str
+    field_code: str
+    ignored: bool
+
+
+async def resolve_mapping_template_uuid(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    flow_uuid: str,
+    payload: dict[str, Any],
+) -> str | None:
+    file_data = payload.get("file")
+    candidates: list[str] = []
+    if isinstance(file_data, dict):
+        candidates.append(str(file_data.get("mapping_template_id", "")).strip())
+    candidates.append(str(payload.get("mapping_template_id", "")).strip())
+
+    safe_schema = workspace_schema.replace('"', '""')
+    row = await db_session.execute(
+        text(
+            f"""
+            SELECT COALESCE(
+                cr.definition -> 'canvas_properties' -> 'orchestration_trigger' ->> 'mapping_template_id',
+                dr.definition -> 'canvas_properties' -> 'orchestration_trigger' ->> 'mapping_template_id',
+                ''
+            ) AS mapping_template_id
+            FROM "{safe_schema}".flow_v2 f
+            LEFT JOIN "{safe_schema}".flow_v2_revision cr ON cr.id = f.current_revision_id
+            LEFT JOIN "{safe_schema}".flow_v2_revision dr ON dr.id = f.draft_revision_id
+            WHERE f.id::text = :flow_uuid
+            LIMIT 1
+            """
+        ),
+        {"flow_uuid": flow_uuid},
+    )
+    found = row.first()
+    if found is not None:
+        candidates.append(str(found[0] or "").strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return str(UUID(candidate))
+        except ValueError:
+            continue
+    return None
+
+
+async def resolve_mapping_template_id(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    mapping_template_uuid: str,
+) -> int | None:
+    safe_schema = workspace_schema.replace('"', '""')
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT id
+            FROM "{safe_schema}".source_list_mapping_templates
+            WHERE uuid::text = :mapping_template_uuid
+            LIMIT 1
+            """
+        ),
+        {"mapping_template_uuid": mapping_template_uuid},
+    )
+    row = result.first()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+async def load_mapping_items(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    template_id: int,
+) -> list[MappingItem]:
+    safe_schema = workspace_schema.replace('"', '""')
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT
+                i.header_name,
+                COALESCE(csf.code, '') AS field_code,
+                COALESCE(i.is_ignored, FALSE) AS is_ignored
+            FROM "{safe_schema}".source_list_mapping_template_items i
+            LEFT JOIN target.contact_system_fields csf
+              ON csf.id = i.contact_system_field_id
+            WHERE i.template_id = :template_id
+            ORDER BY i.id
+            """
+        ),
+        {"template_id": template_id},
+    )
+    items: list[MappingItem] = []
+    for row in result.fetchall():
+        header_name = str(row[0] or "").strip()
+        field_code = str(row[1] or "").strip().upper()
+        ignored = bool(row[2])
+        if not header_name:
+            continue
+        items.append(MappingItem(header_name=header_name, field_code=field_code, ignored=ignored))
+    return items
+
+
+def _normalize_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _map_row_to_person_payload(row: dict[str, Any], mapping_items: list[MappingItem]) -> dict[str, Any] | None:
+    identifier = ""
+    full_name = ""
+    channels: list[dict[str, str]] = []
+    extras: dict[str, Any] = {}
+
+    for item in mapping_items:
+        if item.ignored:
+            continue
+        value = _normalize_value(row.get(item.header_name))
+        if not value:
+            continue
+        code = item.field_code
+        if code == "CONTACT_IDENTIFIER":
+            identifier = value
+        elif code == "CONTACT_FULL_NAME":
+            full_name = value
+        elif code == "CHANNEL_PHONE":
+            channels.append({"type": "phone", "value": value, "label": item.header_name})
+        elif code == "CHANNEL_WHATSAPP":
+            channels.append({"type": "whatsapp", "value": value, "label": item.header_name})
+        elif code == "CHANNEL_EMAIL":
+            channels.append({"type": "email", "value": value, "label": item.header_name})
+        elif code == "EXTRA_GENERIC":
+            extras[item.header_name] = value
+
+    if not identifier:
+        return None
+
+    primary_channel_type = channels[0]["type"] if channels else None
+    primary_channel_value = channels[0]["value"] if channels else None
+    primary_channel_label = channels[0]["label"] if channels else None
+    return {
+        "identifier": identifier,
+        "full_name": full_name or None,
+        "primary_channel_type": primary_channel_type,
+        "primary_channel_value": primary_channel_value,
+        "primary_channel_label": primary_channel_label,
+        "channels": channels,
+        "extras": extras,
+    }
+
+
+async def upsert_persons_from_rows(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    rows: list[dict[str, Any]],
+    mapping_items: list[MappingItem],
+) -> tuple[int, int]:
+    safe_schema = workspace_schema.replace('"', '""')
+    inserted_or_updated = 0
+    skipped = 0
+    for row in rows:
+        mapped = _map_row_to_person_payload(row, mapping_items)
+        if mapped is None:
+            skipped += 1
+            continue
+        await db_session.execute(
+            text(
+                f"""
+                INSERT INTO "{safe_schema}".persons (
+                    identifier,
+                    full_name,
+                    primary_channel_type,
+                    primary_channel_value,
+                    primary_channel_label,
+                    channels,
+                    extras,
+                    last_seen_at,
+                    updated_at
+                ) VALUES (
+                    :identifier,
+                    :full_name,
+                    :primary_channel_type,
+                    :primary_channel_value,
+                    :primary_channel_label,
+                    CAST(:channels AS jsonb),
+                    CAST(:extras AS jsonb),
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (identifier) DO UPDATE SET
+                    full_name = EXCLUDED.full_name,
+                    primary_channel_type = EXCLUDED.primary_channel_type,
+                    primary_channel_value = EXCLUDED.primary_channel_value,
+                    primary_channel_label = EXCLUDED.primary_channel_label,
+                    channels = EXCLUDED.channels,
+                    extras = COALESCE("{safe_schema}".persons.extras, '{{}}'::jsonb) || EXCLUDED.extras,
+                    last_seen_at = NOW(),
+                    updated_at = NOW()
+                """
+            ),
+            {
+                "identifier": mapped["identifier"],
+                "full_name": mapped["full_name"],
+                "primary_channel_type": mapped["primary_channel_type"],
+                "primary_channel_value": mapped["primary_channel_value"],
+                "primary_channel_label": mapped["primary_channel_label"],
+                "channels": json.dumps(mapped["channels"], ensure_ascii=False),
+                "extras": json.dumps(mapped["extras"], ensure_ascii=False),
+            },
+        )
+        inserted_or_updated += 1
+    return inserted_or_updated, skipped

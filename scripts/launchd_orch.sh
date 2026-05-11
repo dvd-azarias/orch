@@ -12,6 +12,7 @@ LAUNCH_UID="${LAUNCHCTL_UID:-$(stat -f %u "${HOME}")}"
 LABELS=(
   "com.orch.api"
   "com.orch.celery.worker.legacy"
+  "com.orch.celery.worker.fileapp"
   "com.orch.celery.beat.legacy"
   "com.orch.celery.worker.generate_file"
   "com.orch.celery.beat.generate_file"
@@ -21,6 +22,7 @@ template_for_label() {
   case "$1" in
     "com.orch.api") echo "com.orch.api.plist" ;;
     "com.orch.celery.worker.legacy") echo "com.orch.celery.worker.legacy.plist" ;;
+    "com.orch.celery.worker.fileapp") echo "com.orch.celery.worker.fileapp.plist" ;;
     "com.orch.celery.beat.legacy") echo "com.orch.celery.beat.legacy.plist" ;;
     "com.orch.celery.worker.generate_file") echo "com.orch.celery.worker.generate_file.plist" ;;
     "com.orch.celery.beat.generate_file") echo "com.orch.celery.beat.generate_file.plist" ;;
@@ -95,7 +97,7 @@ status_all() {
     echo "not loaded"
   done
   echo "---- process check"
-  pgrep -fal "uvicorn app.main:app|orch-worker-legacy@|orch-worker-gf@|celery .* beat" || true
+  pgrep -fal "uvicorn app.main:app|orch-worker-legacy@|orch-worker-fileapp@|orch-worker-gf@|celery .* beat" || true
   echo "---- api check"
   curl -s -o /dev/null -w "http=%{http_code}\n" "http://127.0.0.1:7777/health/celery" || true
   if [[ "${found_any}" -eq 0 ]]; then
@@ -119,6 +121,8 @@ Logs:
   ${RUN_DIR}/api.err.log
   ${RUN_DIR}/worker_legacy.out.log
   ${RUN_DIR}/worker_legacy.err.log
+  ${RUN_DIR}/worker_fileapp.out.log
+  ${RUN_DIR}/worker_fileapp.err.log
   ${RUN_DIR}/beat_legacy.out.log
   ${RUN_DIR}/beat_legacy.err.log
   ${RUN_DIR}/worker_gf.out.log
@@ -132,10 +136,10 @@ usage() {
   cat <<EOF
 Uso:
   scripts/launchd_orch.sh install     # instala templates em ~/Library/LaunchAgents
-  scripts/launchd_orch.sh start       # bootstrap + enable dos 5 serviços
-  scripts/launchd_orch.sh stop        # disable + bootout dos 5 serviços
+  scripts/launchd_orch.sh start       # bootstrap + enable dos 6 serviços
+  scripts/launchd_orch.sh stop        # disable + bootout dos 6 serviços
   scripts/launchd_orch.sh restart     # stop + start
-  scripts/launchd_orch.sh status      # status launchctl dos 5 serviços
+  scripts/launchd_orch.sh status      # status launchctl dos 6 serviços
   scripts/launchd_orch.sh uninstall   # stop + remove plists instalados
   scripts/launchd_orch.sh logs        # mostra caminhos de log
   scripts/launchd_orch.sh diag        # diagnóstico launchctl/uid

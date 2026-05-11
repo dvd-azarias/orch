@@ -69,6 +69,21 @@ Sem confirmacao explicita do usuario, nao executar:
   - Antes de validar E2E, confirmar quem esta na porta `7777` e quais workers/beats estao ativos para evitar processo com codigo antigo.
   - Se houver conflito/duvida de processo stale, parar tudo e subir novamente de forma limpa (fonte unica de execucao).
 
+## Regra canonica FileApp (Fase 7) — OBRIGATORIA
+
+- Decisao por `mapping_template` e somente por ele:
+  - `tipo_1` (com `mapping_template`): deve persistir em `persons` E em `orch_sessions`.
+  - `tipo_2` (sem `mapping_template`): deve persistir somente em `orch_sessions`.
+- Nao criar rota nova para FileApp; usar a rota oficial:
+  - `POST /v1/orch/{workspace_uuid}/{flow_uuid}`.
+- Evidencia minima obrigatoria em testes E2E de FileApp:
+  1. resposta `202 accepted` contendo `pipeline` (`fileapp_tipo1_ingest` ou `fileapp_tipo2_ingest`);
+  2. task de ingest recebida/enfileirada no worker;
+  3. task de processamento concluida no worker;
+  4. query SQL comprovando persistencia conforme tipo (`persons` + `orch_sessions` ou somente `orch_sessions`).
+- Em diagnostico, sempre registrar no log o tipo decidido:
+  - `decision=fileapp_tipo1` ou `decision=fileapp_tipo2`.
+
 ## Referencias operacionais
 
 - `README.md`
