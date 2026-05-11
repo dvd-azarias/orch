@@ -86,6 +86,33 @@ Verificar:
 4. Se a transação foi concluída (commit) por workspace.
 5. Conferir existência com `information_schema.tables` para `table_schema LIKE 'ws_%'`.
 
+### "A migration saiu com especificação errada (Fase 6.1)"
+
+Caso real: na Fase 6.1 a intenção era criar `assigned_at` e `unassigned_at` em `orch_sessions`, mas a primeira migration criou colunas diferentes.
+
+Como corrigir sem retrabalho:
+
+1. **Não editar migration já aplicada** (`0007`).
+2. Criar **nova migration corretiva** (`0008`) com:
+   - `ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ NULL`
+   - `ADD COLUMN IF NOT EXISTS unassigned_at TIMESTAMPTZ NULL`
+   - `DROP COLUMN IF EXISTS assigned`
+   - `DROP COLUMN IF EXISTS unassigned_in`
+3. Registrar a corretiva em `MIGRATIONS`.
+4. Aplicar primeiro em 1 workspace de teste (`migrate-workspace`).
+5. Validar schema final no banco.
+6. Só depois aplicar em massa.
+
+Lição prática: em ambiente com muitos workspaces, **validar cobertura pendente antes de `migrate-all`** evita execução longa e "silenciosa".
+
+Cobertura por versão (prática recomendada):
+
+- usar script de checagem (Python/SQLAlchemy) para listar workspaces sem a versão alvo em `ws_<uuid>.orch_alembic_version`;
+- se faltarem poucos, aplicar cirurgicamente com `python -m app.cli migrate-workspace <workspace_uuid>`;
+- usar `python -m app.cli migrate-all` apenas quando a fila de pendências for ampla.
+
+> Observação: foi exatamente essa estratégia que fechou a Fase 6.1 com segurança, após detectar poucas pendências residuais da `0008`.
+
 ## Comandos úteis de verificação
 
 ```sql

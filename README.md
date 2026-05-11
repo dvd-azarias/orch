@@ -316,6 +316,11 @@ Script SQL desta entrega:
 - `sql/001_create_orch_sessions.sql`
 - `sql/002_add_entity_origin_app.sql`
 - `sql/003_create_orch_sessions_alarms.sql`
+- `sql/004_create_orch_session_metrics.sql`
+- `sql/005_update_orch_session_metrics_for_async.sql`
+- `sql/006_create_orch_generate_file_tables.sql`
+- `sql/007_add_assigned_fields_to_orch_sessions.sql`
+- `sql/008_fix_assigned_fields_to_timestamps.sql`
 
 Campos incluídos conforme solicitado:
 - `id`, `uuid`, `flow_uuid`, `state`
@@ -323,6 +328,7 @@ Campos incluídos conforme solicitado:
 - `started_at`, `ended_at`, `abandoned_at`, `frozen_until`
 - `last_card_uuid`, `next_card_uuid`
 - `runtime_variables`, `agent_interactions`
+- `assigned_at`, `unassigned_at`
 - status/timestamps de Dialer
 - status/timestamps de WhatsApp
 - campos reservados de SMS/RCS
@@ -797,3 +803,26 @@ Adaptar o `orch` para arquitetura por workspace/schema (`ws_{workspace_uuid}`), 
 
 - `ORCH_LAB_WORKSPACE_UUID` (LAB atual)
 - `ORCH_DEFAULT_WORKSPACE_UUID` (fallback da rota legada)
+
+## Fase 6.1 — New Assign Fields
+
+### Objetivo
+
+Adicionar campos de controle de atribuição na `ws_*.orch_sessions` com migration incremental e idempotente.
+
+### Entrega técnica
+
+- Migration `0007_add_assigned_fields_to_orch_sessions` registrada inicialmente.
+- Correção aplicada na migration `0008_fix_assigned_fields_to_timestamps`.
+- SQL final esperado:
+  - `assigned_at TIMESTAMPTZ NULL`
+  - `unassigned_at TIMESTAMPTZ NULL`
+
+### Checklist
+
+- [x] Criar SQL idempotente para `orch_sessions`.
+- [x] Registrar migration no pipeline oficial (`migrate-all` / `migrate-workspace`).
+- [x] Executar `python -m app.cli migrate-workspace ba7eb0ec-e565-447c-8c11-8f870cf72a60`.
+- [x] Aplicar em todos os workspaces ativos (cobertura confirmada: `80/80` com versão `0007`).
+- [ ] Aplicar correção `0008_fix_assigned_fields_to_timestamps` em todos os workspaces ativos.
+- [ ] Validar presença das colunas finais em `ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60.orch_sessions`.
