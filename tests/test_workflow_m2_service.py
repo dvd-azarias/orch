@@ -22,6 +22,9 @@ def test_blocking_stop_reason_for_whatsapp_components() -> None:
     assert _blocking_stop_reason_for_component("send_with_whatsapp") == "blocked_send_with_whatsapp"
     assert _blocking_stop_reason_for_component("proccess_whatsapp_response") == "blocked_process_whatsapp_response"
     assert _blocking_stop_reason_for_component("process_whatsapp_response") == "blocked_process_whatsapp_response"
+    assert _blocking_stop_reason_for_component("send_with_dialer") == "blocked_send_with_dialer"
+    assert _blocking_stop_reason_for_component("proccess_dialer_response") == "blocked_process_dialer_response"
+    assert _blocking_stop_reason_for_component("process_dialer_response") == "blocked_process_dialer_response"
     assert _blocking_stop_reason_for_component("generate_file") is None
 
 

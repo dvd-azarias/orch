@@ -45,6 +45,9 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "send_with_whatsapp": "blocked_send_with_whatsapp",
     "proccess_whatsapp_response": "blocked_process_whatsapp_response",
     "process_whatsapp_response": "blocked_process_whatsapp_response",
+    "send_with_dialer": "blocked_send_with_dialer",
+    "proccess_dialer_response": "blocked_process_dialer_response",
+    "process_dialer_response": "blocked_process_dialer_response",
 }
 
 
@@ -1536,6 +1539,8 @@ async def execute_workflow_m2_for_session(
             "end_of_branch",
             "blocked_send_with_whatsapp",
             "blocked_process_whatsapp_response",
+            "blocked_send_with_dialer",
+            "blocked_process_dialer_response",
         }
         workflow_status = "success"
         if result.stopped_reason == "session_execution_locked":
