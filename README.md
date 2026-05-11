@@ -1012,6 +1012,8 @@ Componentes adicionados no motor M2 com comportamento bloqueante:
 
 - `send_with_whatsapp`
 - `proccess_whatsapp_response` (compatível também com `process_whatsapp_response`)
+- `send_with_dialer`
+- `proccess_dialer_response` (compatível também com `process_dialer_response`)
 
 Importante:
 - nesta etapa, estes componentes **não** realizam envio efetivo;
@@ -1031,6 +1033,8 @@ Ao encontrar um dos componentes acima durante a execução:
 
 - `stopped_reason=blocked_send_with_whatsapp`
 - `stopped_reason=blocked_process_whatsapp_response`
+- `stopped_reason=blocked_send_with_dialer`
+- `stopped_reason=blocked_process_dialer_response`
 
 Esses motivos devem aparecer nas métricas/logs como parada controlada (não erro).
 
