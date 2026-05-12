@@ -745,9 +745,9 @@ Para não perder avanço entre F3 → F4 → F5, a retomada deve ser sempre **en
 
 **Importante (operação atual):**
 
-- Durante desenvolvimento/homologação das fases, o padrão canônico é **não usar launchd**.
-- Usar sempre `scripts/dev_phase_stack.sh` para manter controle explícito da stack.
-- `launchd` fica apenas como alternativa de operação persistente, mediante alinhamento explícito.
+- Durante desenvolvimento/homologação das fases, o padrão preferencial é `scripts/dev_phase_stack.sh`.
+- Quando solicitado explicitamente pelo mantenedor, usar `launchd` (`scripts/launchd_orch.sh`) para operação persistente no macOS.
+- Nunca misturar os dois modos ao mesmo tempo.
 
 - Templates: `launchd/*.plist`
 - Guia: `launchd/README.md`
@@ -780,6 +780,7 @@ Observação importante (DEV local):
   - `CELERY_HEARTBEAT_QUEUE`
   - `CELERY_S3_FILES_INGEST_QUEUE`
   - `CELERY_SOURCE_LIST_INGEST_QUEUE`
+  - `CELERY_FILEAPP_MAILING_ASSOC_QUEUE`
 - Se a API publicar em fila diferente do worker local, a sessão fica em `state=0` e o fluxo não avança.
 
 ### Serviços persistentes no Linux (`systemd`)
@@ -831,7 +832,7 @@ Regra operacional:
 
 #### 2.1) Fase 4/7 — worker FileApp (ingest/process)
 
-- `celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-fileapp-worker@136_01 -Q orch_fileapp_ingest_events,orch_fileapp_source_list_ingest -l INFO`
+- `celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-fileapp-worker@136_01 -Q orch_fileapp_ingest_events,orch_fileapp_source_list_ingest,orch_fileapp_mailing_assoc -l INFO`
 
 #### 3) Fase 4 — beat legado (somente tarefas legadas)
 
