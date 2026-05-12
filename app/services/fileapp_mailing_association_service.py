@@ -31,6 +31,44 @@ def _post_json(
         return int(response.status), body
 
 
+def _get_json(
+    *,
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+) -> tuple[int, str]:
+    req = request.Request(
+        url=url,
+        headers=headers,
+        method="GET",
+    )
+    with request.urlopen(req, timeout=timeout_seconds) as response:
+        body = response.read().decode("utf-8", errors="replace")
+        return int(response.status), body
+
+
+def _decode_json_dict(raw: str) -> dict[str, Any]:
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _mailing_import_is_ready(response_body: str) -> tuple[bool, dict[str, Any]]:
+    parsed = _decode_json_dict(response_body)
+    data = parsed.get("data") if isinstance(parsed.get("data"), dict) else {}
+    status_value = str(data.get("status") or "").strip().upper()
+    ingested_at = str(data.get("ingested_at") or "").strip()
+    persons_sync_task_id = str(data.get("persons_sync_task_id") or "").strip()
+    ready_statuses = {"PROCESSED", "INGESTED", "IMPORTED", "COMPLETED", "DONE"}
+    is_ready = bool(ingested_at) or status_value in ready_statuses
+    return is_ready, {
+        "status": status_value,
+        "ingested_at": ingested_at,
+        "persons_sync_task_id": persons_sync_task_id,
+    }
+
+
 async def associate_mailing_to_flow_from_file_event(
     *,
     settings: Settings,
@@ -72,6 +110,36 @@ async def associate_mailing_to_flow_from_file_event(
         headers["x-workspace-api-key"] = fallback_workspace_api_key
 
     try:
+        mailing_status_code, mailing_response_body = await asyncio.to_thread(
+            _get_json,
+            url=f"{base_url}/v2/mailings/{mailing_uuid}",
+            headers=headers,
+            timeout_seconds=settings.sync_ws_timeout_seconds,
+        )
+        if mailing_status_code >= 400:
+            return {
+                "status": "error",
+                "reason": "mailing_status_http_error",
+                "status_code": mailing_status_code,
+                "response_body": mailing_response_body,
+            }
+        is_ready, mailing_state = _mailing_import_is_ready(mailing_response_body)
+        if not is_ready:
+            logger.info(
+                "fileapp.tipo1.mailing_association.pending_import",
+                extra={
+                    "event": "orch.fileapp.tipo1.mailing_association.pending_import",
+                    "workspace_uuid": workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "mailing_uuid": mailing_uuid,
+                    "mailing_state": mailing_state,
+                },
+            )
+            return {
+                "status": "pending",
+                "reason": "mailing_import_not_ready",
+                "mailing_state": mailing_state,
+            }
         status_code, response_body = await asyncio.to_thread(
             _post_json,
             url=target_url,

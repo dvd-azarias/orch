@@ -234,6 +234,7 @@ async def run_tipo1_manual_pipeline(
     workspace_api_key: str | None = None,
     mailing_name: str | None = None,
     mailing_description: str | None = None,
+    defer_step7_link_flow: bool = False,
 ) -> dict[str, Any]:
     file_data = payload.get("file")
     if not isinstance(file_data, dict):
@@ -527,36 +528,45 @@ async def run_tipo1_manual_pipeline(
         )
     step_results.append({"step": "step6_import", "status_code": status_code, "import_task_id": import_task_id})
 
-    # Step 7
-    association_payload = {
-        "mailing_ids_added": [mailing_uuid],
-        "mailing_ids_removed": [],
-        "linked_by": linked_by,
-        "call_origin": "file_event",
-    }
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="POST",
-            url=f"{base_url}/v2/flow/{flow_uuid}/mailings",
-            headers=json_headers,
-            payload=association_payload,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
+    if defer_step7_link_flow:
+        step_results.append(
+            {
+                "step": "step7_link_flow",
+                "status": "deferred",
+                "mode": "async_celery",
+            }
         )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step7_link_flow",
-            message=f"Associação de mailing ao flow falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
-    if status_code >= 400:
-        raise FileAppTipo1ManualPipelineError(
-            step="step7_link_flow",
-            message="Associação de mailing ao flow retornou erro.",
-            details={"status_code": status_code, "response_body": body},
-        )
-    step_results.append({"step": "step7_link_flow", "status_code": status_code})
+    else:
+        # Step 7
+        association_payload = {
+            "mailing_ids_added": [mailing_uuid],
+            "mailing_ids_removed": [],
+            "linked_by": linked_by,
+            "call_origin": "file_event",
+        }
+        try:
+            status_code, body = await asyncio.to_thread(
+                _json_request,
+                method="POST",
+                url=f"{base_url}/v2/flow/{flow_uuid}/mailings",
+                headers=json_headers,
+                payload=association_payload,
+                timeout_seconds=settings.sync_ws_timeout_seconds,
+            )
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise FileAppTipo1ManualPipelineError(
+                step="step7_link_flow",
+                message=f"Associação de mailing ao flow falhou (HTTP {int(exc.code)}).",
+                details={"status_code": int(exc.code), "response_body": detail},
+            ) from exc
+        if status_code >= 400:
+            raise FileAppTipo1ManualPipelineError(
+                step="step7_link_flow",
+                message="Associação de mailing ao flow retornou erro.",
+                details={"status_code": status_code, "response_body": body},
+            )
+        step_results.append({"step": "step7_link_flow", "status_code": status_code})
 
     return {
         "status": "done",

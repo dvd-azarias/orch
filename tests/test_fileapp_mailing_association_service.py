@@ -12,91 +12,58 @@ class _DummySettings:
 
 
 @pytest.mark.asyncio
-async def test_associate_mailing_to_flow_from_file_event_builds_payload(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+async def test_associate_mailing_pending_when_import_not_ready(monkeypatch) -> None:
+    post_called = False
+
+    def _fake_get_json(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        assert url.endswith("/v2/mailings/mailing-uuid-1")
+        return 200, '{"data":{"status":"PROCESSING","ingested_at":null}}'
 
     def _fake_post_json(*, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
-        captured["url"] = url
-        captured["headers"] = headers
-        captured["payload"] = payload
-        captured["timeout_seconds"] = timeout_seconds
-        return 200, '{"ok":true}'
+        nonlocal post_called
+        post_called = True
+        return 200, '{"data":{"ok":true}}'
 
+    monkeypatch.setattr(service, "_get_json", _fake_get_json)
     monkeypatch.setattr(service, "_post_json", _fake_post_json)
 
     result = await service.associate_mailing_to_flow_from_file_event(
         settings=_DummySettings(),
         workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
-        flow_uuid="767325cd-68ca-4be7-9f21-278012b98f8a",
-        mailing_uuid="71117d9b-428b-4681-8b4f-fbf33007d307",
+        flow_uuid="flow-uuid-1",
+        mailing_uuid="mailing-uuid-1",
         linked_by="2f388d0f-5519-4e30-99ad-de34c96b9a59",
+        workspace_api_key=None,
     )
 
-    assert result["status"] == "done"
-    assert captured["url"] == "http://target-core-api.otima.io/v2/flow/767325cd-68ca-4be7-9f21-278012b98f8a/mailings"
-    assert captured["payload"] == {
-        "mailing_ids_added": ["71117d9b-428b-4681-8b4f-fbf33007d307"],
-        "mailing_ids_removed": [],
-        "linked_by": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
-        "call_origin": "file_event",
-    }
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    assert headers["authorization"] == "Bearer token-123"
-    assert headers["X-WORKSPACE-UUID"] == "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
-    assert headers["x-application"] == "target"
+    assert result["status"] == "pending"
+    assert result["reason"] == "mailing_import_not_ready"
+    assert post_called is False
 
 
 @pytest.mark.asyncio
-async def test_associate_mailing_to_flow_from_file_event_ignores_without_bearer() -> None:
-    class _NoTokenSettings:
-        sync_webhook_base_url = "http://target-core-api.otima.io"
-        sync_ws_timeout_seconds = 5.0
-        target_core_api_bearer_token = None
+async def test_associate_mailing_calls_post_when_import_ready(monkeypatch) -> None:
+    post_payloads: list[dict] = []
 
-    result = await service.associate_mailing_to_flow_from_file_event(
-        settings=_NoTokenSettings(),
-        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
-        flow_uuid="767325cd-68ca-4be7-9f21-278012b98f8a",
-        mailing_uuid="71117d9b-428b-4681-8b4f-fbf33007d307",
-        linked_by="file-1",
-    )
-    assert result["status"] == "ignored"
-    assert result["reason"] == "target_core_api_bearer_token_not_configured"
-
-
-@pytest.mark.asyncio
-async def test_associate_mailing_to_flow_from_file_event_uses_workspace_api_key_when_bearer_missing(
-    monkeypatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    class _NoBearerSettings:
-        sync_webhook_base_url = "http://target-core-api.otima.io"
-        sync_ws_timeout_seconds = 5.0
-        target_core_api_bearer_token = None
+    def _fake_get_json(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"status":"PROCESSED","ingested_at":"2026-05-12T16:01:00Z"}}'
 
     def _fake_post_json(*, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
-        captured["url"] = url
-        captured["headers"] = headers
-        captured["payload"] = payload
-        captured["timeout_seconds"] = timeout_seconds
-        return 200, '{"ok":true}'
+        post_payloads.append(payload)
+        return 200, '{"data":[{"results":{"linked":["mailing-uuid-1"]}}]}'
 
+    monkeypatch.setattr(service, "_get_json", _fake_get_json)
     monkeypatch.setattr(service, "_post_json", _fake_post_json)
 
     result = await service.associate_mailing_to_flow_from_file_event(
-        settings=_NoBearerSettings(),
+        settings=_DummySettings(),
         workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
-        flow_uuid="767325cd-68ca-4be7-9f21-278012b98f8a",
-        mailing_uuid="71117d9b-428b-4681-8b4f-fbf33007d307",
+        flow_uuid="flow-uuid-1",
+        mailing_uuid="mailing-uuid-1",
         linked_by="2f388d0f-5519-4e30-99ad-de34c96b9a59",
-        workspace_api_key="sk-workspace-key",
+        workspace_api_key=None,
     )
 
     assert result["status"] == "done"
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    assert "authorization" not in headers
-    assert headers["x-api-key"] == "sk-workspace-key"
-    assert headers["x-workspace-api-key"] == "sk-workspace-key"
+    assert len(post_payloads) == 1
+    assert post_payloads[0]["call_origin"] == "file_event"

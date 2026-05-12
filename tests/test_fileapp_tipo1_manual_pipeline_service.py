@@ -169,6 +169,56 @@ async def test_run_tipo1_manual_pipeline_falls_back_to_uuid_from_file_url(monkey
     assert result["status"] == "done"
 
 
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_defers_step7_when_requested(monkeypatch) -> None:
+    json_calls: list[dict] = []
+
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        return b"CPF,telefone\n20000000000,5521975670000\n"
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        json_calls.append({"method": method, "url": url, "payload": payload})
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"contact_system_field_id":"a26cbb26-2126-46f8-907c-757ab6dc2790","is_ignored":false,"dialer_label":null,"field_type":"text"}]}}}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            return 200, '{"data":{"task_id":"import-task-1"}}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                "original_name": "mailing.csv",
+                "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        workspace_api_key=None,
+        defer_step7_link_flow=True,
+    )
+    assert result["status"] == "done"
+    assert len(result["steps"]) == 7
+    assert result["steps"][-1] == {"step": "step7_link_flow", "status": "deferred", "mode": "async_celery"}
+    assert all(not call["url"].endswith("/v2/flow/flow-uuid-1/mailings") for call in json_calls)
+
+
 def test_build_file_event_mailing_identity_uses_slug_and_suffix() -> None:
     identity = service.build_file_event_mailing_identity(file_name="Mailing 7_CPFs com telefones 024.csv")
     assert identity.name == "mailing_7_cpfs_com_telefones_024"

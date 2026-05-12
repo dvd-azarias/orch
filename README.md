@@ -1097,6 +1097,9 @@ Regra crítica:
   - `prod`: `orch_fileapp_mailing_assoc`
   - `launchd_local`: `orch_fileapp_mailing_assoc_launchd_local`
   - `f5_local`: `orch_fileapp_mailing_assoc_f5_local`
+- atraso inicial configurável antes do vínculo:
+  - `CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS` (default `20`)
+- antes de vincular (`step 7`), a task consulta `GET /v2/mailings/{mailing_id}` e só segue quando o import estiver pronto (`ingested_at` preenchido ou status final de ingestão).
 - falhas HTTP da API externa fazem retry com backoff no Celery.
 
 ### Configuração envolvida
@@ -1104,3 +1107,4 @@ Regra crítica:
 - `SYNC_WEBHOOK_BASE_URL` (base da API Target Core)
 - `TARGET_CORE_API_BEARER_TOKEN` (preferencial) ou `SYNC_WEBHOOK_BEARER_TOKEN`
 - timeout HTTP reaproveita `SYNC_WS_TIMEOUT_SECONDS`
+- `CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS` (retardo anti-corrida entre import e vínculo)

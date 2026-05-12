@@ -51,6 +51,7 @@ class Settings:
     celery_s3_files_ingest_queue: str
     celery_source_list_ingest_queue: str
     celery_fileapp_mailing_assoc_queue: str
+    celery_fileapp_mailing_assoc_delay_seconds: int
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
@@ -280,6 +281,7 @@ def get_settings() -> Settings:
             _read_env_optional("CELERY_FILEAPP_MAILING_ASSOC_QUEUE", _default_queue_by_profile(queue_profile, "fileapp_mailing_assoc"))
             or _default_queue_by_profile(queue_profile, "fileapp_mailing_assoc")
         ),
+        celery_fileapp_mailing_assoc_delay_seconds=_read_env_int("CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS", 20),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
             "ORCH_DEFAULT_WORKSPACE_UUID",
