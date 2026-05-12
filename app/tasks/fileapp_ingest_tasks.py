@@ -285,6 +285,7 @@ async def _process_fileapp_tipo1_event_task(
             workspace_api_key=workspace_api_key,
             mailing_name=mailing_name,
             mailing_description=mailing_description,
+            defer_step7_link_flow=True,
         )
     except FileAppTipo1ManualPipelineError as exc:
         logger.warning(
@@ -337,12 +338,42 @@ async def _process_fileapp_tipo1_event_task(
             "manual_pipeline": pipeline_result,
         },
     )
+    payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+    association_task = associate_fileapp_mailing_task.apply_async(
+        kwargs={
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mailing_uuid": str(pipeline_result.get("mailing_uuid") or "").strip(),
+            "linked_by": str(payload_file.get("id") or "").strip() or None,
+        },
+        queue=settings.celery_fileapp_mailing_assoc_queue,
+        routing_key=settings.celery_fileapp_mailing_assoc_queue,
+        countdown=max(0, int(settings.celery_fileapp_mailing_assoc_delay_seconds)),
+    )
+    logger.info(
+        "fileapp.tipo1.mailing_association.enqueued",
+        extra={
+            "event": "orch.fileapp.tipo1.mailing_association.enqueued",
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mailing_uuid": str(pipeline_result.get("mailing_uuid") or "").strip(),
+            "queue": settings.celery_fileapp_mailing_assoc_queue,
+            "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
+            "task_id": association_task.id,
+        },
+    )
     return {
         "status": "done",
         "workspace_uuid": workspace_uuid,
         "flow_uuid": flow_uuid,
         "mapping_template_uuid": mapping_template_uuid,
         "manual_pipeline": pipeline_result,
+        "mailing_association": {
+            "status": "queued",
+            "task_id": association_task.id,
+            "queue": settings.celery_fileapp_mailing_assoc_queue,
+            "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
+        },
     }
 
 
@@ -369,11 +400,11 @@ async def _associate_fileapp_mailing_task(
         linked_by=linked_by,
         workspace_api_key=workspace_api_key,
     )
-    if result.get("status") == "error":
+    if result.get("status") in {"error", "pending"}:
         retries = int(task.request.retries or 0)
         countdown = _RETRY_DELAYS[min(retries, len(_RETRY_DELAYS) - 1)]
         raise task.retry(
-            exc=RuntimeError(f"mailing_association_failed:{result.get('reason')}"),
+            exc=RuntimeError(f"mailing_association_not_ready:{result.get('reason')}"),
             countdown=countdown,
         )
     return {
