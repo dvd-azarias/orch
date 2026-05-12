@@ -23,6 +23,109 @@ class SourceListStatus:
     ERROR = "ERROR"
 
 
+_FOLDER_KEYS = {
+    "folder",
+    "folders",
+    "folder_path",
+    "folder_paths",
+    "path",
+    "paths",
+    "directory",
+    "directories",
+    "prefix",
+    "prefixes",
+    "source_path",
+    "source_paths",
+    "watch_folder",
+    "watch_folders",
+}
+
+
+def _normalize_folder_path(raw: str) -> str:
+    cleaned = str(raw or "").strip().replace("\\", "/")
+    while "//" in cleaned:
+        cleaned = cleaned.replace("//", "/")
+    cleaned = cleaned.strip("/")
+    return cleaned
+
+
+def _extract_candidate_folder_values(value: Any) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(value, str):
+        normalized = _normalize_folder_path(value)
+        if normalized:
+            candidates.append(normalized)
+        return candidates
+    if isinstance(value, list):
+        for item in value:
+            candidates.extend(_extract_candidate_folder_values(item))
+        return candidates
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            key_name = str(key).strip().lower()
+            if key_name in _FOLDER_KEYS:
+                candidates.extend(_extract_candidate_folder_values(nested_value))
+            elif isinstance(nested_value, (dict, list)):
+                candidates.extend(_extract_candidate_folder_values(nested_value))
+        return candidates
+    return candidates
+
+
+def extract_monitored_folders_from_orchestration_trigger(orchestration_trigger: dict[str, Any] | None) -> set[str]:
+    if not isinstance(orchestration_trigger, dict):
+        return set()
+    return {item for item in _extract_candidate_folder_values(orchestration_trigger) if item}
+
+
+def is_file_event_in_monitored_folder(*, payload: dict[str, Any], monitored_folders: set[str]) -> bool:
+    if not monitored_folders:
+        return False
+    file_data = payload.get("file")
+    if not isinstance(file_data, dict):
+        return False
+    folder_path = _normalize_folder_path(str(file_data.get("folder_path", "")))
+    if not folder_path:
+        return False
+    for monitored in monitored_folders:
+        if folder_path == monitored or folder_path.startswith(f"{monitored}/"):
+            return True
+    return False
+
+
+async def resolve_monitored_folders(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    flow_uuid: str,
+) -> set[str]:
+    safe_schema = workspace_schema.replace('"', '""')
+    row = await db_session.execute(
+        text(
+            f"""
+            SELECT COALESCE(
+                cr.definition -> 'canvas_properties' -> 'orchestration_trigger',
+                dr.definition -> 'canvas_properties' -> 'orchestration_trigger',
+                '{{}}'::jsonb
+            ) AS orchestration_trigger
+            FROM "{safe_schema}".flow_v2 f
+            LEFT JOIN "{safe_schema}".flow_v2_revision cr ON cr.id = f.current_revision_id
+            LEFT JOIN "{safe_schema}".flow_v2_revision dr ON dr.id = f.draft_revision_id
+            WHERE f.id::text = :flow_uuid
+            LIMIT 1
+            """
+        ),
+        {"flow_uuid": flow_uuid},
+    )
+    found = row.first()
+    trigger = found[0] if found is not None else None
+    if isinstance(trigger, str):
+        try:
+            trigger = json.loads(trigger)
+        except json.JSONDecodeError:
+            trigger = None
+    return extract_monitored_folders_from_orchestration_trigger(trigger if isinstance(trigger, dict) else None)
+
+
 async def resolve_mapping_template_uuid(
     db_session: AsyncSession,
     *,
