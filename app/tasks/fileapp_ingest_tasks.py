@@ -13,10 +13,13 @@ from app.services.app_detector import APP_ARQUIVOS, detect_app
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
 from app.services.fileapp_tipo1_service import (
+    SourceListStatus,
+    count_rows_without_channel,
+    create_source_list_for_file_event,
     load_mapping_items,
-    resolve_mailing_public_id_from_template,
     resolve_person_ids_for_rows,
     resolve_mapping_template_id,
+    update_source_list_after_ingest,
     upsert_persons_from_rows,
 )
 from app.services.orch_trigger_service import process_single_payload
@@ -139,6 +142,26 @@ def process_fileapp_tipo1_event_task(
     )
 
 
+@celery_app.task(name="app.tasks.fileapp.associate_mailing", bind=True, ignore_result=True, max_retries=8)
+def associate_fileapp_mailing_task(
+    self,
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    mailing_uuid: str,
+    linked_by: str | None,
+) -> dict[str, Any]:
+    return asyncio.run(
+        _associate_fileapp_mailing_task(
+            task=self,
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            mailing_uuid=mailing_uuid,
+            linked_by=linked_by,
+        )
+    )
+
+
 async def _process_fileapp_event_task(*, workspace_uuid: str, flow_uuid: str, payload: dict[str, Any]) -> dict[str, Any]:
     app_name = detect_app(payload)
     if app_name != APP_ARQUIVOS:
@@ -246,35 +269,47 @@ async def _process_fileapp_tipo1_event_task(
             workspace_schema=workspace_schema,
             template_id=template_id,
         )
-        mailing_uuid = await resolve_mailing_public_id_from_template(
-            db_session,
-            workspace_schema=workspace_schema,
-            template_id=template_id,
-        )
-        workspace_api_key = await fetch_workspace_otima_billing_api_key(
-            db_session,
-            workspace_uuid=safe_workspace_uuid,
-        )
+        if not mapping_items:
+            logger.warning(
+                "fileapp.tipo1.mapping_items_not_found",
+                extra={
+                    "event": "orch.fileapp.tipo1.mapping_items_not_found",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "mapping_template_uuid": mapping_template_uuid,
+                },
+            )
+            return {
+                "status": "failed",
+                "reason": "mapping_items_not_found",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mapping_template_uuid": mapping_template_uuid,
+            }
         file_data = payload.get("file") if isinstance(payload.get("file"), dict) else {}
         linked_by = str(file_data.get("id", "")).strip() if isinstance(file_data, dict) else ""
-        mailing_association = await associate_mailing_to_flow_from_file_event(
-            settings=settings,
-            workspace_uuid=safe_workspace_uuid,
-            flow_uuid=flow_uuid,
-            mailing_uuid=mailing_uuid,
-            linked_by=linked_by or None,
-            workspace_api_key=workspace_api_key,
-        )
-        session_rows = 0
-        session_failed_rows = 0
+        source_list_id: int | None = None
+        source_list_uuid: str | None = None
         if db_session.in_transaction():
             await db_session.commit()
+        async with db_session.begin():
+            source_list_id, source_list_uuid = await create_source_list_for_file_event(
+                db_session,
+                workspace_schema=workspace_schema,
+                file_data=file_data if isinstance(file_data, dict) else {},
+                template_id=template_id,
+                rows_total=len(rows),
+            )
+        session_rows = 0
+        session_failed_rows = 0
+        source_list_status = SourceListStatus.ERROR
         async with db_session.begin():
             processed_rows, skipped_rows = await upsert_persons_from_rows(
                 db_session,
                 workspace_schema=workspace_schema,
                 rows=rows,
                 mapping_items=mapping_items,
+                source_list_id=source_list_id,
             )
             person_ids = await resolve_person_ids_for_rows(
                 db_session,
@@ -310,6 +345,47 @@ async def _process_fileapp_tipo1_event_task(
                             "mapping_template_uuid": mapping_template_uuid,
                         },
                     )
+            if source_list_id:
+                rows_without_channel = count_rows_without_channel(rows=rows, mapping_items=mapping_items)
+                if session_rows > 0 and session_failed_rows == 0:
+                    source_list_status = SourceListStatus.READY_TO_INGEST
+                else:
+                    source_list_status = SourceListStatus.ERROR
+                await update_source_list_after_ingest(
+                    db_session,
+                    workspace_schema=workspace_schema,
+                    source_list_id=int(source_list_id),
+                    status=source_list_status,
+                    rows_processed=session_rows,
+                    rows_discarded=skipped_rows,
+                    rows_error=session_failed_rows,
+                    rows_without_channel=rows_without_channel,
+                )
+
+        mailing_association: dict[str, Any]
+        if source_list_uuid and source_list_status == SourceListStatus.READY_TO_INGEST:
+            assoc_task = associate_fileapp_mailing_task.apply_async(
+                kwargs={
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "mailing_uuid": source_list_uuid,
+                    "linked_by": linked_by or None,
+                },
+                queue=settings.celery_fileapp_mailing_assoc_queue,
+                routing_key=settings.celery_fileapp_mailing_assoc_queue,
+            )
+            mailing_association = {
+                "status": "queued",
+                "task_id": assoc_task.id,
+                "queue": settings.celery_fileapp_mailing_assoc_queue,
+                "mailing_uuid": source_list_uuid,
+            }
+        else:
+            mailing_association = {
+                "status": "ignored",
+                "reason": "source_list_not_ready",
+                "source_list_status": source_list_status,
+            }
 
     logger.info(
         "fileapp.tipo1.process_event.finished",
@@ -335,4 +411,43 @@ async def _process_fileapp_tipo1_event_task(
         "session_rows": session_rows,
         "session_failed_rows": session_failed_rows,
         "mailing_association": mailing_association,
+    }
+
+
+async def _associate_fileapp_mailing_task(
+    *,
+    task,  # celery task bind
+    workspace_uuid: str,
+    flow_uuid: str,
+    mailing_uuid: str,
+    linked_by: str | None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    session_factory = get_session_factory()
+    async with session_factory() as db_session:
+        workspace_api_key = await fetch_workspace_otima_billing_api_key(
+            db_session,
+            workspace_uuid=workspace_uuid,
+        )
+    result = await associate_mailing_to_flow_from_file_event(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        mailing_uuid=mailing_uuid,
+        linked_by=linked_by,
+        workspace_api_key=workspace_api_key,
+    )
+    if result.get("status") == "error":
+        retries = int(task.request.retries or 0)
+        countdown = _RETRY_DELAYS[min(retries, len(_RETRY_DELAYS) - 1)]
+        raise task.retry(
+            exc=RuntimeError(f"mailing_association_failed:{result.get('reason')}"),
+            countdown=countdown,
+        )
+    return {
+        "status": "done",
+        "workspace_uuid": workspace_uuid,
+        "flow_uuid": flow_uuid,
+        "mailing_uuid": mailing_uuid,
+        "result": result,
     }

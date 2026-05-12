@@ -47,3 +47,13 @@ Workers locais sobem com `--hostname` explícito:
 - `orch-celery-worker@_macbook_deivid_dev`
 - `orch-celery-fileapp-worker@_macbook_deivid_dev`
 - `orch-celery-generate-file-worker@_macbook_deivid_dev`
+
+## Filas FileApp (DEV local)
+
+O worker `fileapp` consome três filas dedicadas:
+
+- `orch_fileapp_ingest_launchd_local`
+- `orch_fileapp_source_list_launchd_local`
+- `orch_fileapp_mailing_assoc_launchd_local`
+
+Isso garante consumo do pipeline completo da Fase 10, incluindo a associação de mailing em task assíncrona dedicada.

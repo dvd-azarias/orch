@@ -14,7 +14,7 @@
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export ORCH_QUEUE_PROFILE=launchd_local CELERY_DISPATCH_QUEUE=orch_dispatch_launchd_local CELERY_EXECUTE_QUEUE=orch_execute_launchd_local CELERY_HEARTBEAT_QUEUE=orch_heartbeat_launchd_local CELERY_S3_FILES_INGEST_QUEUE=orch_fileapp_ingest_launchd_local CELERY_SOURCE_LIST_INGEST_QUEUE=orch_fileapp_source_list_launchd_local &amp;&amp; exec uvicorn app.main:app --host 127.0.0.1 --port 7777</string>
+    <string>cd "__REPO_ROOT__" &amp;&amp; source .venv/bin/activate &amp;&amp; export ORCH_QUEUE_PROFILE=launchd_local CELERY_DISPATCH_QUEUE=orch_dispatch_launchd_local CELERY_EXECUTE_QUEUE=orch_execute_launchd_local CELERY_HEARTBEAT_QUEUE=orch_heartbeat_launchd_local CELERY_S3_FILES_INGEST_QUEUE=orch_fileapp_ingest_launchd_local CELERY_SOURCE_LIST_INGEST_QUEUE=orch_fileapp_source_list_launchd_local CELERY_FILEAPP_MAILING_ASSOC_QUEUE=orch_fileapp_mailing_assoc_launchd_local &amp;&amp; exec uvicorn app.main:app --host 127.0.0.1 --port 7777</string>
   </array>
   <key>StandardOutPath</key>
   <string>__REPO_ROOT__/.runlogs/launchd/api.out.log</string>

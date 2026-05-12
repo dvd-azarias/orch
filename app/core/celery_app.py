@@ -74,6 +74,7 @@ celery_app.conf.update(
         "app.tasks.fileapp.ingest_tipo1_event": {"queue": settings.celery_s3_files_ingest_queue},
         "app.tasks.fileapp.process_event": {"queue": settings.celery_source_list_ingest_queue},
         "app.tasks.fileapp.process_tipo1_event": {"queue": settings.celery_source_list_ingest_queue},
+        "app.tasks.fileapp.associate_mailing": {"queue": settings.celery_fileapp_mailing_assoc_queue},
     },
     beat_schedule=beat_schedule,
 )

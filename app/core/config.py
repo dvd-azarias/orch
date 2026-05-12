@@ -50,6 +50,7 @@ class Settings:
     celery_fileapp_ingest_enabled: bool
     celery_s3_files_ingest_queue: str
     celery_source_list_ingest_queue: str
+    celery_fileapp_mailing_assoc_queue: str
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
@@ -158,6 +159,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         "heartbeat": "orch_heartbeat",
         "fileapp_ingest": "orch_fileapp_ingest_events",
         "fileapp_process": "orch_fileapp_source_list_ingest",
+        "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc",
         "generate_file_run": "orch_component_generate_file_run",
         "generate_file_scan": "orch_component_generate_file_scan",
     }
@@ -172,6 +174,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "heartbeat": "orch_heartbeat_launchd_local",
             "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
             "fileapp_process": "orch_fileapp_source_list_launchd_local",
+            "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_launchd_local",
             "generate_file_run": "orch_component_generate_file_run_launchd_local",
             "generate_file_scan": "orch_component_generate_file_scan_launchd_local",
         }
@@ -183,6 +186,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "heartbeat": "orch_heartbeat_f5_local",
             "fileapp_ingest": "orch_fileapp_ingest_f5_local",
             "fileapp_process": "orch_fileapp_source_list_f5_local",
+            "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_f5_local",
             "generate_file_run": "orch_component_generate_file_run_f5_local",
             "generate_file_scan": "orch_component_generate_file_scan_f5_local",
         }
@@ -271,6 +275,10 @@ def get_settings() -> Settings:
         celery_source_list_ingest_queue=(
             _read_env_optional("CELERY_SOURCE_LIST_INGEST_QUEUE", _default_queue_by_profile(queue_profile, "fileapp_process"))
             or _default_queue_by_profile(queue_profile, "fileapp_process")
+        ),
+        celery_fileapp_mailing_assoc_queue=(
+            _read_env_optional("CELERY_FILEAPP_MAILING_ASSOC_QUEUE", _default_queue_by_profile(queue_profile, "fileapp_mailing_assoc"))
+            or _default_queue_by_profile(queue_profile, "fileapp_mailing_assoc")
         ),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
