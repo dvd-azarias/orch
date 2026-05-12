@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy import text
 
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
@@ -13,6 +14,7 @@ from app.services.app_detector import APP_ARQUIVOS, detect_app
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_manual_pipeline_service import (
     FileAppTipo1ManualPipelineError,
+    build_file_event_mailing_identity,
     run_tipo1_manual_pipeline,
 )
 from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
@@ -23,6 +25,30 @@ from app.services.workspace_service import bind_workspace_context
 logger = get_logger(__name__)
 
 _RETRY_DELAYS = (30, 120, 300)
+
+
+async def _fetch_existing_source_list_names(
+    db_session,
+    *,
+    workspace_schema: str,
+    base_slug: str,
+) -> list[str]:
+    safe_schema = workspace_schema.replace('"', '""')
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT name
+            FROM "{safe_schema}".source_lists
+            WHERE name = :base_slug
+               OR name LIKE :base_slug_prefix
+            """
+        ),
+        {
+            "base_slug": base_slug,
+            "base_slug_prefix": f"{base_slug}_%",
+        },
+    )
+    return [str(name or "").strip() for name in result.scalars().all() if str(name or "").strip()]
 
 
 @celery_app.task(name="app.tasks.fileapp.ingest_event", bind=True, ignore_result=True)
@@ -224,12 +250,30 @@ async def _process_fileapp_tipo1_event_task(
 
     settings = get_settings()
     session_factory = get_session_factory()
+    mailing_name: str | None = None
+    mailing_description: str | None = None
+    file_data = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+    original_name = str(file_data.get("original_name") or "").strip()
+
     async with session_factory() as db_session:
-        safe_workspace_uuid, _workspace_schema = bind_workspace_context(workspace_uuid)
+        safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
         workspace_api_key = await fetch_workspace_otima_billing_api_key(
             db_session,
             workspace_uuid=safe_workspace_uuid,
         )
+        if original_name:
+            base_identity = build_file_event_mailing_identity(file_name=original_name)
+            existing_names = await _fetch_existing_source_list_names(
+                db_session,
+                workspace_schema=workspace_schema,
+                base_slug=base_identity.name,
+            )
+            identity = build_file_event_mailing_identity(
+                file_name=original_name,
+                existing_names=existing_names,
+            )
+            mailing_name = identity.name
+            mailing_description = identity.description
 
     try:
         pipeline_result = await run_tipo1_manual_pipeline(
@@ -239,6 +283,8 @@ async def _process_fileapp_tipo1_event_task(
             payload=payload,
             mapping_template_uuid=mapping_template_uuid,
             workspace_api_key=workspace_api_key,
+            mailing_name=mailing_name,
+            mailing_description=mailing_description,
         )
     except FileAppTipo1ManualPipelineError as exc:
         logger.warning(
