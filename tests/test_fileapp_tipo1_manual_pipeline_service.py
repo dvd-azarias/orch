@@ -27,6 +27,7 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
         assert url == "http://target-core-api.otima.io/v2/mailings/upload"
         assert headers["authorization"] == "Bearer token-123"
         assert upload.file_name == "mailing.csv"
+        assert upload.description == "Carga via evento de cópia de arquivo no SFTP - mailing"
         return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
 
     def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
@@ -36,6 +37,11 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
         if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
             return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"contact_system_field_id":"a26cbb26-2126-46f8-907c-757ab6dc2790","is_ignored":false,"dialer_label":null,"field_type":"text"}]}}}'
         if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            assert payload == {
+                "mapping_template_id": "719cbdca-ec3c-4213-9112-96d9a53cb68a",
+                "name": "mailing",
+                "description": "Carga via evento de cópia de arquivo no SFTP - mailing",
+            }
             return 200, '{"data":{"ok":true}}'
         if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
             return 200, '{"data":{"status":"READY_TO_INGEST"}}'
@@ -161,3 +167,18 @@ async def test_run_tipo1_manual_pipeline_falls_back_to_uuid_from_file_url(monkey
         workspace_api_key=None,
     )
     assert result["status"] == "done"
+
+
+def test_build_file_event_mailing_identity_uses_slug_and_suffix() -> None:
+    identity = service.build_file_event_mailing_identity(file_name="Mailing 7_CPFs com telefones 024.csv")
+    assert identity.name == "mailing_7_cpfs_com_telefones_024"
+    assert identity.description == "Carga via evento de cópia de arquivo no SFTP - mailing_7_cpfs_com_telefones_024"
+
+    second = service.build_file_event_mailing_identity(
+        file_name="Mailing 7_CPFs com telefones 024.csv",
+        existing_names=[
+            "mailing_7_cpfs_com_telefones_024",
+            "mailing_7_cpfs_com_telefones_024_001",
+        ],
+    )
+    assert second.name == "mailing_7_cpfs_com_telefones_024_002"

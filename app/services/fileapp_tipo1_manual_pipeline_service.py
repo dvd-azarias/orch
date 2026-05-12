@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +22,12 @@ class FileUploadPayload:
     file_bytes: bytes
     description: str
     legal_basis: str
+
+
+@dataclass(frozen=True)
+class FileEventMailingIdentity:
+    name: str
+    description: str
 
 
 class FileAppTipo1ManualPipelineError(Exception):
@@ -105,6 +113,53 @@ def _multipart_encode(upload: FileUploadPayload) -> tuple[bytes, str]:
     return b"".join(lines), f"multipart/form-data; boundary={boundary}"
 
 
+def _slugify_file_name(file_name: str) -> str:
+    stem = str(file_name or "").strip()
+    if "." in stem:
+        stem = stem.rsplit(".", 1)[0]
+    normalized = unicodedata.normalize("NFKD", stem)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", ascii_only).strip("_").lower()
+    return slug or "arquivo"
+
+
+def _next_incremental_slug(base_slug: str, existing_names: list[str] | tuple[str, ...]) -> str:
+    used_indexes: set[int] = set()
+    prefix = f"{base_slug}_"
+    for raw_name in existing_names:
+        name = str(raw_name or "").strip().lower()
+        if not name:
+            continue
+        if name == base_slug:
+            used_indexes.add(0)
+            continue
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix) :]
+        if len(suffix) != 3 or not suffix.isdigit():
+            continue
+        used_indexes.add(int(suffix))
+    if 0 not in used_indexes:
+        return base_slug
+    next_index = 1
+    while next_index in used_indexes:
+        next_index += 1
+    return f"{base_slug}_{next_index:03d}"
+
+
+def build_file_event_mailing_identity(
+    *,
+    file_name: str,
+    existing_names: list[str] | tuple[str, ...] | None = None,
+) -> FileEventMailingIdentity:
+    base_slug = _slugify_file_name(file_name)
+    final_slug = _next_incremental_slug(base_slug, existing_names or [])
+    return FileEventMailingIdentity(
+        name=final_slug,
+        description=f"Carga via evento de cópia de arquivo no SFTP - {final_slug}",
+    )
+
+
 def _multipart_request(
     *,
     url: str,
@@ -177,6 +232,8 @@ async def run_tipo1_manual_pipeline(
     payload: dict[str, Any],
     mapping_template_uuid: str,
     workspace_api_key: str | None = None,
+    mailing_name: str | None = None,
+    mailing_description: str | None = None,
 ) -> dict[str, Any]:
     file_data = payload.get("file")
     if not isinstance(file_data, dict):
@@ -189,7 +246,6 @@ async def run_tipo1_manual_pipeline(
     file_name = str(file_data.get("original_name") or "").strip()
     linked_by = _resolve_linked_by_uuid(payload=payload, file_data=file_data)
     event_workspace_uuid = str(file_data.get("workspace_uuid") or "").strip() or workspace_uuid
-    description = str(file_data.get("description") or payload.get("description") or "Carga via FileApp event")
     legal_basis = str(file_data.get("legal_basis") or payload.get("legal_basis") or "consent")
     mime_type = str(file_data.get("mime_type") or "").strip()
 
@@ -203,6 +259,9 @@ async def run_tipo1_manual_pipeline(
             step="step1_upload",
             message="file.original_name ausente no evento FileApp.",
         )
+    identity = build_file_event_mailing_identity(file_name=file_name)
+    resolved_mailing_name = str(mailing_name or identity.name).strip() or identity.name
+    resolved_description = str(mailing_description or identity.description).strip() or identity.description
     if not settings.sync_ws_client_id or not settings.sync_ws_client_secret:
         raise FileAppTipo1ManualPipelineError(
             step="step1_upload",
@@ -274,7 +333,7 @@ async def run_tipo1_manual_pipeline(
             file_name=file_name,
             content_type=upload_content_type,
             file_bytes=file_bytes,
-            description=description,
+            description=resolved_description,
             legal_basis=legal_basis,
         )
         status_code, body = await asyncio.to_thread(
@@ -376,7 +435,11 @@ async def run_tipo1_manual_pipeline(
     step_results.append({"step": "step3_field_mappings_get", "status_code": status_code, "mappings_count": len(suggested_mappings)})
 
     # Step 4
-    patch_payload = {"mapping_template_id": mapping_template_uuid}
+    patch_payload = {
+        "mapping_template_id": mapping_template_uuid,
+        "name": resolved_mailing_name,
+        "description": resolved_description,
+    }
     try:
         status_code, body = await asyncio.to_thread(
             _json_request,
