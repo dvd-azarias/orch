@@ -85,6 +85,33 @@ async def resolve_mapping_template_id(
     return int(row[0])
 
 
+async def resolve_mailing_public_id_from_template(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    template_id: int,
+) -> str | None:
+    safe_schema = workspace_schema.replace('"', '""')
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT sl.public_id::text
+            FROM "{safe_schema}".source_list_mapping_templates t
+            JOIN "{safe_schema}".source_lists sl
+              ON sl.id = t.created_from_source_list_id
+            WHERE t.id = :template_id
+            LIMIT 1
+            """
+        ),
+        {"template_id": template_id},
+    )
+    value = result.scalar_one_or_none()
+    if value is None:
+        return None
+    mailing_uuid = str(value).strip()
+    return mailing_uuid or None
+
+
 async def load_mapping_items(
     db_session: AsyncSession,
     *,

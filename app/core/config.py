@@ -54,6 +54,9 @@ class Settings:
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
     sync_ws_client_secret: str | None
+    sync_webhook_base_url: str | None
+    sync_ws_timeout_seconds: float
+    target_core_api_bearer_token: str | None
     otima_llm_api_base_url: str | None
     otima_llm_api_gateway: str | None
     otima_llm_api_key: str | None
@@ -276,6 +279,12 @@ def get_settings() -> Settings:
         ),
         sync_ws_client_id=_read_env_optional("SYNC_WS_CLIENT_ID"),
         sync_ws_client_secret=_read_env_optional("SYNC_WS_CLIENT_SECRET"),
+        sync_webhook_base_url=_read_env_optional("SYNC_WEBHOOK_BASE_URL"),
+        sync_ws_timeout_seconds=float(_read_env_optional("SYNC_WS_TIMEOUT_SECONDS", "5") or "5"),
+        target_core_api_bearer_token=(
+            _read_env_optional("TARGET_CORE_API_BEARER_TOKEN")
+            or _read_env_optional("SYNC_WEBHOOK_BEARER_TOKEN")
+        ),
         otima_llm_api_base_url=_read_env_optional("OTIMA_LLM_API_BASE_URL"),
         otima_llm_api_gateway=_read_env_optional("OTIMA_LLM_API_GATEWAY"),
         otima_llm_api_key=_read_env_optional("OTIMA_LLM_API_KEY"),

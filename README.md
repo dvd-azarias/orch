@@ -1045,3 +1045,38 @@ Embora simples, este comportamento é proposital:
 - preserva cursor de retomada sem perda de contexto;
 - evita avanço automático indevido antes da resposta de canal;
 - prepara a evolução da Fase 8 para envio/retorno reais mantendo o motor estável.
+
+## Fase 10 — Associação de mailing no FileApp tipo_1
+
+### Objetivo
+
+Adicionar no pipeline `fileapp_tipo1` (evento com `mapping_template`) a chamada de associação de mailing no Target Core:
+
+- `POST /v2/flow/{flow_uuid}/mailings`
+
+### Regras da chamada
+
+Body obrigatório:
+
+- `mailing_ids_added`: `[<mailing_uuid>]`
+- `mailing_ids_removed`: `[]`
+- `linked_by`: `file.id` do evento
+- `call_origin`: **sempre** `"file_event"`
+
+Headers utilizados:
+
+- `X-WORKSPACE-UUID: <workspace_uuid>`
+- `x-application: target`
+- `authorization: Bearer <TOKEN>` quando configurado
+- fallback de autenticação: `x-api-key` e `x-workspace-api-key` com `target.workspaces.otima_billing_api_key`
+
+### Como o mailing_uuid é resolvido
+
+- origem: `source_list_mapping_templates.created_from_source_list_id`
+- join para UUID público: `source_lists.public_id`
+
+### Configuração envolvida
+
+- `SYNC_WEBHOOK_BASE_URL` (base da API Target Core)
+- `TARGET_CORE_API_BEARER_TOKEN` (preferencial) ou `SYNC_WEBHOOK_BEARER_TOKEN`
+- timeout HTTP reaproveita `SYNC_WS_TIMEOUT_SECONDS`

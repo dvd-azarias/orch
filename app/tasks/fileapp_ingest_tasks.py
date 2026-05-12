@@ -11,13 +11,16 @@ from app.core.database import get_session_factory
 from app.core.logging import get_logger
 from app.services.app_detector import APP_ARQUIVOS, detect_app
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
+from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
 from app.services.fileapp_tipo1_service import (
     load_mapping_items,
+    resolve_mailing_public_id_from_template,
     resolve_person_ids_for_rows,
     resolve_mapping_template_id,
     upsert_persons_from_rows,
 )
 from app.services.orch_trigger_service import process_single_payload
+from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.workspace_service import bind_workspace_context
 
 logger = get_logger(__name__)
@@ -243,6 +246,25 @@ async def _process_fileapp_tipo1_event_task(
             workspace_schema=workspace_schema,
             template_id=template_id,
         )
+        mailing_uuid = await resolve_mailing_public_id_from_template(
+            db_session,
+            workspace_schema=workspace_schema,
+            template_id=template_id,
+        )
+        workspace_api_key = await fetch_workspace_otima_billing_api_key(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+        )
+        file_data = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+        linked_by = str(file_data.get("id", "")).strip() if isinstance(file_data, dict) else ""
+        mailing_association = await associate_mailing_to_flow_from_file_event(
+            settings=settings,
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=flow_uuid,
+            mailing_uuid=mailing_uuid,
+            linked_by=linked_by or None,
+            workspace_api_key=workspace_api_key,
+        )
         session_rows = 0
         session_failed_rows = 0
         if db_session.in_transaction():
@@ -300,6 +322,7 @@ async def _process_fileapp_tipo1_event_task(
             "skipped_rows": skipped_rows,
             "session_rows": session_rows,
             "session_failed_rows": session_failed_rows,
+            "mailing_association": mailing_association,
         },
     )
     return {
@@ -311,4 +334,5 @@ async def _process_fileapp_tipo1_event_task(
         "skipped_rows": skipped_rows,
         "session_rows": session_rows,
         "session_failed_rows": session_failed_rows,
+        "mailing_association": mailing_association,
     }
