@@ -1051,9 +1051,12 @@ Embora simples, este comportamento é proposital:
 
 ### Objetivo
 
-Adicionar no pipeline `fileapp_tipo1` (evento com `mapping_template`) a associação de mailing no Target Core, via task Celery dedicada.
+No pipeline `fileapp_tipo1` (evento com `mapping_template`), executar a mesma sequência da carga manual via tela no Target Core para evitar lógica paralela no ORCH.
 
-- `POST /v2/flow/{flow_uuid}/mailings` (executado por worker async)
+- upload do mailing
+- resolução/aplicação de mapping
+- import
+- associação ao flow
 
 ### Regras da chamada
 
@@ -1073,16 +1076,19 @@ Headers utilizados:
 
 ### Como o mailing_uuid é resolvido
 
-- nesta fase de fix, o ORCH cria uma `source_lists` por `file.id` e usa o `public_id` recém-gerado como mailing UUID.
-- ordem da execução:
-  1. cria `source_lists`;
-  2. aplica o ciclo de mapeamento (template) para deixar a `source_list` em `READY_TO_INGEST`;
-  3. faz ingest em `persons`/`orch_sessions` (persons com `last_source_list_id`);
-  4. enfileira task de associação de mailing.
+- no `tipo_1`, o `mailing_uuid` vem da resposta do upload no Target Core.
+- sequência canônica executada:
+  1. `POST /v2/mailings/upload`
+  2. `GET /v2/mailings/mapping-templates`
+  3. `GET /v2/mailings/{mailing_id}/field-mappings`
+  4. `PATCH /v2/mailings/{mailing_id}` (aplica `mapping_template_id`)
+  5. `PUT /v2/mailings/{mailing_id}/field-mappings`
+  6. `POST /v2/mailings/{mailing_id}/import`
+  7. `POST /v2/flow/{flow_uuid}/mailings`
 
 Regra crítica:
-- `source_list` em `UPLOADED` **não** deve ser usada na associação da Fase 10.
-- A associação só deve ser disparada quando `source_list.status = READY_TO_INGEST`.
+- no passo 5, o status precisa chegar em `READY_TO_INGEST` antes de avançar para import/vínculo.
+- no `tipo_1`, o ORCH não deve fazer escrita direta em `orch_sessions`; a carga segue o caminho do Target Core.
 
 ### Fila dedicada (visibilidade/retentativa)
 

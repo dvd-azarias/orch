@@ -11,17 +11,11 @@ from app.core.database import get_session_factory
 from app.core.logging import get_logger
 from app.services.app_detector import APP_ARQUIVOS, detect_app
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
-from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
-from app.services.fileapp_tipo1_service import (
-    SourceListStatus,
-    count_rows_without_channel,
-    create_source_list_for_file_event,
-    load_mapping_items,
-    resolve_person_ids_for_rows,
-    resolve_mapping_template_id,
-    update_source_list_after_ingest,
-    upsert_persons_from_rows,
+from app.services.fileapp_tipo1_manual_pipeline_service import (
+    FileAppTipo1ManualPipelineError,
+    run_tipo1_manual_pipeline,
 )
+from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
 from app.services.orch_trigger_service import process_single_payload
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.workspace_service import bind_workspace_context
@@ -231,161 +225,61 @@ async def _process_fileapp_tipo1_event_task(
     settings = get_settings()
     session_factory = get_session_factory()
     async with session_factory() as db_session:
-        safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
-        payloads = await expand_arquivos_payload_into_rows(payload, settings=settings)
-        rows: list[dict[str, Any]] = []
-        for item in payloads:
-            file_data = item.get("file")
-            if isinstance(file_data, dict):
-                content = file_data.get("content")
-                if isinstance(content, dict):
-                    rows.append(content)
-
-        template_id = await resolve_mapping_template_id(
+        safe_workspace_uuid, _workspace_schema = bind_workspace_context(workspace_uuid)
+        workspace_api_key = await fetch_workspace_otima_billing_api_key(
             db_session,
-            workspace_schema=workspace_schema,
+            workspace_uuid=safe_workspace_uuid,
+        )
+
+    try:
+        pipeline_result = await run_tipo1_manual_pipeline(
+            settings=settings,
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=flow_uuid,
+            payload=payload,
             mapping_template_uuid=mapping_template_uuid,
+            workspace_api_key=workspace_api_key,
         )
-        if template_id is None:
-            logger.warning(
-                "fileapp.tipo1.mapping_template_not_found",
-                extra={
-                    "event": "orch.fileapp.tipo1.mapping_template_not_found",
-                    "workspace_uuid": safe_workspace_uuid,
-                    "flow_uuid": flow_uuid,
-                    "mapping_template_uuid": mapping_template_uuid,
-                },
-            )
-            return {
-                "status": "ignored",
-                "reason": "mapping_template_not_found",
+    except FileAppTipo1ManualPipelineError as exc:
+        logger.warning(
+            "fileapp.tipo1.manual_pipeline.failed",
+            extra={
+                "event": "orch.fileapp.tipo1.manual_pipeline.failed",
                 "workspace_uuid": safe_workspace_uuid,
                 "flow_uuid": flow_uuid,
                 "mapping_template_uuid": mapping_template_uuid,
-            }
-
-        mapping_items = await load_mapping_items(
-            db_session,
-            workspace_schema=workspace_schema,
-            template_id=template_id,
+                "failed_step": exc.step,
+                "error_message": exc.message,
+                "details": exc.details,
+            },
         )
-        if not mapping_items:
-            logger.warning(
-                "fileapp.tipo1.mapping_items_not_found",
-                extra={
-                    "event": "orch.fileapp.tipo1.mapping_items_not_found",
-                    "workspace_uuid": safe_workspace_uuid,
-                    "flow_uuid": flow_uuid,
-                    "mapping_template_uuid": mapping_template_uuid,
-                },
-            )
-            return {
-                "status": "failed",
-                "reason": "mapping_items_not_found",
+        return {
+            "status": "failed",
+            "reason": exc.step,
+            "message": exc.message,
+            "details": exc.details,
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mapping_template_uuid": mapping_template_uuid,
+        }
+    except Exception as exc:
+        logger.exception(
+            "fileapp.tipo1.manual_pipeline.unexpected_error",
+            extra={
+                "event": "orch.fileapp.tipo1.manual_pipeline.unexpected_error",
                 "workspace_uuid": safe_workspace_uuid,
                 "flow_uuid": flow_uuid,
                 "mapping_template_uuid": mapping_template_uuid,
-            }
-        file_data = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-        linked_by = str(file_data.get("id", "")).strip() if isinstance(file_data, dict) else ""
-        source_list_id: int | None = None
-        source_list_uuid: str | None = None
-        if db_session.in_transaction():
-            await db_session.commit()
-        async with db_session.begin():
-            source_list_id, source_list_uuid = await create_source_list_for_file_event(
-                db_session,
-                workspace_schema=workspace_schema,
-                file_data=file_data if isinstance(file_data, dict) else {},
-                template_id=template_id,
-                rows_total=len(rows),
-            )
-        session_rows = 0
-        session_failed_rows = 0
-        source_list_status = SourceListStatus.ERROR
-        async with db_session.begin():
-            processed_rows, skipped_rows = await upsert_persons_from_rows(
-                db_session,
-                workspace_schema=workspace_schema,
-                rows=rows,
-                mapping_items=mapping_items,
-                source_list_id=source_list_id,
-            )
-            person_ids = await resolve_person_ids_for_rows(
-                db_session,
-                workspace_schema=workspace_schema,
-                rows=rows,
-                mapping_items=mapping_items,
-            )
-            for idx, item_payload in enumerate(payloads):
-                try:
-                    item_payload_with_type = dict(item_payload)
-                    item_payload_with_type["mapping_template_id"] = mapping_template_uuid
-                    file_data = item_payload_with_type.get("file")
-                    person_id = person_ids[idx] if idx < len(person_ids) else None
-                    if isinstance(file_data, dict) and person_id:
-                        file_data["person_id"] = person_id
-                    await process_single_payload(
-                        safe_workspace_uuid=safe_workspace_uuid,
-                        workspace_schema=workspace_schema,
-                        flow_uuid=flow_uuid,
-                        payload=item_payload_with_type,
-                        db_session=db_session,
-                        app_name=app_name,
-                    )
-                    session_rows += 1
-                except Exception:
-                    session_failed_rows += 1
-                    logger.exception(
-                        "fileapp.tipo1.process_event.session_row_failed",
-                        extra={
-                            "event": "orch.fileapp.tipo1.process_event.session_row_failed",
-                            "workspace_uuid": safe_workspace_uuid,
-                            "flow_uuid": flow_uuid,
-                            "mapping_template_uuid": mapping_template_uuid,
-                        },
-                    )
-            if source_list_id:
-                rows_without_channel = count_rows_without_channel(rows=rows, mapping_items=mapping_items)
-                if session_rows > 0 and session_failed_rows == 0:
-                    source_list_status = SourceListStatus.READY_TO_INGEST
-                else:
-                    source_list_status = SourceListStatus.ERROR
-                await update_source_list_after_ingest(
-                    db_session,
-                    workspace_schema=workspace_schema,
-                    source_list_id=int(source_list_id),
-                    status=source_list_status,
-                    rows_processed=session_rows,
-                    rows_discarded=skipped_rows,
-                    rows_error=session_failed_rows,
-                    rows_without_channel=rows_without_channel,
-                )
-
-        mailing_association: dict[str, Any]
-        if source_list_uuid and source_list_status == SourceListStatus.READY_TO_INGEST:
-            assoc_task = associate_fileapp_mailing_task.apply_async(
-                kwargs={
-                    "workspace_uuid": safe_workspace_uuid,
-                    "flow_uuid": flow_uuid,
-                    "mailing_uuid": source_list_uuid,
-                    "linked_by": linked_by or None,
-                },
-                queue=settings.celery_fileapp_mailing_assoc_queue,
-                routing_key=settings.celery_fileapp_mailing_assoc_queue,
-            )
-            mailing_association = {
-                "status": "queued",
-                "task_id": assoc_task.id,
-                "queue": settings.celery_fileapp_mailing_assoc_queue,
-                "mailing_uuid": source_list_uuid,
-            }
-        else:
-            mailing_association = {
-                "status": "ignored",
-                "reason": "source_list_not_ready",
-                "source_list_status": source_list_status,
-            }
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": type(exc).__name__,
+            "message": str(exc),
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mapping_template_uuid": mapping_template_uuid,
+        }
 
     logger.info(
         "fileapp.tipo1.process_event.finished",
@@ -394,11 +288,7 @@ async def _process_fileapp_tipo1_event_task(
             "workspace_uuid": workspace_uuid,
             "flow_uuid": flow_uuid,
             "mapping_template_uuid": mapping_template_uuid,
-            "processed_rows": processed_rows,
-            "skipped_rows": skipped_rows,
-            "session_rows": session_rows,
-            "session_failed_rows": session_failed_rows,
-            "mailing_association": mailing_association,
+            "manual_pipeline": pipeline_result,
         },
     )
     return {
@@ -406,11 +296,7 @@ async def _process_fileapp_tipo1_event_task(
         "workspace_uuid": workspace_uuid,
         "flow_uuid": flow_uuid,
         "mapping_template_uuid": mapping_template_uuid,
-        "processed_rows": processed_rows,
-        "skipped_rows": skipped_rows,
-        "session_rows": session_rows,
-        "session_failed_rows": session_failed_rows,
-        "mailing_association": mailing_association,
+        "manual_pipeline": pipeline_result,
     }
 
 
