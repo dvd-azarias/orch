@@ -28,6 +28,7 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0006_create_orch_generate_file_tables", "sql/006_create_orch_generate_file_tables.sql"),
     ("0007_add_assigned_fields_to_orch_sessions", "sql/007_add_assigned_fields_to_orch_sessions.sql"),
     ("0008_fix_assigned_fields_to_timestamps", "sql/008_fix_assigned_fields_to_timestamps.sql"),
+    ("0009_add_orch_sessions_flow_entity_index", "sql/009_add_orch_sessions_flow_entity_index.sql"),
 ]
 
 
@@ -58,6 +59,20 @@ def _split_sql_statements(sql_text: str) -> list[str]:
     if tail:
         statements.append(tail)
     return statements
+
+
+def _workspace_tablespace_from_schema(schema: str) -> str:
+    raw = str(schema or "").strip()
+    if not raw:
+        raise ValueError("Schema vazio para resolver tablespace.")
+    if raw.startswith("ws_") and len(raw) > 3:
+        return raw[3:]
+    return raw
+
+
+def _render_migration_sql(sql_text: str, *, schema: str) -> str:
+    tablespace = _workspace_tablespace_from_schema(schema)
+    return sql_text.replace("__WORKSPACE_TABLESPACE__", tablespace)
 
 
 async def _ensure_orch_version_table(
@@ -117,6 +132,7 @@ async def _run_migration_file(
 ) -> None:
     safe_schema = schema.replace('"', '""')
     sql_text = Path(migration_path).read_text(encoding="utf-8")
+    sql_text = _render_migration_sql(sql_text, schema=schema)
     statements = _split_sql_statements(sql_text)
     await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
     for statement in statements:
