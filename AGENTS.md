@@ -108,6 +108,19 @@ Sem confirmacao explicita do usuario, nao executar:
 - Em diagnostico, sempre registrar no log o tipo decidido:
   - `decision=fileapp_tipo1` ou `decision=fileapp_tipo2`.
 
+## Regra complementar FileApp (Fase 10) — OBRIGATORIA
+
+- No caminho `tipo_1` (com `mapping_template`), executar etapa de associacao de mailing ao flow.
+- Chamada esperada:
+  - `POST {SYNC_WEBHOOK_BASE_URL}/v2/flow/{flow_uuid}/mailings`
+- Body obrigatorio:
+  - `mailing_ids_added` com o mailing resolvido do template;
+  - `mailing_ids_removed` vazio;
+  - `linked_by` = `file.id` do evento;
+  - `call_origin` = **`file_event`** (sempre).
+- Resolver mailing via:
+  - `source_list_mapping_templates.created_from_source_list_id` -> `source_lists.public_id`.
+
 ## Referencias operacionais
 
 - `README.md`
