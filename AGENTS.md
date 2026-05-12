@@ -111,7 +111,8 @@ Sem confirmacao explicita do usuario, nao executar:
 ## Regra complementar FileApp (Fase 10) — OBRIGATORIA
 
 - No caminho `tipo_1` (com `mapping_template`), executar etapa de associacao de mailing ao flow.
-- Chamada esperada:
+- A chamada de associacao deve ser assíncrona via Celery (task dedicada), nunca bloquear o processamento local.
+- Chamada esperada da task:
   - `POST {SYNC_WEBHOOK_BASE_URL}/v2/flow/{flow_uuid}/mailings`
 - Body obrigatorio:
   - `mailing_ids_added` com o mailing resolvido do template;
@@ -119,7 +120,11 @@ Sem confirmacao explicita do usuario, nao executar:
   - `linked_by` = `file.id` do evento;
   - `call_origin` = **`file_event`** (sempre).
 - Resolver mailing via:
-  - `source_list_mapping_templates.created_from_source_list_id` -> `source_lists.public_id`.
+  - criar `source_lists` no proprio ORCH (1 por `file.id`) e usar `source_lists.public_id`.
+- Regra de status da source_list (OBRIGATORIA):
+  - nao usar `source_lists.status = UPLOADED` para associacao de mailing;
+  - enfileirar `associate_mailing` somente quando a `source_list` estiver em `READY_TO_INGEST`.
+- Nao manipular `source_list_members` localmente neste fluxo.
 
 ## Referencias operacionais
 

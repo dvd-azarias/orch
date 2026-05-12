@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.config import get_settings
 from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task
 
 
@@ -29,5 +30,6 @@ def test_ingest_fileapp_event_task_enqueues_processing(monkeypatch) -> None:
 
     assert result["status"] == "queued"
     assert result["task_id"] == "task-123"
-    assert captured["queue"] == "orch_fileapp_source_list_ingest"
-    assert captured["routing_key"] == "orch_fileapp_source_list_ingest"
+    settings = get_settings()
+    assert captured["queue"] == settings.celery_source_list_ingest_queue
+    assert captured["routing_key"] == settings.celery_source_list_ingest_queue

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,12 @@ class MappingItem:
     header_name: str
     field_code: str
     ignored: bool
+
+
+class SourceListStatus:
+    PENDING_FIELD_MAPPING = "PENDING_FIELD_MAPPING"
+    READY_TO_INGEST = "READY_TO_INGEST"
+    ERROR = "ERROR"
 
 
 async def resolve_mapping_template_uuid(
@@ -112,6 +119,120 @@ async def resolve_mailing_public_id_from_template(
     return mailing_uuid or None
 
 
+async def create_source_list_for_file_event(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    file_data: dict[str, Any],
+    template_id: int,
+    rows_total: int,
+) -> tuple[int, str]:
+    safe_schema = workspace_schema.replace('"', '""')
+    file_name = str(file_data.get("original_name") or "").strip() or None
+    file_path = str(file_data.get("folder_path") or "").strip() or None
+    file_url = str(file_data.get("url") or "").strip() or None
+    file_id = str(file_data.get("id") or "").strip() or "file_event"
+    name = file_name or f"file_event_{file_id[:8]}"
+    description = f"Auto source_list from file_event ({file_id})"
+    row = (
+        await db_session.execute(
+            text(
+                f"""
+                INSERT INTO "{safe_schema}".source_lists (
+                    name,
+                    description,
+                    status,
+                    origin,
+                    file_name,
+                    file_path,
+                    file_url,
+                    rows_total,
+                    rows_processed,
+                    rows_discarded,
+                    rows_error,
+                    rows_without_channel,
+                    mapping_template_id,
+                    mapping_completed_at,
+                    ingested_at,
+                    updated_at
+                ) VALUES (
+                    :name,
+                    :description,
+                    'PENDING_FIELD_MAPPING',
+                    'api',
+                    :file_name,
+                    :file_path,
+                    :file_url,
+                    :rows_total,
+                    0,
+                    0,
+                    0,
+                    0,
+                    :mapping_template_id,
+                    NULL,
+                    NULL,
+                    NOW()
+                )
+                RETURNING id, public_id::text
+                """
+            ),
+            {
+                "name": name,
+                "description": description,
+                "file_name": file_name,
+                "file_path": file_path,
+                "file_url": file_url,
+                "rows_total": max(0, int(rows_total)),
+                "mapping_template_id": template_id,
+            },
+        )
+    ).first()
+    if row is None:
+        raise RuntimeError("Falha ao criar source_list para file_event.")
+    return int(row[0]), str(row[1])
+
+
+async def update_source_list_after_ingest(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    source_list_id: int,
+    status: str,
+    rows_processed: int,
+    rows_discarded: int,
+    rows_error: int,
+    rows_without_channel: int,
+) -> None:
+    safe_schema = workspace_schema.replace('"', '""')
+    now_utc = datetime.now(timezone.utc)
+    await db_session.execute(
+        text(
+            f"""
+            UPDATE "{safe_schema}".source_lists
+            SET
+                status = :status,
+                rows_processed = :rows_processed,
+                rows_discarded = :rows_discarded,
+                rows_error = :rows_error,
+                rows_without_channel = :rows_without_channel,
+                mapping_completed_at = :mapping_completed_at,
+                ingested_at = NULL,
+                updated_at = NOW()
+            WHERE id = :source_list_id
+            """
+        ),
+        {
+            "source_list_id": int(source_list_id),
+            "status": status,
+            "rows_processed": max(0, int(rows_processed)),
+            "rows_discarded": max(0, int(rows_discarded)),
+            "rows_error": max(0, int(rows_error)),
+            "rows_without_channel": max(0, int(rows_without_channel)),
+            "mapping_completed_at": now_utc,
+        },
+    )
+
+
 async def load_mapping_items(
     db_session: AsyncSession,
     *,
@@ -195,12 +316,28 @@ def _map_row_to_person_payload(row: dict[str, Any], mapping_items: list[MappingI
     }
 
 
+def count_rows_without_channel(
+    *,
+    rows: list[dict[str, Any]],
+    mapping_items: list[MappingItem],
+) -> int:
+    count = 0
+    for row in rows:
+        mapped = _map_row_to_person_payload(row, mapping_items)
+        if mapped is None:
+            continue
+        if mapped.get("primary_channel_type") is None:
+            count += 1
+    return count
+
+
 async def upsert_persons_from_rows(
     db_session: AsyncSession,
     *,
     workspace_schema: str,
     rows: list[dict[str, Any]],
     mapping_items: list[MappingItem],
+    source_list_id: int | None = None,
 ) -> tuple[int, int]:
     safe_schema = workspace_schema.replace('"', '""')
     inserted_or_updated = 0
@@ -221,6 +358,8 @@ async def upsert_persons_from_rows(
                     primary_channel_label,
                     channels,
                     extras,
+                    last_source_list_id,
+                    last_mailing_id,
                     last_seen_at,
                     updated_at
                 ) VALUES (
@@ -231,6 +370,8 @@ async def upsert_persons_from_rows(
                     :primary_channel_label,
                     CAST(:channels AS jsonb),
                     CAST(:extras AS jsonb),
+                    :source_list_id,
+                    :source_list_id,
                     NOW(),
                     NOW()
                 )
@@ -241,6 +382,8 @@ async def upsert_persons_from_rows(
                     primary_channel_label = EXCLUDED.primary_channel_label,
                     channels = EXCLUDED.channels,
                     extras = COALESCE("{safe_schema}".persons.extras, '{{}}'::jsonb) || EXCLUDED.extras,
+                    last_source_list_id = COALESCE(EXCLUDED.last_source_list_id, "{safe_schema}".persons.last_source_list_id),
+                    last_mailing_id = COALESCE(EXCLUDED.last_mailing_id, "{safe_schema}".persons.last_mailing_id),
                     last_seen_at = NOW(),
                     updated_at = NOW()
                 """
@@ -253,6 +396,7 @@ async def upsert_persons_from_rows(
                 "primary_channel_label": mapped["primary_channel_label"],
                 "channels": json.dumps(mapped["channels"], ensure_ascii=False),
                 "extras": json.dumps(mapped["extras"], ensure_ascii=False),
+                "source_list_id": source_list_id,
             },
         )
         inserted_or_updated += 1

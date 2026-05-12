@@ -1050,9 +1050,9 @@ Embora simples, este comportamento é proposital:
 
 ### Objetivo
 
-Adicionar no pipeline `fileapp_tipo1` (evento com `mapping_template`) a chamada de associação de mailing no Target Core:
+Adicionar no pipeline `fileapp_tipo1` (evento com `mapping_template`) a associação de mailing no Target Core, via task Celery dedicada.
 
-- `POST /v2/flow/{flow_uuid}/mailings`
+- `POST /v2/flow/{flow_uuid}/mailings` (executado por worker async)
 
 ### Regras da chamada
 
@@ -1072,8 +1072,25 @@ Headers utilizados:
 
 ### Como o mailing_uuid é resolvido
 
-- origem: `source_list_mapping_templates.created_from_source_list_id`
-- join para UUID público: `source_lists.public_id`
+- nesta fase de fix, o ORCH cria uma `source_lists` por `file.id` e usa o `public_id` recém-gerado como mailing UUID.
+- ordem da execução:
+  1. cria `source_lists`;
+  2. aplica o ciclo de mapeamento (template) para deixar a `source_list` em `READY_TO_INGEST`;
+  3. faz ingest em `persons`/`orch_sessions` (persons com `last_source_list_id`);
+  4. enfileira task de associação de mailing.
+
+Regra crítica:
+- `source_list` em `UPLOADED` **não** deve ser usada na associação da Fase 10.
+- A associação só deve ser disparada quando `source_list.status = READY_TO_INGEST`.
+
+### Fila dedicada (visibilidade/retentativa)
+
+- task: `app.tasks.fileapp.associate_mailing`
+- fila: `CELERY_FILEAPP_MAILING_ASSOC_QUEUE`
+  - `prod`: `orch_fileapp_mailing_assoc`
+  - `launchd_local`: `orch_fileapp_mailing_assoc_launchd_local`
+  - `f5_local`: `orch_fileapp_mailing_assoc_f5_local`
+- falhas HTTP da API externa fazem retry com backoff no Celery.
 
 ### Configuração envolvida
 
