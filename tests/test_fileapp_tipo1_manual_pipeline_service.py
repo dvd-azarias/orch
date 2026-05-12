@@ -55,7 +55,7 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
         flow_uuid="flow-uuid-1",
         payload={
             "file": {
-                "id": "file-event-1",
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
                 "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
                 "original_name": "mailing.csv",
                 "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
@@ -75,7 +75,7 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
     assert final_call["payload"] == {
         "mailing_ids_added": ["mailing-uuid-1"],
         "mailing_ids_removed": [],
-        "linked_by": "file-event-1",
+        "linked_by": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
         "call_origin": "file_event",
     }
 
@@ -104,7 +104,7 @@ async def test_run_tipo1_manual_pipeline_fail_fast_when_template_not_found(monke
             flow_uuid="flow-uuid-1",
             payload={
                 "file": {
-                    "id": "file-event-1",
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
                     "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
                     "original_name": "mailing.csv",
                     "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
@@ -115,3 +115,49 @@ async def test_run_tipo1_manual_pipeline_fail_fast_when_template_not_found(monke
         )
     assert exc_info.value.step == "step2_templates"
 
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_falls_back_to_uuid_from_file_url(monkeypatch) -> None:
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        return b"CPF,telefone\n20000000000,5521975670000\n"
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"contact_system_field_id":"a26cbb26-2126-46f8-907c-757ab6dc2790","is_ignored":false,"dialer_label":null,"field_type":"text"}]}}}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            return 200, '{"data":{"task_id":"import-task-1"}}'
+        if method == "POST" and url.endswith("/v2/flow/flow-uuid-1/mailings"):
+            assert payload is not None
+            assert payload["linked_by"] == "9a6b8198-8f26-4dca-8b3d-43b9c801f1ec"
+            return 200, '{"data":[{"results":{"linked":["mailing-uuid-1"],"unassigned":[],"errors":{}}}]}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "file-event-without-uuid",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/9a6b8198-8f26-4dca-8b3d-43b9c801f1ec",
+                "original_name": "mailing.csv",
+                "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        workspace_api_key=None,
+    )
+    assert result["status"] == "done"

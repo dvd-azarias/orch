@@ -6,6 +6,7 @@ import mimetypes
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 from urllib import request
 from urllib.error import HTTPError, URLError
 
@@ -126,6 +127,48 @@ def _download_file_bytes(*, url: str, headers: dict[str, str], timeout_seconds: 
         return response.read()
 
 
+def _normalize_uuid(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _extract_uuid_from_url(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        path = urlparse(raw).path or ""
+    except Exception:
+        return None
+    if not path:
+        return None
+    candidates = [segment.strip() for segment in path.split("/") if segment.strip()]
+    for candidate in reversed(candidates):
+        normalized = _normalize_uuid(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+def _resolve_linked_by_uuid(*, payload: dict[str, Any], file_data: dict[str, Any]) -> str | None:
+    candidates = [
+        file_data.get("id"),
+        file_data.get("uuid"),
+        payload.get("file_id"),
+        payload.get("file_uuid"),
+    ]
+    for candidate in candidates:
+        normalized = _normalize_uuid(None if candidate is None else str(candidate))
+        if normalized:
+            return normalized
+    return _extract_uuid_from_url(str(file_data.get("url") or ""))
+
+
 async def run_tipo1_manual_pipeline(
     *,
     settings: Settings,
@@ -144,7 +187,7 @@ async def run_tipo1_manual_pipeline(
 
     file_url = str(file_data.get("url") or "").strip()
     file_name = str(file_data.get("original_name") or "").strip()
-    linked_by = str(file_data.get("id") or "").strip() or None
+    linked_by = _resolve_linked_by_uuid(payload=payload, file_data=file_data)
     event_workspace_uuid = str(file_data.get("workspace_uuid") or "").strip() or workspace_uuid
     description = str(file_data.get("description") or payload.get("description") or "Carga via FileApp event")
     legal_basis = str(file_data.get("legal_basis") or payload.get("legal_basis") or "consent")
@@ -164,6 +207,11 @@ async def run_tipo1_manual_pipeline(
         raise FileAppTipo1ManualPipelineError(
             step="step1_upload",
             message="Credenciais SYNC_WS_* não configuradas para baixar arquivo.",
+        )
+    if not linked_by:
+        raise FileAppTipo1ManualPipelineError(
+            step="step7_link_flow",
+            message="Não foi possível resolver UUID válido para linked_by a partir de file.id/file.url.",
         )
 
     base_url = str(settings.sync_webhook_base_url or "").strip().rstrip("/")
@@ -453,4 +501,3 @@ async def run_tipo1_manual_pipeline(
         "import_task_id": import_task_id,
         "steps": step_results,
     }
-
