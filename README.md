@@ -915,6 +915,7 @@ Adicionar campos de controle de atribuição na `ws_*.orch_sessions` com migrati
 ### Entrega técnica
 
 - Migration `0007_add_assigned_fields_to_orch_sessions` registrada inicialmente.
+- Migration `0009_add_orch_sessions_flow_entity_index` adiciona índice `idx_orch_sessions_flow_entity` em `orch_sessions(flow_uuid, entity)` com tablespace dedicado do workspace (`"<uuid>"`).
 - Correção aplicada na migration `0008_fix_assigned_fields_to_timestamps`.
 - SQL final esperado:
   - `assigned_at TIMESTAMPTZ NULL`
