@@ -294,6 +294,7 @@ async def upsert_active_session(
         dialer_timestamps=dialer_timestamps,
     )
     allow_finished_reuse_by_session_id = app_name in {"WhatsApp", "DialerApp"}
+    allow_address_reuse_without_entity_match = app_name in {"WhatsApp", "DialerApp"}
 
     await db_session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -305,7 +306,7 @@ async def upsert_active_session(
             """
             UPDATE orch_sessions
             SET
-                entity_session_id = :entity_session_id,
+                entity_session_id = COALESCE(entity_session_id, :entity_session_id),
                 entity_origin_app = COALESCE(entity_origin_app, :entity_origin_app),
                 state = GREATEST(state, :state),
                 ended_at = COALESCE(:ended_at, ended_at),
@@ -321,13 +322,22 @@ async def upsert_active_session(
                 dialer_not_answered_at = COALESCE(:dialer_not_answered_at, dialer_not_answered_at),
                 dialer_failed_at = COALESCE(:dialer_failed_at, dialer_failed_at),
                 updated_at = NOW()
-            WHERE
-                flow_uuid = CAST(:flow_uuid AS uuid)
-                AND entity = :entity
-                AND entity_type = :entity_type
-                AND entity_address = :entity_address
-                AND state <> :state_finished
-                AND unassigned_at IS NULL
+            WHERE id = (
+                SELECT id
+                FROM orch_sessions
+                WHERE
+                    flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND entity_type = :entity_type
+                    AND entity_address = :entity_address
+                    AND (
+                        :allow_address_reuse_without_entity_match
+                        OR entity = :entity
+                    )
+                    AND state <> :state_finished
+                    AND unassigned_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
             RETURNING id, uuid::text AS uuid, state
             """
         ),
@@ -340,6 +350,7 @@ async def upsert_active_session(
             "entity_origin_app": app_name,
             "state": state_update.state,
             "state_finished": SESSION_STATE_FINISHED,
+            "allow_address_reuse_without_entity_match": allow_address_reuse_without_entity_match,
             "ended_at": state_update.ended_at,
             "runtime_patch": runtime_patch_json,
             "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
@@ -389,9 +400,12 @@ async def upsert_active_session(
                 FROM orch_sessions
                 WHERE
                     flow_uuid = CAST(:flow_uuid AS uuid)
-                    AND entity = :entity
                     AND entity_type = :entity_type
                     AND entity_address = :entity_address
+                    AND (
+                        :allow_address_reuse_without_entity_match
+                        OR entity = :entity
+                    )
                     AND entity_session_id = :entity_session_id
                     AND (
                         :allow_finished_reuse_by_session_id
@@ -411,6 +425,7 @@ async def upsert_active_session(
             "entity_address": entity_address,
             "entity_session_id": entity_session_id,
             "allow_finished_reuse_by_session_id": allow_finished_reuse_by_session_id,
+            "allow_address_reuse_without_entity_match": allow_address_reuse_without_entity_match,
             "state_finished": SESSION_STATE_FINISHED,
             "entity_origin_app": app_name,
             "state": state_update.state,
