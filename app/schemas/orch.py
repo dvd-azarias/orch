@@ -96,3 +96,12 @@ class OrchMigrateAllResponse(BaseModel):
     api_version: str = "v1"
     total: int
     items: list[OrchMigrateWorkspaceResponse]
+
+
+class OrchCreateSessionRequest(BaseModel):
+    app_name: str
+    entity: str
+    entity_type: str
+    entity_address: str
+    entity_session_id: str
+    payload: dict | None = None

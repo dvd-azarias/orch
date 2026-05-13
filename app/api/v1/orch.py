@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from uuid import UUID
 
@@ -15,11 +16,13 @@ from app.core.workspace import normalize_workspace_uuid, workspace_schema_from_u
 from app.schemas.orch import (
     OrchAlarmListResponse,
     OrchAlarmSummary,
+    OrchCreateSessionRequest,
     OrchMigrateAllResponse,
     OrchMigrateWorkspaceResponse,
     OrchSessionListResponse,
     OrchSessionSummary,
     OrchTriggerAccepted,
+    SessionExtraction,
 )
 from app.services.alarm_query_service import list_alarms
 from app.services.app_detector import APP_ARQUIVOS
@@ -31,20 +34,25 @@ from app.services.fileapp_tipo1_service import (
     resolve_mapping_template_uuid,
     resolve_monitored_folders,
 )
-from app.services.orch_trigger_service import process_single_payload
+from app.services.orch_trigger_service import m2_alarm_from_stopped_reason, process_single_payload
 from app.services.session_extractor import extract_session_fields
 from app.services.session_query_service import (
     get_session_by_uuid,
     list_sessions_by_entity,
     list_sessions_by_flow_uuid,
 )
+from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
+from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
 from app.services.session_service import persist_session
 from app.services.workspace_service import bind_workspace_context, ensure_active_workspace
 from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task, ingest_fileapp_tipo1_event_task
+from app.tasks.workflow_tasks import advance_session_task
 
 router = APIRouter(prefix="/v1/orch", tags=["orch"])
 logger = get_logger(__name__)
+_CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
+_SUPPORTED_MANUAL_APPS = {"ArquivosApp", "WhatsApp", "DialerApp", "GenericApp"}
 
 
 def _legacy_workspace_context() -> tuple[str | None, str]:
@@ -54,6 +62,16 @@ def _legacy_workspace_context() -> tuple[str | None, str]:
         safe_workspace_uuid = normalize_workspace_uuid(fallback_workspace_uuid)
         return safe_workspace_uuid, workspace_schema_from_uuid(safe_workspace_uuid)
     return None, settings.database_schema
+
+
+def _read_required_text(value: str, *, field_name: str) -> str:
+    text_value = str(value or "").strip()
+    if not text_value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Campo obrigatório inválido: '{field_name}'.",
+        )
+    return text_value
 
 
 async def _trigger_orch_for_workspace(
@@ -298,6 +316,244 @@ async def trigger_orch_by_workspace(
         flow_uuid=flow_uuid,
         payload=payload,
         db_session=db_session,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/sessions",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchTriggerAccepted,
+)
+async def create_orch_session_by_workspace(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    request: OrchCreateSessionRequest = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchTriggerAccepted:
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+
+    app_name = _read_required_text(request.app_name, field_name="app_name")
+    if app_name not in _SUPPORTED_MANUAL_APPS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"app_name inválido. Valores aceitos: {', '.join(sorted(_SUPPORTED_MANUAL_APPS))}.",
+        )
+
+    extracted = SessionExtraction(
+        entity=_read_required_text(request.entity, field_name="entity"),
+        entity_type=_read_required_text(request.entity_type, field_name="entity_type"),
+        entity_address=_read_required_text(request.entity_address, field_name="entity_address"),
+        entity_session_id=_read_required_text(request.entity_session_id, field_name="entity_session_id"),
+    )
+    payload = request.payload if isinstance(request.payload, dict) else {}
+
+    persisted = await persist_session(
+        db_session,
+        flow_uuid=str(flow_uuid),
+        app_name=app_name,
+        extracted=extracted.model_dump(),
+        payload=payload,
+    )
+
+    workflow_bootstrap = None
+    workflow_execution = None
+    try:
+        workflow_result = await bootstrap_workflow_for_session(
+            db_session,
+            flow_uuid=str(flow_uuid),
+            session_id=persisted.session_id,
+            payload=payload,
+        )
+        workflow_bootstrap = {
+            "enabled": workflow_result.enabled,
+            "loaded": workflow_result.loaded,
+            "reason": workflow_result.reason,
+            "flow_id": workflow_result.flow_id,
+            "revision_id": workflow_result.revision_id,
+            "revision_version": workflow_result.revision_version,
+            "revision_mode": workflow_result.revision_mode,
+            "next_card_uuid": workflow_result.next_card_uuid,
+        }
+        if workflow_result.enabled and not workflow_result.loaded:
+            await persist_alarm(
+                db_session,
+                level="warning",
+                code="workflow_bootstrap_not_loaded",
+                message="Bootstrap do workflow não carregado nesta requisição.",
+                details=workflow_bootstrap,
+                flow_uuid=str(flow_uuid),
+                app_name=app_name,
+                entity=extracted.entity,
+                entity_type=extracted.entity_type,
+                entity_address=extracted.entity_address,
+                session_uuid=persisted.session_uuid,
+            )
+    except WorkflowBootstrapError as exc:
+        await persist_alarm(
+            db_session,
+            level="error",
+            code=f"workflow_bootstrap_{exc.code}",
+            message=exc.message,
+            details={},
+            flow_uuid=str(flow_uuid),
+            app_name=app_name,
+            entity=extracted.entity,
+            entity_type=extracted.entity_type,
+            entity_address=extracted.entity_address,
+            session_uuid=persisted.session_uuid,
+        )
+    except Exception:
+        await persist_alarm(
+            db_session,
+            level="error",
+            code="workflow_bootstrap_unhandled_exception",
+            message="Falha inesperada no bootstrap do workflow.",
+            details={},
+            flow_uuid=str(flow_uuid),
+            app_name=app_name,
+            entity=extracted.entity,
+            entity_type=extracted.entity_type,
+            entity_address=extracted.entity_address,
+            session_uuid=persisted.session_uuid,
+        )
+
+    if workflow_bootstrap and workflow_bootstrap.get("loaded"):
+        settings = get_settings()
+        if settings.celery_enabled:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: advance_session_task.delay(
+                            workspace_uuid=safe_workspace_uuid,
+                            flow_uuid=str(flow_uuid),
+                            session_id=persisted.session_id,
+                        )
+                    ),
+                    timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+                )
+                workflow_execution = {
+                    "mode": "async",
+                    "enqueued": True,
+                    "dispatcher": "celery",
+                    "workspace_uuid": safe_workspace_uuid,
+                }
+            except Exception as exc:
+                await persist_alarm(
+                    db_session,
+                    level="error",
+                    code="workflow_m2_enqueue_failed",
+                    message="Falha ao enfileirar execução assíncrona do workflow.",
+                    details={
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                    flow_uuid=str(flow_uuid),
+                    app_name=app_name,
+                    entity=extracted.entity,
+                    entity_type=extracted.entity_type,
+                    entity_address=extracted.entity_address,
+                    session_uuid=persisted.session_uuid,
+                )
+                workflow_execution = {
+                    "mode": "async",
+                    "enqueued": False,
+                    "dispatcher": "celery",
+                    "workspace_uuid": safe_workspace_uuid,
+                }
+        else:
+            try:
+                execution_result = await execute_workflow_m2_for_session(
+                    db_session,
+                    flow_uuid=str(flow_uuid),
+                    session_id=persisted.session_id,
+                )
+                workflow_execution = {
+                    "enabled": execution_result.enabled,
+                    "executed_steps": execution_result.executed_steps,
+                    "stopped_reason": execution_result.stopped_reason,
+                    "last_card_uuid": execution_result.last_card_uuid,
+                    "next_card_uuid": execution_result.next_card_uuid,
+                    "mode": "inline_fallback",
+                }
+                m2_alarm = (
+                    m2_alarm_from_stopped_reason(execution_result.stopped_reason)
+                    if execution_result.enabled
+                    else None
+                )
+                if m2_alarm is not None:
+                    level, code, message = m2_alarm
+                    await persist_alarm(
+                        db_session,
+                        level=level,
+                        code=code,
+                        message=message,
+                        details=workflow_execution,
+                        flow_uuid=str(flow_uuid),
+                        app_name=app_name,
+                        entity=extracted.entity,
+                        entity_type=extracted.entity_type,
+                        entity_address=extracted.entity_address,
+                        session_uuid=persisted.session_uuid,
+                    )
+            except WorkflowExecutionError as exc:
+                await persist_alarm(
+                    db_session,
+                    level="error",
+                    code=f"workflow_m2_{exc.code}",
+                    message=exc.message,
+                    details={},
+                    flow_uuid=str(flow_uuid),
+                    app_name=app_name,
+                    entity=extracted.entity,
+                    entity_type=extracted.entity_type,
+                    entity_address=extracted.entity_address,
+                    session_uuid=persisted.session_uuid,
+                )
+            except Exception as exc:
+                await persist_alarm(
+                    db_session,
+                    level="error",
+                    code="workflow_m2_unhandled_exception",
+                    message="Falha inesperada na execução M2 do workflow.",
+                    details={
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                    flow_uuid=str(flow_uuid),
+                    app_name=app_name,
+                    entity=extracted.entity,
+                    entity_type=extracted.entity_type,
+                    entity_address=extracted.entity_address,
+                    session_uuid=persisted.session_uuid,
+                )
+
+    logger.info(
+        "orch manual session accepted",
+        extra={
+            "event": "orch.manual_session.accepted",
+            "workspace_uuid": safe_workspace_uuid,
+            "workspace_schema": workspace_schema,
+            "flow_uuid": str(flow_uuid),
+            "app": app_name,
+            "entity": extracted.entity,
+            "session_id": persisted.session_id,
+            "session_uuid": persisted.session_uuid,
+        },
+    )
+    return OrchTriggerAccepted(
+        status="accepted",
+        accepted=True,
+        flow_uuid=str(flow_uuid),
+        app=app_name,
+        persistence="saved",
+        extracted=extracted,
+        session_id=persisted.session_id,
+        session_uuid=persisted.session_uuid,
+        session_state=persisted.session_state,
+        session_created=persisted.session_created,
+        workflow_bootstrap=workflow_bootstrap,
+        workflow_execution=workflow_execution,
     )
 
 
