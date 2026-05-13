@@ -150,6 +150,18 @@ def test_should_preempt_to_whatsapp_resume_cursor_when_status_and_cursor_exist()
     assert _should_preempt_to_whatsapp_resume_cursor(runtime_variables) is True
 
 
+def test_should_preempt_to_whatsapp_resume_cursor_when_pending_events_exist() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "channel_resume": {"whatsapp": {"process_card_cursor": "card-process-1"}},
+        }
+    }
+    assert _should_preempt_to_whatsapp_resume_cursor(
+        runtime_variables,
+        has_pending_whatsapp_events=True,
+    ) is True
+
+
 def test_extract_whatsapp_status_signature_from_runtime() -> None:
     runtime_variables = {
         "last_payload": {
