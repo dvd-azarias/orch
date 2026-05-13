@@ -35,6 +35,7 @@ from app.services.alarm_query_service import list_alarms
 from app.services.app_detector import APP_ARQUIVOS
 from app.services.app_detector import detect_app
 from app.services.alarm_service import persist_alarm
+from app.services.discarded_event_service import persist_discarded_event
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_service import (
     is_file_event_in_monitored_folder,
@@ -133,6 +134,17 @@ async def _trigger_orch_for_workspace(
         )
         if not is_file_event_in_monitored_folder(payload=payload, monitored_folders=monitored_folders):
             extracted = extract_session_fields(app_name, payload)
+            await persist_discarded_event(
+                db_session,
+                flow_uuid=str(flow_uuid),
+                app_name=app_name,
+                entity=extracted.entity,
+                entity_type=extracted.entity_type,
+                entity_address=extracted.entity_address,
+                entity_session_id=extracted.entity_session_id,
+                discard_reason="unmonitored_folder",
+                payload=payload,
+            )
             logger.info(
                 "fileapp event ignored due to unmonitored folder",
                 extra={

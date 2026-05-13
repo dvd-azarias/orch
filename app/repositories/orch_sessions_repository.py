@@ -8,6 +8,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+SESSION_STATE_FINISHED = 3
+SESSION_STATE_STOPPED_AFTER_UNASSIGN = 5
+
 
 @dataclass(frozen=True)
 class PersistResult:
@@ -323,7 +326,8 @@ async def upsert_active_session(
                 AND entity = :entity
                 AND entity_type = :entity_type
                 AND entity_address = :entity_address
-                AND state <> 3
+                AND state <> :state_finished
+                AND unassigned_at IS NULL
             RETURNING id, uuid::text AS uuid, state
             """
         ),
@@ -335,6 +339,7 @@ async def upsert_active_session(
             "entity_session_id": entity_session_id,
             "entity_origin_app": app_name,
             "state": state_update.state,
+            "state_finished": SESSION_STATE_FINISHED,
             "ended_at": state_update.ended_at,
             "runtime_patch": runtime_patch_json,
             "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
@@ -388,7 +393,11 @@ async def upsert_active_session(
                     AND entity_type = :entity_type
                     AND entity_address = :entity_address
                     AND entity_session_id = :entity_session_id
-                    AND (:allow_finished_reuse_by_session_id OR state <> 3)
+                    AND (
+                        :allow_finished_reuse_by_session_id
+                        OR state <> :state_finished
+                    )
+                    AND unassigned_at IS NULL
                 ORDER BY created_at DESC
                 LIMIT 1
             )
@@ -402,6 +411,7 @@ async def upsert_active_session(
             "entity_address": entity_address,
             "entity_session_id": entity_session_id,
             "allow_finished_reuse_by_session_id": allow_finished_reuse_by_session_id,
+            "state_finished": SESSION_STATE_FINISHED,
             "entity_origin_app": app_name,
             "state": state_update.state,
             "ended_at": state_update.ended_at,
@@ -760,12 +770,14 @@ async def set_session_state(
         WHERE id = :session_id
     """
     if only_if_not_finished:
-        query += " AND state <> 3"
+        query += " AND state NOT IN (:state_finished, :state_stopped_after_unassign)"
     await db_session.execute(
         text(query),
         {
             "session_id": session_id,
             "state": state,
+            "state_finished": SESSION_STATE_FINISHED,
+            "state_stopped_after_unassign": SESSION_STATE_STOPPED_AFTER_UNASSIGN,
         },
     )
 
@@ -820,7 +832,9 @@ async def set_unassigned_at_by_flow_and_entity_address(
             """
             UPDATE orch_sessions
             SET
+                state = :state_stopped_after_unassign,
                 unassigned_at = NOW(),
+                ended_at = COALESCE(ended_at, NOW()),
                 updated_at = NOW()
             WHERE flow_uuid = CAST(:flow_uuid AS uuid)
               AND entity_address = :entity_address
@@ -830,6 +844,7 @@ async def set_unassigned_at_by_flow_and_entity_address(
         {
             "flow_uuid": flow_uuid,
             "entity_address": entity_address,
+            "state_stopped_after_unassign": SESSION_STATE_STOPPED_AFTER_UNASSIGN,
         },
     )
     return int(result.rowcount or 0)

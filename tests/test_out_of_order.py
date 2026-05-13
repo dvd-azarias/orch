@@ -222,3 +222,55 @@ async def test_generic_finished_session_with_same_external_id_creates_new_sessio
     assert second.session_created is True
     assert int(row["total"]) == 2
     assert int(row["finished_total"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_generic_unassigned_session_with_same_external_id_creates_new_session() -> None:
+    flow_uuid = uuid4()
+    payload = {"external_id": "generic-test-unassigned-001", "valor_recebido": 100}
+
+    session_factory = get_session_factory()
+
+    async with session_factory() as s1:
+        first = await trigger_orch(flow_uuid=flow_uuid, payload=payload, db_session=s1)
+
+    schema = get_settings().database_schema.replace('"', '""')
+    async with session_factory() as mark_unassigned_session:
+        await mark_unassigned_session.execute(
+            text(
+                f'''
+                UPDATE "{schema}".orch_sessions
+                SET unassigned_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :session_id
+                '''
+            ),
+            {"session_id": first.session_id},
+        )
+        await mark_unassigned_session.commit()
+
+    async with session_factory() as s2:
+        second = await trigger_orch(flow_uuid=flow_uuid, payload=payload, db_session=s2)
+
+    async with session_factory() as db_session:
+        row = (
+            await db_session.execute(
+                text(
+                    f'''
+                    SELECT COUNT(*) AS total,
+                           COUNT(*) FILTER (WHERE unassigned_at IS NOT NULL) AS unassigned_total
+                    FROM "{schema}".orch_sessions
+                    WHERE flow_uuid = :flow_uuid
+                      AND entity = :entity
+                      AND entity_type = 'api_request'
+                      AND entity_address = :entity
+                    '''
+                ),
+                {"flow_uuid": str(flow_uuid), "entity": "generic-test-unassigned-001"},
+            )
+        ).mappings().one()
+
+    assert first.session_id != second.session_id
+    assert second.session_created is True
+    assert int(row["total"]) == 2
+    assert int(row["unassigned_total"]) == 1

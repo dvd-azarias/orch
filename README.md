@@ -89,7 +89,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
     - `entity_session_id` é gerado internamente pelo ORCH no formato `entity_address:::flow_uuid`.
     - `assigned_at` é preenchido automaticamente com `NOW()` quando ausente.
   - `POST /v1/orch/{workspace_uuid}/{flow_uuid}/sessions/unassign`
-    - recebe `entity_address` e marca `unassigned_at = NOW()` nas sessões correspondentes (quando `unassigned_at` ainda é `NULL`).
+    - recebe `entity_address` e marca `unassigned_at = NOW()` nas sessões correspondentes (quando `unassigned_at` ainda é `NULL`);
+    - também marca `state=5 (stopped_after_unassign)` e garante `ended_at`.
 
 ## Endpoints de health (já implementados)
 
@@ -103,7 +104,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
 - Detecta App de origem nesta ordem: `ArquivosApp`, `WhatsApp`, `DialerApp`, `GenericApp`.
 - Para `GenericApp`, exige ao menos `external_id`; sem isso retorna `422` com mensagem em pt-BR.
 - Extrai campos mínimos de sessão por App: `entity`, `entity_type`, `entity_address`, `entity_session_id`.
-- Persiste sessão na `orch_sessions` com regra de sessão ativa (`state <> 3`):
+- Persiste sessão na `orch_sessions` com regra de sessão ativa (`state <> 3 AND unassigned_at IS NULL`):
   - se já existir sessão ativa para a combinação (`flow_uuid`, `entity`, `entity_type`, `entity_address`), atualiza;
   - se não existir, cria nova sessão com `started_at=NOW()` e `state` derivado do evento.
 - Para eventos WhatsApp, converte `statuses[].timestamp` (Unix string) e atualiza:
@@ -119,10 +120,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
   - `noanswer` -> `dialer_not_answered_at`
   - `failure` -> `dialer_failed_at`
 - Mapeamento de `state`/`ended_at` na fase 1:
-  - `DialerApp` com evento final de hangup -> `state=3 (finished)` e define `ended_at`
-  - `WhatsApp sent/delivered` -> `state=2 (waiting)`
-  - `WhatsApp read/failed` -> `state=3 (finished)` e define `ended_at`
-  - `ArquivosApp` e `GenericApp` -> `state=1 (running)`
+- `DialerApp` com evento final de hangup -> `state=3 (finished)` e define `ended_at`
+- `WhatsApp sent/delivered` -> `state=2 (waiting)`
+- `WhatsApp read/failed` -> `state=3 (finished)` e define `ended_at`
+- `ArquivosApp` e `GenericApp` -> `state=1 (running)`
+- `unassign` manual por API -> `state=5 (stopped_after_unassign)` + `unassigned_at`
 - Retorna `202 Accepted` com metadados de aceite, campos extraídos e metadados de persistência (`session_id`, `session_uuid`, `session_state`, `session_created`).
 - Respostas de sucesso incluem `api_version = \"v1\"`.
 - Quando `WORKFLOW_V2_ENABLED=true`, executa bootstrap do workflow (M1):
@@ -309,7 +311,7 @@ A combinação lógica da sessão é:
 - `entity_address`
 
 Regra:
-- se **não existir** registro ativo (`state <> 3`) para essa combinação, cria nova sessão;
+- se **não existir** registro ativo (`state <> 3` e `unassigned_at IS NULL`) para essa combinação, cria nova sessão;
 - se **existir** registro ativo, atualiza sessão existente.
 
 Estados de sessão:
@@ -317,6 +319,7 @@ Estados de sessão:
 - `1 = running`
 - `2 = waiting`
 - `3 = finished`
+- `5 = stopped_after_unassign`
 
 ## Estrutura da tabela `orch_sessions`
 
@@ -329,6 +332,9 @@ Script SQL desta entrega:
 - `sql/006_create_orch_generate_file_tables.sql`
 - `sql/007_add_assigned_fields_to_orch_sessions.sql`
 - `sql/008_fix_assigned_fields_to_timestamps.sql`
+- `sql/009_add_orch_sessions_flow_entity_index.sql`
+- `sql/010_create_orch_discarded_events.sql`
+- `sql/011_allow_stopped_after_unassign_state.sql`
 
 Campos incluídos conforme solicitado:
 - `id`, `uuid`, `flow_uuid`, `state`
@@ -348,6 +354,7 @@ Além disso, o SQL inclui:
 - índices para busca por `flow_uuid`, chave de entidade, sessão ativa (`state <> 3`), `entity_session_id`, estado e timestamps de status.
 - migração incremental para ambientes já existentes em `sql/002_add_entity_origin_app.sql`.
 - tabela de alarmes operacionais em `sql/003_create_orch_sessions_alarms.sql`.
+- tabela de auditoria de descartes em `sql/010_create_orch_discarded_events.sql`.
 
 Observação importante:
 - `entity_origin_app` é campo de origem histórica da sessão (origem inicial), enquanto a origem do evento mais recente deve ser lida de `runtime_variables.source_app`.
@@ -357,6 +364,7 @@ Observação importante:
 - Logging estruturado em JSON com `request_id`, path, status e latência.
 - `X-Request-ID` aceito na entrada e retornado na resposta.
 - Persistência best-effort de warnings/errors em `orch_sessions_alarms`.
+- Persistência best-effort de eventos descartados em `orch_discarded_events`.
 - Respostas de erro padronizadas com `api_version`, `code`, `detail` e `request_id`.
 - Códigos de alarme atuais incluem:
   - `trigger_orch_http_exception`

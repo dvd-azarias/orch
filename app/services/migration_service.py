@@ -29,6 +29,8 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0007_add_assigned_fields_to_orch_sessions", "sql/007_add_assigned_fields_to_orch_sessions.sql"),
     ("0008_fix_assigned_fields_to_timestamps", "sql/008_fix_assigned_fields_to_timestamps.sql"),
     ("0009_add_orch_sessions_flow_entity_index", "sql/009_add_orch_sessions_flow_entity_index.sql"),
+    ("0010_create_orch_discarded_events", "sql/010_create_orch_discarded_events.sql"),
+    ("0011_allow_stopped_after_unassign_state", "sql/011_allow_stopped_after_unassign_state.sql"),
 ]
 
 
