@@ -106,3 +106,17 @@ class OrchCreateSessionRequest(BaseModel):
     entity_type: str
     entity_address: str
     payload: dict | None = None
+
+
+class OrchUnassignSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_address: str
+
+
+class OrchUnassignSessionResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    flow_uuid: str
+    entity_address: str
+    updated_count: int
