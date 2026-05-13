@@ -335,6 +335,13 @@ async def upsert_active_session(
     allow_address_reuse_without_entity_match = app_name in {"WhatsApp", "DialerApp"}
     whatsapp_status_name = _extract_whatsapp_status_name(payload) if app_name == "WhatsApp" else None
     whatsapp_status_column = WHATSAPP_STATUS_COLUMNS.get(whatsapp_status_name or "")
+    keep_whatsapp_session_active = app_name == "WhatsApp" and whatsapp_status_name in {
+        "sent",
+        "delivered",
+        "read",
+        "failed",
+        "limit_reached",
+    }
 
     await db_session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -348,8 +355,14 @@ async def upsert_active_session(
             SET
                 entity_session_id = COALESCE(entity_session_id, :entity_session_id),
                 entity_origin_app = COALESCE(entity_origin_app, :entity_origin_app),
-                state = GREATEST(state, :state),
-                ended_at = COALESCE(:ended_at, ended_at),
+                state = CASE
+                    WHEN :keep_whatsapp_session_active THEN 2
+                    ELSE GREATEST(state, :state)
+                END,
+                ended_at = CASE
+                    WHEN :keep_whatsapp_session_active THEN NULL
+                    ELSE COALESCE(:ended_at, ended_at)
+                END,
                 runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
                 whatsapp_sent_at = COALESCE(:whatsapp_sent_at, whatsapp_sent_at),
                 whatsapp_delivered_at = COALESCE(:whatsapp_delivered_at, whatsapp_delivered_at),
@@ -391,6 +404,7 @@ async def upsert_active_session(
             "state": state_update.state,
             "state_finished": SESSION_STATE_FINISHED,
             "allow_address_reuse_without_entity_match": allow_address_reuse_without_entity_match,
+            "keep_whatsapp_session_active": keep_whatsapp_session_active,
             "ended_at": state_update.ended_at,
             "runtime_patch": runtime_patch_json,
             "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
@@ -421,8 +435,14 @@ async def upsert_active_session(
             UPDATE orch_sessions
             SET
                 entity_origin_app = COALESCE(entity_origin_app, :entity_origin_app),
-                state = GREATEST(state, :state),
-                ended_at = COALESCE(:ended_at, ended_at),
+                state = CASE
+                    WHEN :keep_whatsapp_session_active THEN 2
+                    ELSE GREATEST(state, :state)
+                END,
+                ended_at = CASE
+                    WHEN :keep_whatsapp_session_active THEN NULL
+                    ELSE COALESCE(:ended_at, ended_at)
+                END,
                 runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
                 whatsapp_sent_at = COALESCE(:whatsapp_sent_at, whatsapp_sent_at),
                 whatsapp_delivered_at = COALESCE(:whatsapp_delivered_at, whatsapp_delivered_at),
@@ -469,6 +489,7 @@ async def upsert_active_session(
             "state_finished": SESSION_STATE_FINISHED,
             "entity_origin_app": app_name,
             "state": state_update.state,
+            "keep_whatsapp_session_active": keep_whatsapp_session_active,
             "ended_at": state_update.ended_at,
             "runtime_patch": runtime_patch_json,
             "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
@@ -501,8 +522,14 @@ async def upsert_active_session(
                 SET
                     entity_session_id = COALESCE(entity_session_id, :entity_session_id),
                     entity_origin_app = COALESCE(entity_origin_app, :entity_origin_app),
-                    state = GREATEST(state, :state),
-                    ended_at = COALESCE(:ended_at, ended_at),
+                    state = CASE
+                        WHEN :keep_whatsapp_session_active THEN 2
+                        ELSE GREATEST(state, :state)
+                    END,
+                    ended_at = CASE
+                        WHEN :keep_whatsapp_session_active THEN NULL
+                        ELSE COALESCE(:ended_at, ended_at)
+                    END,
                     runtime_variables = COALESCE(runtime_variables, '{{}}'::jsonb) || CAST(:runtime_patch AS jsonb),
                     whatsapp_sent_at = COALESCE(:whatsapp_sent_at, whatsapp_sent_at),
                     whatsapp_delivered_at = COALESCE(:whatsapp_delivered_at, whatsapp_delivered_at),
@@ -537,6 +564,7 @@ async def upsert_active_session(
                 "entity_session_id": entity_session_id,
                 "entity_origin_app": app_name,
                 "state": state_update.state,
+                "keep_whatsapp_session_active": keep_whatsapp_session_active,
                 "ended_at": state_update.ended_at,
                 "runtime_patch": runtime_patch_json,
                 "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
@@ -557,6 +585,70 @@ async def upsert_active_session(
                 id=int(closed_pending_row["id"]),
                 uuid=str(closed_pending_row["uuid"]),
                 state=int(closed_pending_row["state"]),
+                created=False,
+            )
+
+    if app_name == "WhatsApp" and keep_whatsapp_session_active and whatsapp_status_column is None:
+        closed_active_result = await db_session.execute(
+            text(
+                """
+                UPDATE orch_sessions
+                SET
+                    entity_session_id = COALESCE(entity_session_id, :entity_session_id),
+                    entity_origin_app = COALESCE(entity_origin_app, :entity_origin_app),
+                    state = 2,
+                    ended_at = NULL,
+                    runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                    whatsapp_sent_at = COALESCE(:whatsapp_sent_at, whatsapp_sent_at),
+                    whatsapp_delivered_at = COALESCE(:whatsapp_delivered_at, whatsapp_delivered_at),
+                    whatsapp_read_at = COALESCE(:whatsapp_read_at, whatsapp_read_at),
+                    whatsapp_failed_at = COALESCE(:whatsapp_failed_at, whatsapp_failed_at),
+                    dialer_answered_at = COALESCE(:dialer_answered_at, dialer_answered_at),
+                    dialer_busy_at = COALESCE(:dialer_busy_at, dialer_busy_at),
+                    dialer_rejected_at = COALESCE(:dialer_rejected_at, dialer_rejected_at),
+                    dialer_invalid_number_at = COALESCE(:dialer_invalid_number_at, dialer_invalid_number_at),
+                    dialer_not_answered_at = COALESCE(:dialer_not_answered_at, dialer_not_answered_at),
+                    dialer_failed_at = COALESCE(:dialer_failed_at, dialer_failed_at),
+                    updated_at = NOW()
+                WHERE id = (
+                    SELECT id
+                    FROM orch_sessions
+                    WHERE
+                        flow_uuid = CAST(:flow_uuid AS uuid)
+                        AND entity_type = :entity_type
+                        AND entity_address = :entity_address
+                        AND unassigned_at IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+                RETURNING id, uuid::text AS uuid, state
+                """
+            ),
+            {
+                "flow_uuid": flow_uuid,
+                "entity_type": entity_type,
+                "entity_address": entity_address,
+                "entity_session_id": entity_session_id,
+                "entity_origin_app": app_name,
+                "runtime_patch": runtime_patch_json,
+                "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
+                "whatsapp_delivered_at": whatsapp_timestamps.whatsapp_delivered_at,
+                "whatsapp_read_at": whatsapp_timestamps.whatsapp_read_at,
+                "whatsapp_failed_at": whatsapp_timestamps.whatsapp_failed_at,
+                "dialer_answered_at": dialer_timestamps.dialer_answered_at,
+                "dialer_busy_at": dialer_timestamps.dialer_busy_at,
+                "dialer_rejected_at": dialer_timestamps.dialer_rejected_at,
+                "dialer_invalid_number_at": dialer_timestamps.dialer_invalid_number_at,
+                "dialer_not_answered_at": dialer_timestamps.dialer_not_answered_at,
+                "dialer_failed_at": dialer_timestamps.dialer_failed_at,
+            },
+        )
+        closed_active_row = closed_active_result.mappings().first()
+        if closed_active_row is not None:
+            return PersistResult(
+                id=int(closed_active_row["id"]),
+                uuid=str(closed_active_row["uuid"]),
+                state=int(closed_active_row["state"]),
                 created=False,
             )
 
