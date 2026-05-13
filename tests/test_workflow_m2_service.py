@@ -9,9 +9,11 @@ from app.services.workflow_m2_service import (
     _clear_blocking_execution,
     _compute_whatsapp_status_order_delay,
     _compute_frozen_until,
+    _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
     _mark_blocking_execution,
     _read_blocking_stop_reason,
+    _read_whatsapp_last_preempt_signature,
     _read_whatsapp_resume_cursor,
     _run_api_call,
     _run_code_editor,
@@ -20,6 +22,7 @@ from app.services.workflow_m2_service import (
     _run_intelligent_agent,
     _run_process_whatsapp_response,
     _run_set_variables,
+    _set_whatsapp_last_preempt_signature,
     _set_whatsapp_resume_cursor,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_whatsapp_blocking_execution,
@@ -141,10 +144,55 @@ def test_should_preempt_to_whatsapp_resume_cursor_when_status_and_cursor_exist()
         },
         "last_payload": {
             "object": "whatsapp_business_account",
-            "entry": [{"changes": [{"value": {"statuses": [{"status": "read"}]}}]}],
+            "entry": [{"changes": [{"value": {"statuses": [{"status": "read", "id": "wamid-1", "timestamp": "1700"}]}}]}],
         },
     }
     assert _should_preempt_to_whatsapp_resume_cursor(runtime_variables) is True
+
+
+def test_extract_whatsapp_status_signature_from_runtime() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "statuses": [
+                                    {
+                                        "status": "delivered",
+                                        "id": "wamid-2",
+                                        "timestamp": "1701",
+                                        "recipient_id": "5511999999999",
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    assert _extract_whatsapp_status_signature_from_runtime(runtime_variables) == "delivered|wamid-2|1701|5511999999999"
+
+
+def test_should_not_preempt_again_when_signature_already_consumed() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "channel_resume": {"whatsapp": {"process_card_cursor": "card-process-1"}},
+        },
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {"statuses": [{"status": "sent", "id": "wamid-3", "timestamp": "1702"}]}}]}],
+        },
+    }
+    assert _should_preempt_to_whatsapp_resume_cursor(runtime_variables) is True
+    signature = _extract_whatsapp_status_signature_from_runtime(runtime_variables)
+    assert signature is not None
+    _set_whatsapp_last_preempt_signature(runtime_variables, signature)
+    assert _read_whatsapp_last_preempt_signature(runtime_variables) == signature
+    assert _should_preempt_to_whatsapp_resume_cursor(runtime_variables) is False
 
 
 def test_should_not_preempt_without_whatsapp_resume_cursor() -> None:

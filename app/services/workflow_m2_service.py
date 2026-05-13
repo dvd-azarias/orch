@@ -195,12 +195,96 @@ def _set_whatsapp_resume_cursor(runtime_variables: dict[str, Any], *, process_ca
     whatsapp_resume["process_card_cursor"] = process_card_cursor
 
 
+def _extract_whatsapp_status_signature_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("object") != "whatsapp_business_account":
+        return None
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            statuses = value.get("statuses")
+            if not isinstance(statuses, list):
+                continue
+            for item in statuses:
+                if not isinstance(item, dict):
+                    continue
+                status = str(item.get("status", "")).strip().lower()
+                if not status:
+                    continue
+                message_id = str(item.get("id", "")).strip()
+                timestamp = str(item.get("timestamp", "")).strip()
+                recipient_id = str(item.get("recipient_id", "")).strip()
+                return f"{status}|{message_id}|{timestamp}|{recipient_id}"
+    return None
+
+
+def _extract_whatsapp_status_signature_from_runtime(runtime_variables: dict[str, Any]) -> str | None:
+    if not isinstance(runtime_variables, dict):
+        return None
+    signature = _extract_whatsapp_status_signature_from_payload(runtime_variables.get("last_payload"))
+    if signature is not None:
+        return signature
+    signature = _extract_whatsapp_status_signature_from_payload(runtime_variables.get("input_payload"))
+    if signature is not None:
+        return signature
+    variables = runtime_variables.get("variables")
+    if not isinstance(variables, dict):
+        return None
+    return _extract_whatsapp_status_signature_from_payload(variables.get("payload"))
+
+
+def _read_whatsapp_last_preempt_signature(runtime_variables: dict[str, Any]) -> str | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    channel_resume = workflow_meta.get("channel_resume")
+    if not isinstance(channel_resume, dict):
+        return None
+    whatsapp_resume = channel_resume.get("whatsapp")
+    if not isinstance(whatsapp_resume, dict):
+        return None
+    raw = whatsapp_resume.get("last_preempt_signature")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _set_whatsapp_last_preempt_signature(runtime_variables: dict[str, Any], signature: str) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    channel_resume = workflow_meta.get("channel_resume")
+    if not isinstance(channel_resume, dict):
+        channel_resume = {}
+        workflow_meta["channel_resume"] = channel_resume
+    whatsapp_resume = channel_resume.get("whatsapp")
+    if not isinstance(whatsapp_resume, dict):
+        whatsapp_resume = {}
+        channel_resume["whatsapp"] = whatsapp_resume
+    whatsapp_resume["last_preempt_signature"] = signature
+
+
 def _should_preempt_to_whatsapp_resume_cursor(runtime_variables: dict[str, Any]) -> bool:
     status = _extract_whatsapp_status_from_runtime(runtime_variables)
     if status not in WHATSAPP_RESPONSE_BRANCH_BY_STATUS:
         return False
     resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
-    return resume_cursor is not None
+    if resume_cursor is None:
+        return False
+    signature = _extract_whatsapp_status_signature_from_runtime(runtime_variables)
+    if signature is None:
+        return False
+    return signature != _read_whatsapp_last_preempt_signature(runtime_variables)
 
 
 def _extract_whatsapp_status_from_payload(payload: Any) -> str | None:
@@ -1851,6 +1935,9 @@ async def execute_workflow_m2_for_session(
                 )
 
         if should_preempt_to_whatsapp_resume_cursor:
+            preempt_signature = _extract_whatsapp_status_signature_from_runtime(runtime_variables)
+            if preempt_signature is not None:
+                _set_whatsapp_last_preempt_signature(runtime_variables, preempt_signature)
             current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
         else:
             current_card_uuid = session_state.get("next_card_uuid")
