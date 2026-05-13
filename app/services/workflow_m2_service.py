@@ -26,6 +26,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
+from app.repositories.orch_channel_events_repository import claim_next_pending_channel_event, has_pending_channel_events
 from app.repositories.orch_sessions_repository import fetch_session_workflow_state, replace_session_workflow_state
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
@@ -274,7 +275,14 @@ def _set_whatsapp_last_preempt_signature(runtime_variables: dict[str, Any], sign
     whatsapp_resume["last_preempt_signature"] = signature
 
 
-def _should_preempt_to_whatsapp_resume_cursor(runtime_variables: dict[str, Any]) -> bool:
+def _should_preempt_to_whatsapp_resume_cursor(
+    runtime_variables: dict[str, Any],
+    *,
+    has_pending_whatsapp_events: bool = False,
+) -> bool:
+    if has_pending_whatsapp_events and _read_whatsapp_resume_cursor(runtime_variables) is not None:
+        return True
+
     status = _extract_whatsapp_status_from_runtime(runtime_variables)
     if status not in WHATSAPP_RESPONSE_BRANCH_BY_STATUS:
         return False
@@ -1919,8 +1927,19 @@ async def execute_workflow_m2_for_session(
         if not isinstance(runtime_variables, dict):
             runtime_variables = {}
 
+        has_pending_whatsapp_events = False
+        if _read_whatsapp_resume_cursor(runtime_variables) is not None:
+            has_pending_whatsapp_events = await has_pending_channel_events(
+                db_session,
+                session_id=session_id,
+                channel="whatsapp",
+            )
+
         frozen_until = session_state.get("frozen_until")
-        should_preempt_to_whatsapp_resume_cursor = _should_preempt_to_whatsapp_resume_cursor(runtime_variables)
+        should_preempt_to_whatsapp_resume_cursor = _should_preempt_to_whatsapp_resume_cursor(
+            runtime_variables,
+            has_pending_whatsapp_events=has_pending_whatsapp_events,
+        )
         if isinstance(frozen_until, datetime):
             frozen_until_utc = frozen_until if frozen_until.tzinfo is not None else frozen_until.replace(tzinfo=timezone.utc)
             if frozen_until_utc > datetime.now(timezone.utc) and not should_preempt_to_whatsapp_resume_cursor:
@@ -2036,6 +2055,15 @@ async def execute_workflow_m2_for_session(
                         runtime_variables,
                         process_card_cursor=next_card_uuid,
                     )
+                    pending_whatsapp_event = await claim_next_pending_channel_event(
+                        db_session,
+                        session_id=session_id,
+                        channel="whatsapp",
+                    )
+                    if isinstance(pending_whatsapp_event, dict):
+                        payload = pending_whatsapp_event.get("payload")
+                        if isinstance(payload, dict):
+                            runtime_variables["last_payload"] = payload
                     if (defer_until := _compute_whatsapp_status_order_delay(
                         runtime_variables=runtime_variables,
                         session_state=session_state,

@@ -17,6 +17,7 @@ from app.repositories.orch_sessions_repository import (
 )
 from app.schemas.orch import OrchTriggerAccepted
 from app.services.alarm_service import persist_alarm
+from app.services.channel_event_service import persist_channel_events
 from app.services.discarded_event_service import persist_discarded_event
 from app.services.session_extractor import extract_session_fields
 from app.services.session_service import persist_session
@@ -230,6 +231,26 @@ async def process_single_payload(
             "session_uuid": persisted.session_uuid,
         },
     )
+
+    persisted_channel_events = await persist_channel_events(
+        db_session,
+        session_id=persisted.session_id,
+        flow_uuid=flow_uuid,
+        app_name=app_name,
+        payload=payload,
+    )
+    if persisted_channel_events > 0:
+        logger.info(
+            "channel events persisted",
+            extra={
+                "event": "orch.channel_events.persisted",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": persisted.session_id,
+                "app": app_name,
+                "count": persisted_channel_events,
+            },
+        )
 
     workflow_bootstrap = None
     workflow_execution = None
