@@ -175,4 +175,3 @@ async def test_fileapp_deve_descartar_evento_fora_da_pasta_monitorada() -> None:
         assert before == after == 0
     finally:
         await _cleanup_flow_with_revision(schema=schema, flow_uuid=flow_uuid, revision_uuid=revision_uuid)
-

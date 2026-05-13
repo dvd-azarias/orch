@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS orch_sessions (
     agent_interactions JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT ck_orch_sessions_state CHECK (state IN (0, 1, 2, 3))
+    CONSTRAINT ck_orch_sessions_state CHECK (state IN (0, 1, 2, 3, 5))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orch_sessions_uuid

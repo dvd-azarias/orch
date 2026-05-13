@@ -251,3 +251,63 @@ async def test_unassign_orch_sessions_by_entity_address_rejects_blank_entity_add
 
     assert exc_info.value.status_code == 422
     assert "entity_address" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_trigger_orch_for_workspace_persiste_discarded_event_em_pasta_nao_monitorada(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def _fake_resolve_monitored_folders(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return {"dev-orch/mailing/demo06"}
+
+    async def _fake_persist_discarded_event(  # type: ignore[no-untyped-def]
+        db_session,
+        *,
+        flow_uuid,
+        app_name,
+        entity,
+        entity_type,
+        entity_address,
+        entity_session_id,
+        discard_reason,
+        payload,
+    ):
+        captured["flow_uuid"] = flow_uuid
+        captured["app_name"] = app_name
+        captured["entity"] = entity
+        captured["entity_address"] = entity_address
+        captured["entity_session_id"] = entity_session_id
+        captured["discard_reason"] = discard_reason
+        captured["payload"] = payload
+
+    monkeypatch.setattr(orch_api, "resolve_monitored_folders", _fake_resolve_monitored_folders)
+    monkeypatch.setattr(orch_api, "persist_discarded_event", _fake_persist_discarded_event)
+
+    flow_uuid = uuid4()
+    payload = {
+        "EventName": "s3:ObjectCreated:Put",
+        "file": {
+            "id": "file-abc-001",
+            "folder_path": "system/mailings",
+            "original_name": "mailing.csv",
+        },
+    }
+
+    response = await orch_api._trigger_orch_for_workspace(
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid=flow_uuid,
+        payload=payload,
+        db_session=object(),  # type: ignore[arg-type]
+        validate_workspace=False,
+        schema_override="ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+    )
+
+    assert response.accepted is False
+    assert response.status == "ignored"
+    assert response.persistence == "ignored"
+    assert captured["flow_uuid"] == str(flow_uuid)
+    assert captured["app_name"] == "ArquivosApp"
+    assert captured["entity"] == "file-abc-001"
+    assert captured["entity_address"] == "system/mailings/mailing.csv"
+    assert captured["entity_session_id"] == "file-abc-001"
+    assert captured["discard_reason"] == "unmonitored_folder"
