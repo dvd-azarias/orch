@@ -5,11 +5,24 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 import app.api.v1.orch as orch_api
 from app.schemas.orch import OrchCreateSessionRequest
 from app.services.session_service import SessionPersistResponse
 from app.services.workflow_runtime_service import WorkflowBootstrapResult
+
+
+def test_create_session_request_forbids_entity_session_id_field() -> None:
+    with pytest.raises(ValidationError):
+        OrchCreateSessionRequest(
+            app_name="GenericApp",
+            entity="abc",
+            entity_type="person",
+            entity_address="5511999999999",
+            entity_session_id="manual-value",  # type: ignore[call-arg]
+            payload=None,
+        )
 
 
 @pytest.mark.asyncio
@@ -56,15 +69,15 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
     monkeypatch.setattr(orch_api, "persist_alarm", _fake_persist_alarm)
     monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=False))
 
+    flow_uuid = uuid4()
     response = await orch_api.create_orch_session_by_workspace(
         workspace_uuid=uuid4(),
-        flow_uuid=uuid4(),
+        flow_uuid=flow_uuid,
         request=OrchCreateSessionRequest(
             app_name="GenericApp",
             entity="30392287843",
             entity_type="person",
             entity_address="5511975620806",
-            entity_session_id="30392287843",
             payload={"origin": "third_party_app"},
         ),
         db_session=object(),  # type: ignore[arg-type]
@@ -75,14 +88,14 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
     assert response.persistence == "saved"
     assert response.session_id == 999
     assert response.extracted.entity == "30392287843"
-    assert response.extracted.entity_session_id == "30392287843"
+    assert response.extracted.entity_session_id == f"5511975620806:::{str(flow_uuid)}"
     assert captured["app_name"] == "GenericApp"
     assert captured["extracted"]["entity_address"] == "5511975620806"
     assert captured["payload"] == {"origin": "third_party_app"}
 
 
 @pytest.mark.asyncio
-async def test_create_orch_session_by_workspace_rejects_blank_entity_session_id(monkeypatch) -> None:
+async def test_create_orch_session_by_workspace_rejects_blank_entity_address(monkeypatch) -> None:
     def _fake_bind_workspace_context(_workspace_uuid: str):  # type: ignore[no-untyped-def]
         return "ba7eb0ec-e565-447c-8c11-8f870cf72a60", "ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60"
 
@@ -100,15 +113,14 @@ async def test_create_orch_session_by_workspace_rejects_blank_entity_session_id(
                 app_name="GenericApp",
                 entity="abc",
                 entity_type="person",
-                entity_address="addr",
-                entity_session_id="   ",
+                entity_address="   ",
                 payload=None,
             ),
             db_session=object(),  # type: ignore[arg-type]
         )
 
     assert exc_info.value.status_code == 422
-    assert "entity_session_id" in str(exc_info.value.detail)
+    assert "entity_address" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -131,7 +143,6 @@ async def test_create_orch_session_by_workspace_rejects_invalid_app_name(monkeyp
                 entity="abc",
                 entity_type="person",
                 entity_address="addr",
-                entity_session_id="abc",
                 payload=None,
             ),
             db_session=object(),  # type: ignore[arg-type]

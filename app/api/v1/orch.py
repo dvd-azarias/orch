@@ -74,6 +74,10 @@ def _read_required_text(value: str, *, field_name: str) -> str:
     return text_value
 
 
+def _build_entity_session_id(*, entity_address: str, flow_uuid: UUID) -> str:
+    return f"{entity_address}:::{str(flow_uuid)}"
+
+
 async def _trigger_orch_for_workspace(
     *,
     workspace_uuid: str | None,
@@ -340,11 +344,17 @@ async def create_orch_session_by_workspace(
             detail=f"app_name inválido. Valores aceitos: {', '.join(sorted(_SUPPORTED_MANUAL_APPS))}.",
         )
 
+    entity = _read_required_text(request.entity, field_name="entity")
+    entity_type = _read_required_text(request.entity_type, field_name="entity_type")
+    entity_address = _read_required_text(request.entity_address, field_name="entity_address")
     extracted = SessionExtraction(
-        entity=_read_required_text(request.entity, field_name="entity"),
-        entity_type=_read_required_text(request.entity_type, field_name="entity_type"),
-        entity_address=_read_required_text(request.entity_address, field_name="entity_address"),
-        entity_session_id=_read_required_text(request.entity_session_id, field_name="entity_session_id"),
+        entity=entity,
+        entity_type=entity_type,
+        entity_address=entity_address,
+        entity_session_id=_build_entity_session_id(
+            entity_address=entity_address,
+            flow_uuid=flow_uuid,
+        ),
     )
     payload = request.payload if isinstance(request.payload, dict) else {}
 
