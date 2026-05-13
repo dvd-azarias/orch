@@ -21,6 +21,7 @@ from app.services.workflow_m2_service import (
     _run_process_whatsapp_response,
     _run_set_variables,
     _set_whatsapp_resume_cursor,
+    _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_whatsapp_blocking_execution,
 )
 
@@ -131,6 +132,29 @@ def test_set_and_read_whatsapp_resume_cursor_roundtrip() -> None:
     assert _read_whatsapp_resume_cursor(runtime_variables) is None
     _set_whatsapp_resume_cursor(runtime_variables, process_card_cursor="card-process-1")
     assert _read_whatsapp_resume_cursor(runtime_variables) == "card-process-1"
+
+
+def test_should_preempt_to_whatsapp_resume_cursor_when_status_and_cursor_exist() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "channel_resume": {"whatsapp": {"process_card_cursor": "card-process-1"}},
+        },
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {"statuses": [{"status": "read"}]}}]}],
+        },
+    }
+    assert _should_preempt_to_whatsapp_resume_cursor(runtime_variables) is True
+
+
+def test_should_not_preempt_without_whatsapp_resume_cursor() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {"statuses": [{"status": "delivered"}]}}]}],
+        },
+    }
+    assert _should_preempt_to_whatsapp_resume_cursor(runtime_variables) is False
 
 
 def test_compute_whatsapp_status_order_delay_for_delivered_without_sent() -> None:
