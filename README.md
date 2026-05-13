@@ -1110,6 +1110,29 @@ Regra crítica:
 - no passo 5, o status precisa chegar em `READY_TO_INGEST` antes de avançar para import/vínculo.
 - no `tipo_1`, o ORCH não deve fazer escrita direta em `orch_sessions`; a carga segue o caminho do Target Core.
 
+## Fase 12 — `proccess_whatsapp_response` com desvio de branch
+
+### Objetivo
+
+Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_card_uuid`/`next_card_uuid`) e executar o componente `proccess_whatsapp_response`/`process_whatsapp_response` para escolher o branch correto e avançar o fluxo.
+
+### Regra aplicada
+
+- `send_with_whatsapp` continua bloqueante para aguardar retorno do canal.
+- quando chega evento WhatsApp com `statuses[].status`, o motor libera o bloqueio WhatsApp da sessão e continua do `next_card_uuid` atual.
+- no card `proccess_whatsapp_response`, o branch é decidido por status:
+  - `sent` -> `sent`
+  - `delivered` -> `delivered`
+  - `read` -> `read`
+  - `failed` -> `failed`
+  - `limit_reached` -> `limit_reached`
+- se status não mapeado, segue fallback do grafo (`resolve_next_card_uuid`).
+
+### Observação operacional
+
+- a chegada do evento continua sendo tratada na rota já existente;
+- nesta fase, a responsabilidade adicional é somente selecionar o branch do componente de resposta e avançar a execução do fluxo.
+
 ### Fila dedicada (visibilidade/retentativa)
 
 - task: `app.tasks.fileapp.associate_mailing`
