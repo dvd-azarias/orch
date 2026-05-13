@@ -279,14 +279,22 @@ def _should_preempt_to_whatsapp_resume_cursor(
     runtime_variables: dict[str, Any],
     *,
     has_pending_whatsapp_events: bool = False,
+    current_next_card_uuid: str | None = None,
+    blocking_stop_reason: str | None = None,
 ) -> bool:
-    if has_pending_whatsapp_events and _read_whatsapp_resume_cursor(runtime_variables) is not None:
-        return True
+    resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
+    if has_pending_whatsapp_events and resume_cursor is not None:
+        if current_next_card_uuid is None:
+            return True
+        if str(current_next_card_uuid) == str(resume_cursor):
+            return True
+        if blocking_stop_reason in WHATSAPP_BLOCKING_STOP_REASONS:
+            return True
+        return False
 
     status = _extract_whatsapp_status_from_runtime(runtime_variables)
     if status not in WHATSAPP_RESPONSE_BRANCH_BY_STATUS:
         return False
-    resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
     if resume_cursor is None:
         return False
     signature = _extract_whatsapp_status_signature_from_runtime(runtime_variables)
@@ -1928,17 +1936,25 @@ async def execute_workflow_m2_for_session(
             runtime_variables = {}
 
         has_pending_whatsapp_events = False
-        if _read_whatsapp_resume_cursor(runtime_variables) is not None:
+        resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
+        if resume_cursor is not None:
             has_pending_whatsapp_events = await has_pending_channel_events(
                 db_session,
                 session_id=session_id,
                 channel="whatsapp",
             )
 
+        current_next_card_uuid = session_state.get("next_card_uuid")
+        if current_next_card_uuid is None:
+            current_next_card_uuid = _read_next_cursor(runtime_variables)
+        blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+
         frozen_until = session_state.get("frozen_until")
         should_preempt_to_whatsapp_resume_cursor = _should_preempt_to_whatsapp_resume_cursor(
             runtime_variables,
             has_pending_whatsapp_events=has_pending_whatsapp_events,
+            current_next_card_uuid=current_next_card_uuid,
+            blocking_stop_reason=blocking_stop_reason,
         )
         if isinstance(frozen_until, datetime):
             frozen_until_utc = frozen_until if frozen_until.tzinfo is not None else frozen_until.replace(tzinfo=timezone.utc)
@@ -1957,14 +1973,12 @@ async def execute_workflow_m2_for_session(
             preempt_signature = _extract_whatsapp_status_signature_from_runtime(runtime_variables)
             if preempt_signature is not None:
                 _set_whatsapp_last_preempt_signature(runtime_variables, preempt_signature)
-            current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
+            current_card_uuid = resume_cursor
         else:
-            current_card_uuid = session_state.get("next_card_uuid")
-            if current_card_uuid is None:
-                current_card_uuid = _read_next_cursor(runtime_variables)
+            current_card_uuid = current_next_card_uuid
             if current_card_uuid is None and _extract_whatsapp_status_from_runtime(runtime_variables) is not None:
                 current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
-        if (blocking_stop_reason := _read_blocking_stop_reason(runtime_variables)) is not None:
+        if blocking_stop_reason is not None:
             if _should_resume_whatsapp_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
@@ -2207,6 +2221,43 @@ async def execute_workflow_m2_for_session(
                         WorkflowExecutionResult(True, executed_steps, "scheduled_wait", last_card_uuid, next_card_uuid)
                     )
                 elif kind in {"finish_flow", "finish-flow"}:
+                    resume_cursor_for_channel = _read_whatsapp_resume_cursor(runtime_variables)
+                    has_more_whatsapp_events = False
+                    if resume_cursor_for_channel is not None:
+                        has_more_whatsapp_events = await has_pending_channel_events(
+                            db_session,
+                            session_id=session_id,
+                            channel="whatsapp",
+                        )
+                    if has_more_whatsapp_events and resume_cursor_for_channel is not None:
+                        last_card_uuid = next_card_uuid
+                        next_card_uuid = resume_cursor_for_channel
+                        executed_steps += 1
+                        _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                            ended_at=None,
+                            state=2,
+                        )
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="success",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=(time.perf_counter() - step_started_perf) * 1000,
+                            stopped_reason="continue_with_pending_channel_event",
+                            step_index=executed_steps,
+                            card_cursor=last_card_uuid,
+                            component_kind_value=kind,
+                            details={"next_card_uuid": next_card_uuid},
+                        )
+                        continue
+
                     finished_at = datetime.now(timezone.utc)
                     last_card_uuid = next_card_uuid
                     next_card_uuid = None
