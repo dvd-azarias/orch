@@ -62,6 +62,15 @@ WHATSAPP_BLOCKING_STOP_REASONS = {
     "blocked_send_with_whatsapp",
     "blocked_process_whatsapp_response",
 }
+WHATSAPP_STATUS_ORDER_PREREQUISITES = {
+    "delivered": "whatsapp_sent_at",
+    "read": "whatsapp_delivered_at",
+}
+WHATSAPP_STATUS_ORDER_TTL_SECONDS = {
+    "delivered": 20,
+    "read": 45,
+}
+WHATSAPP_STATUS_ORDER_RETRY_SECONDS = 3
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,36 @@ def _set_cursors(runtime_variables: dict[str, Any], *, last_cursor: str | None, 
     workflow_meta["next_card_cursor"] = next_cursor
 
 
+def _read_whatsapp_resume_cursor(runtime_variables: dict[str, Any]) -> str | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    channel_resume = workflow_meta.get("channel_resume")
+    if not isinstance(channel_resume, dict):
+        return None
+    whatsapp_resume = channel_resume.get("whatsapp")
+    if not isinstance(whatsapp_resume, dict):
+        return None
+    raw = whatsapp_resume.get("process_card_cursor")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _set_whatsapp_resume_cursor(runtime_variables: dict[str, Any], *, process_card_cursor: str | None) -> None:
+    if not process_card_cursor:
+        return
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    channel_resume = workflow_meta.get("channel_resume")
+    if not isinstance(channel_resume, dict):
+        channel_resume = {}
+        workflow_meta["channel_resume"] = channel_resume
+    whatsapp_resume = channel_resume.get("whatsapp")
+    if not isinstance(whatsapp_resume, dict):
+        whatsapp_resume = {}
+        channel_resume["whatsapp"] = whatsapp_resume
+    whatsapp_resume["process_card_cursor"] = process_card_cursor
+
+
 def _extract_whatsapp_status_from_payload(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -225,6 +264,77 @@ def _run_process_whatsapp_response(
         "branch": branch,
     }
     return branch
+
+
+def _read_status_order_wait_deadline(
+    runtime_variables: dict[str, Any],
+    *,
+    status: str,
+) -> datetime | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    wait_meta = workflow_meta.get("whatsapp_status_order_wait")
+    if not isinstance(wait_meta, dict):
+        return None
+    raw = wait_meta.get(status)
+    return _parse_iso_datetime(raw)
+
+
+def _write_status_order_wait_deadline(
+    runtime_variables: dict[str, Any],
+    *,
+    status: str,
+    deadline: datetime,
+) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    wait_meta = workflow_meta.get("whatsapp_status_order_wait")
+    if not isinstance(wait_meta, dict):
+        wait_meta = {}
+        workflow_meta["whatsapp_status_order_wait"] = wait_meta
+    wait_meta[status] = deadline.isoformat()
+
+
+def _clear_status_order_wait_deadline(
+    runtime_variables: dict[str, Any],
+    *,
+    status: str,
+) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    wait_meta = workflow_meta.get("whatsapp_status_order_wait")
+    if not isinstance(wait_meta, dict):
+        return
+    wait_meta.pop(status, None)
+    if not wait_meta:
+        workflow_meta.pop("whatsapp_status_order_wait", None)
+
+
+def _compute_whatsapp_status_order_delay(
+    *,
+    runtime_variables: dict[str, Any],
+    session_state: dict[str, Any],
+) -> datetime | None:
+    status = _extract_whatsapp_status_from_runtime(runtime_variables)
+    if status is None:
+        return None
+    prerequisite_field = WHATSAPP_STATUS_ORDER_PREREQUISITES.get(status)
+    if prerequisite_field is None:
+        return None
+
+    if session_state.get(prerequisite_field) is not None:
+        _clear_status_order_wait_deadline(runtime_variables, status=status)
+        return None
+
+    now_utc = datetime.now(timezone.utc)
+    deadline = _read_status_order_wait_deadline(runtime_variables, status=status)
+    if deadline is None:
+        ttl = WHATSAPP_STATUS_ORDER_TTL_SECONDS.get(status, 20)
+        deadline = now_utc + timedelta(seconds=max(1, ttl))
+        _write_status_order_wait_deadline(runtime_variables, status=status, deadline=deadline)
+
+    if now_utc >= deadline:
+        _clear_status_order_wait_deadline(runtime_variables, status=status)
+        return None
+
+    return now_utc + timedelta(seconds=WHATSAPP_STATUS_ORDER_RETRY_SECONDS)
 
 
 def _should_resume_whatsapp_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
@@ -1734,6 +1844,8 @@ async def execute_workflow_m2_for_session(
         current_card_uuid = session_state.get("next_card_uuid")
         if current_card_uuid is None:
             current_card_uuid = _read_next_cursor(runtime_variables)
+        if current_card_uuid is None and _extract_whatsapp_status_from_runtime(runtime_variables) is not None:
+            current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
         if (blocking_stop_reason := _read_blocking_stop_reason(runtime_variables)) is not None:
             if _should_resume_whatsapp_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
@@ -1821,6 +1933,48 @@ async def execute_workflow_m2_for_session(
                         runtime_variables=runtime_variables,
                     )
                 elif kind in {"proccess_whatsapp_response", "process_whatsapp_response"}:
+                    _set_whatsapp_resume_cursor(
+                        runtime_variables,
+                        process_card_cursor=next_card_uuid,
+                    )
+                    if (defer_until := _compute_whatsapp_status_order_delay(
+                        runtime_variables=runtime_variables,
+                        session_state=session_state,
+                    )) is not None:
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                            frozen_until=defer_until,
+                        )
+                        step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="success",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=step_latency_ms,
+                            stopped_reason="frozen_wait_active",
+                            step_index=executed_steps,
+                            card_cursor=next_card_uuid,
+                            component_kind_value=kind,
+                            details={
+                                "defer_until": defer_until.isoformat(),
+                                "reason": "waiting_previous_whatsapp_status",
+                            },
+                        )
+                        return await _finalize(
+                            WorkflowExecutionResult(
+                                True,
+                                executed_steps,
+                                "frozen_wait_active",
+                                last_card_uuid,
+                                next_card_uuid,
+                            )
+                        )
                     branch_label = _run_process_whatsapp_response(
                         component=component,
                         runtime_variables=runtime_variables,

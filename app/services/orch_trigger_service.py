@@ -4,13 +4,20 @@ import asyncio
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.request_context import get_request_id
+from app.core.workspace import get_current_workspace_schema
+from app.repositories.orch_sessions_repository import (
+    WHATSAPP_STATUS_COLUMNS,
+    fetch_latest_session_by_flow_entity_address,
+)
 from app.schemas.orch import OrchTriggerAccepted
 from app.services.alarm_service import persist_alarm
+from app.services.discarded_event_service import persist_discarded_event
 from app.services.session_extractor import extract_session_fields
 from app.services.session_service import persist_session
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
@@ -19,6 +26,69 @@ from app.tasks.workflow_tasks import advance_session_task
 
 logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
+
+
+def _extract_whatsapp_status_name(payload: dict[str, Any]) -> str | None:
+    if payload.get("object") != "whatsapp_business_account":
+        return None
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            statuses = value.get("statuses")
+            if not isinstance(statuses, list):
+                continue
+            for item in statuses:
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get("status")
+                if raw is None:
+                    continue
+                status = str(raw).strip().lower()
+                if status:
+                    return status
+    return None
+
+
+async def _should_discard_whatsapp_event(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    extracted: Any,
+    payload: dict[str, Any],
+) -> tuple[bool, str | None]:
+    status_name = _extract_whatsapp_status_name(payload)
+    status_column = WHATSAPP_STATUS_COLUMNS.get(status_name or "")
+    if status_column is None:
+        return False, None
+
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        latest = await fetch_latest_session_by_flow_entity_address(
+            db_session,
+            flow_uuid=flow_uuid,
+            entity_type=str(extracted.entity_type),
+            entity_address=str(extracted.entity_address),
+        )
+    if latest is None:
+        return False, None
+
+    if latest.get(status_column) is not None:
+        return True, "whatsapp_status_already_processed"
+    return False, None
 
 
 def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | None:
@@ -73,6 +143,42 @@ async def process_single_payload(
     extracted = None
     try:
         extracted = extract_session_fields(app_name, payload)
+        if app_name == "WhatsApp":
+            should_discard, discard_reason = await _should_discard_whatsapp_event(
+                db_session,
+                flow_uuid=flow_uuid,
+                extracted=extracted,
+                payload=payload,
+            )
+            if should_discard:
+                await persist_discarded_event(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                    app_name=app_name,
+                    entity=extracted.entity,
+                    entity_type=extracted.entity_type,
+                    entity_address=extracted.entity_address,
+                    entity_session_id=extracted.entity_session_id,
+                    discard_reason=discard_reason or "whatsapp_discarded",
+                    payload=payload,
+                )
+                return OrchTriggerAccepted(
+                    status="ignored",
+                    accepted=False,
+                    flow_uuid=flow_uuid,
+                    app=app_name,
+                    persistence="ignored",
+                    extracted=extracted,
+                    session_id=0,
+                    session_uuid="",
+                    session_state=0,
+                    session_created=False,
+                    workflow_execution={
+                        "mode": "async",
+                        "enqueued": False,
+                        "reason": discard_reason,
+                    },
+                )
         persisted = await persist_session(
             db_session,
             flow_uuid=flow_uuid,

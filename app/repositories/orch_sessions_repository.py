@@ -10,6 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 SESSION_STATE_FINISHED = 3
 SESSION_STATE_STOPPED_AFTER_UNASSIGN = 5
+WHATSAPP_STATUS_COLUMNS = {
+    "sent": "whatsapp_sent_at",
+    "delivered": "whatsapp_delivered_at",
+    "read": "whatsapp_read_at",
+    "failed": "whatsapp_failed_at",
+}
 
 
 @dataclass(frozen=True)
@@ -169,6 +175,38 @@ def _extract_whatsapp_status_timestamps(payload: dict[str, Any]) -> WhatsappStat
     return WhatsappStatusTimestamps(None, None, None, None)
 
 
+def _extract_whatsapp_status_name(payload: dict[str, Any]) -> str | None:
+    if payload.get("object") != "whatsapp_business_account":
+        return None
+
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            statuses = value.get("statuses")
+            if not isinstance(statuses, list):
+                continue
+            for status_item in statuses:
+                if not isinstance(status_item, dict):
+                    continue
+                status_name = str(status_item.get("status", "")).strip().lower()
+                if status_name:
+                    return status_name
+    return None
+
+
 def _extract_dialer_status_timestamps(payload: dict[str, Any]) -> DialerStatusTimestamps:
     hangup = payload.get("hangup")
     if not isinstance(hangup, dict):
@@ -295,6 +333,8 @@ async def upsert_active_session(
     )
     allow_finished_reuse_by_session_id = app_name in {"WhatsApp", "DialerApp"}
     allow_address_reuse_without_entity_match = app_name in {"WhatsApp", "DialerApp"}
+    whatsapp_status_name = _extract_whatsapp_status_name(payload) if app_name == "WhatsApp" else None
+    whatsapp_status_column = WHATSAPP_STATUS_COLUMNS.get(whatsapp_status_name or "")
 
     await db_session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -453,6 +493,73 @@ async def upsert_active_session(
             created=False,
         )
 
+    if app_name == "WhatsApp" and whatsapp_status_column is not None:
+        closed_pending_result = await db_session.execute(
+            text(
+                f"""
+                UPDATE orch_sessions
+                SET
+                    entity_session_id = COALESCE(entity_session_id, :entity_session_id),
+                    entity_origin_app = COALESCE(entity_origin_app, :entity_origin_app),
+                    state = GREATEST(state, :state),
+                    ended_at = COALESCE(:ended_at, ended_at),
+                    runtime_variables = COALESCE(runtime_variables, '{{}}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                    whatsapp_sent_at = COALESCE(:whatsapp_sent_at, whatsapp_sent_at),
+                    whatsapp_delivered_at = COALESCE(:whatsapp_delivered_at, whatsapp_delivered_at),
+                    whatsapp_read_at = COALESCE(:whatsapp_read_at, whatsapp_read_at),
+                    whatsapp_failed_at = COALESCE(:whatsapp_failed_at, whatsapp_failed_at),
+                    dialer_answered_at = COALESCE(:dialer_answered_at, dialer_answered_at),
+                    dialer_busy_at = COALESCE(:dialer_busy_at, dialer_busy_at),
+                    dialer_rejected_at = COALESCE(:dialer_rejected_at, dialer_rejected_at),
+                    dialer_invalid_number_at = COALESCE(:dialer_invalid_number_at, dialer_invalid_number_at),
+                    dialer_not_answered_at = COALESCE(:dialer_not_answered_at, dialer_not_answered_at),
+                    dialer_failed_at = COALESCE(:dialer_failed_at, dialer_failed_at),
+                    updated_at = NOW()
+                WHERE id = (
+                    SELECT id
+                    FROM orch_sessions
+                    WHERE
+                        flow_uuid = CAST(:flow_uuid AS uuid)
+                        AND entity_type = :entity_type
+                        AND entity_address = :entity_address
+                        AND unassigned_at IS NULL
+                        AND {whatsapp_status_column} IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+                RETURNING id, uuid::text AS uuid, state
+                """
+            ),
+            {
+                "flow_uuid": flow_uuid,
+                "entity_type": entity_type,
+                "entity_address": entity_address,
+                "entity_session_id": entity_session_id,
+                "entity_origin_app": app_name,
+                "state": state_update.state,
+                "ended_at": state_update.ended_at,
+                "runtime_patch": runtime_patch_json,
+                "whatsapp_sent_at": whatsapp_timestamps.whatsapp_sent_at,
+                "whatsapp_delivered_at": whatsapp_timestamps.whatsapp_delivered_at,
+                "whatsapp_read_at": whatsapp_timestamps.whatsapp_read_at,
+                "whatsapp_failed_at": whatsapp_timestamps.whatsapp_failed_at,
+                "dialer_answered_at": dialer_timestamps.dialer_answered_at,
+                "dialer_busy_at": dialer_timestamps.dialer_busy_at,
+                "dialer_rejected_at": dialer_timestamps.dialer_rejected_at,
+                "dialer_invalid_number_at": dialer_timestamps.dialer_invalid_number_at,
+                "dialer_not_answered_at": dialer_timestamps.dialer_not_answered_at,
+                "dialer_failed_at": dialer_timestamps.dialer_failed_at,
+            },
+        )
+        closed_pending_row = closed_pending_result.mappings().first()
+        if closed_pending_row is not None:
+            return PersistResult(
+                id=int(closed_pending_row["id"]),
+                uuid=str(closed_pending_row["uuid"]),
+                state=int(closed_pending_row["state"]),
+                created=False,
+            )
+
     insert_result = await db_session.execute(
         text(
             """
@@ -537,6 +644,52 @@ async def upsert_active_session(
         state=int(inserted_row["state"]),
         created=True,
     )
+
+
+async def fetch_latest_session_by_flow_entity_address(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    entity_type: str,
+    entity_address: str,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                uuid::text AS uuid,
+                flow_uuid::text AS flow_uuid,
+                state,
+                entity,
+                entity_type,
+                entity_address,
+                entity_session_id,
+                last_card_uuid::text AS last_card_uuid,
+                next_card_uuid::text AS next_card_uuid,
+                runtime_variables,
+                whatsapp_sent_at,
+                whatsapp_delivered_at,
+                whatsapp_read_at,
+                whatsapp_failed_at,
+                created_at
+            FROM orch_sessions
+            WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+              AND entity_type = :entity_type
+              AND entity_address = :entity_address
+              AND unassigned_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity_type": entity_type,
+            "entity_address": entity_address,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
 
 
 async def fetch_session_by_uuid(
@@ -668,6 +821,10 @@ async def fetch_session_workflow_state(
                 last_card_uuid::text AS last_card_uuid,
                 next_card_uuid::text AS next_card_uuid,
                 frozen_until,
+                whatsapp_sent_at,
+                whatsapp_delivered_at,
+                whatsapp_read_at,
+                whatsapp_failed_at,
                 state
             FROM orch_sessions
             WHERE id = :session_id

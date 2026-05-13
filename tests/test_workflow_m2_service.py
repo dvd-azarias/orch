@@ -7,10 +7,12 @@ import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
     _blocking_stop_reason_for_component,
     _clear_blocking_execution,
+    _compute_whatsapp_status_order_delay,
     _compute_frozen_until,
     _extract_whatsapp_status_from_runtime,
     _mark_blocking_execution,
     _read_blocking_stop_reason,
+    _read_whatsapp_resume_cursor,
     _run_api_call,
     _run_code_editor,
     _run_condition,
@@ -18,6 +20,7 @@ from app.services.workflow_m2_service import (
     _run_intelligent_agent,
     _run_process_whatsapp_response,
     _run_set_variables,
+    _set_whatsapp_resume_cursor,
     _should_resume_whatsapp_blocking_execution,
 )
 
@@ -121,6 +124,52 @@ def test_should_resume_whatsapp_blocking_execution_only_when_status_available() 
 
     runtime_variables["last_payload"] = {"external_id": "generic-event"}
     assert _should_resume_whatsapp_blocking_execution(runtime_variables) is False
+
+
+def test_set_and_read_whatsapp_resume_cursor_roundtrip() -> None:
+    runtime_variables: dict[str, object] = {}
+    assert _read_whatsapp_resume_cursor(runtime_variables) is None
+    _set_whatsapp_resume_cursor(runtime_variables, process_card_cursor="card-process-1")
+    assert _read_whatsapp_resume_cursor(runtime_variables) == "card-process-1"
+
+
+def test_compute_whatsapp_status_order_delay_for_delivered_without_sent() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {"statuses": [{"status": "delivered"}]}}]}],
+        }
+    }
+    session_state = {"whatsapp_sent_at": None}
+
+    defer_until = _compute_whatsapp_status_order_delay(
+        runtime_variables=runtime_variables,
+        session_state=session_state,
+    )
+    assert defer_until is not None
+
+
+def test_compute_whatsapp_status_order_delay_releases_after_prerequisite() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {"statuses": [{"status": "read"}]}}]}],
+        }
+    }
+    session_state_missing = {"whatsapp_delivered_at": None}
+    session_state_ready = {"whatsapp_delivered_at": datetime.now(timezone.utc)}
+
+    first_defer = _compute_whatsapp_status_order_delay(
+        runtime_variables=runtime_variables,
+        session_state=session_state_missing,
+    )
+    assert first_defer is not None
+
+    second_defer = _compute_whatsapp_status_order_delay(
+        runtime_variables=runtime_variables,
+        session_state=session_state_ready,
+    )
+    assert second_defer is None
 
 
 def test_set_variables_renders_template_into_runtime() -> None:
