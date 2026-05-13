@@ -6,7 +6,9 @@ import pytest
 import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
     _blocking_stop_reason_for_component,
+    _clear_blocking_execution,
     _compute_frozen_until,
+    _extract_whatsapp_status_from_runtime,
     _mark_blocking_execution,
     _read_blocking_stop_reason,
     _run_api_call,
@@ -14,7 +16,9 @@ from app.services.workflow_m2_service import (
     _run_condition,
     _run_generate_file,
     _run_intelligent_agent,
+    _run_process_whatsapp_response,
     _run_set_variables,
+    _should_resume_whatsapp_blocking_execution,
 )
 
 
@@ -37,6 +41,86 @@ def test_blocking_execution_roundtrip_in_runtime_meta() -> None:
     )
 
     assert _read_blocking_stop_reason(runtime_variables) == "blocked_process_whatsapp_response"
+
+
+def test_clear_blocking_execution_resets_runtime_meta() -> None:
+    runtime_variables: dict[str, object] = {}
+    _mark_blocking_execution(runtime_variables, stopped_reason="blocked_process_whatsapp_response")
+    _clear_blocking_execution(runtime_variables)
+    assert _read_blocking_stop_reason(runtime_variables) is None
+
+
+def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "statuses": [{"status": "delivered"}],
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    assert _extract_whatsapp_status_from_runtime(runtime_variables) == "delivered"
+
+
+def test_run_process_whatsapp_response_maps_status_to_branch() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "statuses": [{"status": "read"}],
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    branch = _run_process_whatsapp_response(
+        component={"ref_id": "resp-1"},
+        runtime_variables=runtime_variables,
+    )
+    assert branch == "read"
+    assert runtime_variables["whatsapp_last_response"]["status"] == "read"
+    assert runtime_variables["whatsapp_last_response"]["branch"] == "read"
+
+
+def test_should_resume_whatsapp_blocking_execution_only_when_status_available() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_whatsapp",
+        },
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "statuses": [{"status": "sent"}],
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+    assert _should_resume_whatsapp_blocking_execution(runtime_variables) is True
+
+    runtime_variables["last_payload"] = {"external_id": "generic-event"}
+    assert _should_resume_whatsapp_blocking_execution(runtime_variables) is False
 
 
 def test_set_variables_renders_template_into_runtime() -> None:

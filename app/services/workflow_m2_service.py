@@ -50,6 +50,19 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "process_dialer_response": "blocked_process_dialer_response",
 }
 
+WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
+    "sent": "sent",
+    "delivered": "delivered",
+    "read": "read",
+    "failed": "failed",
+    "limit_reached": "limit_reached",
+}
+
+WHATSAPP_BLOCKING_STOP_REASONS = {
+    "blocked_send_with_whatsapp",
+    "blocked_process_whatsapp_response",
+}
+
 
 @dataclass(frozen=True)
 class WorkflowExecutionResult:
@@ -75,6 +88,12 @@ def _mark_blocking_execution(runtime_variables: dict[str, Any], *, stopped_reaso
     workflow_meta = _ensure_workflow_meta(runtime_variables)
     workflow_meta["blocking_execution"] = True
     workflow_meta["blocking_stop_reason"] = stopped_reason
+
+
+def _clear_blocking_execution(runtime_variables: dict[str, Any]) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta["blocking_execution"] = False
+    workflow_meta.pop("blocking_stop_reason", None)
 
 
 def _read_enabled(settings: Any) -> bool:
@@ -135,6 +154,84 @@ def _set_cursors(runtime_variables: dict[str, Any], *, last_cursor: str | None, 
     workflow_meta = _ensure_workflow_meta(runtime_variables)
     workflow_meta["last_card_cursor"] = last_cursor
     workflow_meta["next_card_cursor"] = next_cursor
+
+
+def _extract_whatsapp_status_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("object") != "whatsapp_business_account":
+        return None
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            statuses = value.get("statuses")
+            if not isinstance(statuses, list):
+                continue
+            for item in statuses:
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get("status")
+                if raw is None:
+                    continue
+                text = str(raw).strip().lower()
+                if text:
+                    return text
+    return None
+
+
+def _extract_whatsapp_status_from_runtime(runtime_variables: dict[str, Any]) -> str | None:
+    if not isinstance(runtime_variables, dict):
+        return None
+
+    status = _extract_whatsapp_status_from_payload(runtime_variables.get("last_payload"))
+    if status is not None:
+        return status
+
+    status = _extract_whatsapp_status_from_payload(runtime_variables.get("input_payload"))
+    if status is not None:
+        return status
+
+    variables = runtime_variables.get("variables")
+    if not isinstance(variables, dict):
+        return None
+    return _extract_whatsapp_status_from_payload(variables.get("payload"))
+
+
+def _run_process_whatsapp_response(
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    status = _extract_whatsapp_status_from_runtime(runtime_variables)
+    if status is None:
+        return None
+    branch = WHATSAPP_RESPONSE_BRANCH_BY_STATUS.get(status)
+
+    runtime_variables["whatsapp_last_response"] = {
+        "component_ref_id": component.get("ref_id"),
+        "status": status,
+        "branch": branch,
+    }
+    return branch
+
+
+def _should_resume_whatsapp_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
+    blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+    if blocking_stop_reason not in WHATSAPP_BLOCKING_STOP_REASONS:
+        return False
+    return _extract_whatsapp_status_from_runtime(runtime_variables) is not None
 
 
 def _get_by_dot_path(payload: dict[str, Any], path: str) -> Any:
@@ -1638,15 +1735,25 @@ async def execute_workflow_m2_for_session(
         if current_card_uuid is None:
             current_card_uuid = _read_next_cursor(runtime_variables)
         if (blocking_stop_reason := _read_blocking_stop_reason(runtime_variables)) is not None:
-            return await _finalize(
-                WorkflowExecutionResult(
-                    True,
-                    0,
-                    blocking_stop_reason,
-                    session_state.get("last_card_uuid"),
-                    current_card_uuid,
+            if _should_resume_whatsapp_blocking_execution(runtime_variables):
+                _clear_blocking_execution(runtime_variables)
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
-            )
+            else:
+                return await _finalize(
+                    WorkflowExecutionResult(
+                        True,
+                        0,
+                        blocking_stop_reason,
+                        session_state.get("last_card_uuid"),
+                        current_card_uuid,
+                    )
+                )
         if current_card_uuid is None:
             return await _finalize(WorkflowExecutionResult(True, 0, "no_next_card", session_state.get("last_card_uuid"), None))
 
@@ -1710,6 +1817,11 @@ async def execute_workflow_m2_for_session(
                 elif kind == "intelligent_agent":
                     branch_label = await _run_intelligent_agent(
                         db_session=db_session,
+                        component=component,
+                        runtime_variables=runtime_variables,
+                    )
+                elif kind in {"proccess_whatsapp_response", "process_whatsapp_response"}:
+                    branch_label = _run_process_whatsapp_response(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
