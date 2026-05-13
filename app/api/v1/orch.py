@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.core.config as core_config
@@ -22,7 +23,13 @@ from app.schemas.orch import (
     OrchSessionListResponse,
     OrchSessionSummary,
     OrchTriggerAccepted,
+    OrchUnassignSessionRequest,
+    OrchUnassignSessionResponse,
     SessionExtraction,
+)
+from app.repositories.orch_sessions_repository import (
+    set_session_assigned_at_default,
+    set_unassigned_at_by_flow_and_entity_address,
 )
 from app.services.alarm_query_service import list_alarms
 from app.services.app_detector import APP_ARQUIVOS
@@ -365,6 +372,14 @@ async def create_orch_session_by_workspace(
         extracted=extracted.model_dump(),
         payload=payload,
     )
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        await set_session_assigned_at_default(
+            db_session,
+            session_id=persisted.session_id,
+        )
 
     workflow_bootstrap = None
     workflow_execution = None
@@ -564,6 +579,49 @@ async def create_orch_session_by_workspace(
         session_created=persisted.session_created,
         workflow_bootstrap=workflow_bootstrap,
         workflow_execution=workflow_execution,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/sessions/unassign",
+    status_code=status.HTTP_200_OK,
+    response_model=OrchUnassignSessionResponse,
+)
+async def unassign_orch_sessions_by_entity_address(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    request: OrchUnassignSessionRequest = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchUnassignSessionResponse:
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    entity_address = _read_required_text(request.entity_address, field_name="entity_address")
+
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        updated_count = await set_unassigned_at_by_flow_and_entity_address(
+            db_session,
+            flow_uuid=str(flow_uuid),
+            entity_address=entity_address,
+        )
+    logger.info(
+        "orch sessions unassigned by entity_address",
+        extra={
+            "event": "orch.sessions.unassign",
+            "workspace_uuid": safe_workspace_uuid,
+            "workspace_schema": workspace_schema,
+            "flow_uuid": str(flow_uuid),
+            "entity_address": entity_address,
+            "updated_count": updated_count,
+        },
+    )
+    return OrchUnassignSessionResponse(
+        status="updated",
+        flow_uuid=str(flow_uuid),
+        entity_address=entity_address,
+        updated_count=updated_count,
     )
 
 

@@ -788,3 +788,48 @@ async def mark_session_finished(
         ),
         {"session_id": session_id},
     )
+
+
+async def set_session_assigned_at_default(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+) -> None:
+    await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                assigned_at = COALESCE(assigned_at, NOW()),
+                updated_at = NOW()
+            WHERE id = :session_id
+            """
+        ),
+        {"session_id": session_id},
+    )
+
+
+async def set_unassigned_at_by_flow_and_entity_address(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    entity_address: str,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                unassigned_at = NOW(),
+                updated_at = NOW()
+            WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+              AND entity_address = :entity_address
+              AND unassigned_at IS NULL
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity_address": entity_address,
+        },
+    )
+    return int(result.rowcount or 0)

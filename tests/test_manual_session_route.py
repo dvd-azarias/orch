@@ -62,11 +62,35 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
     async def _fake_persist_alarm(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
+    async def _fake_set_session_assigned_at_default(db_session, *, session_id):  # type: ignore[no-untyped-def]
+        captured["assigned_session_id"] = session_id
+
+    class _DummyTx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummySession:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self):
+            return _DummyTx()
+
+        def begin_nested(self):
+            return _DummyTx()
+
+        async def execute(self, *_args, **_kwargs):
+            return None
+
     monkeypatch.setattr(orch_api, "bind_workspace_context", _fake_bind_workspace_context)
     monkeypatch.setattr(orch_api, "ensure_active_workspace", _fake_ensure_active_workspace)
     monkeypatch.setattr(orch_api, "persist_session", _fake_persist_session)
     monkeypatch.setattr(orch_api, "bootstrap_workflow_for_session", _fake_bootstrap)
     monkeypatch.setattr(orch_api, "persist_alarm", _fake_persist_alarm)
+    monkeypatch.setattr(orch_api, "set_session_assigned_at_default", _fake_set_session_assigned_at_default)
     monkeypatch.setattr(orch_api, "get_settings", lambda: SimpleNamespace(celery_enabled=False))
 
     flow_uuid = uuid4()
@@ -80,7 +104,7 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
             entity_address="5511975620806",
             payload={"origin": "third_party_app"},
         ),
-        db_session=object(),  # type: ignore[arg-type]
+        db_session=_DummySession(),  # type: ignore[arg-type]
     )
 
     assert response.accepted is True
@@ -92,6 +116,7 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
     assert captured["app_name"] == "GenericApp"
     assert captured["extracted"]["entity_address"] == "5511975620806"
     assert captured["payload"] == {"origin": "third_party_app"}
+    assert captured["assigned_session_id"] == 999
 
 
 @pytest.mark.asyncio
@@ -150,3 +175,79 @@ async def test_create_orch_session_by_workspace_rejects_invalid_app_name(monkeyp
 
     assert exc_info.value.status_code == 422
     assert "app_name inválido" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_unassign_orch_sessions_by_entity_address_updates_rows(monkeypatch) -> None:
+    captured: dict = {}
+
+    def _fake_bind_workspace_context(_workspace_uuid: str):  # type: ignore[no-untyped-def]
+        return "ba7eb0ec-e565-447c-8c11-8f870cf72a60", "ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+
+    async def _fake_ensure_active_workspace(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    async def _fake_set_unassigned(db_session, *, flow_uuid, entity_address):  # type: ignore[no-untyped-def]
+        captured["flow_uuid"] = flow_uuid
+        captured["entity_address"] = entity_address
+        return 3
+
+    class _DummyTx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _DummySession:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self):
+            return _DummyTx()
+
+        def begin_nested(self):
+            return _DummyTx()
+
+        async def execute(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(orch_api, "bind_workspace_context", _fake_bind_workspace_context)
+    monkeypatch.setattr(orch_api, "ensure_active_workspace", _fake_ensure_active_workspace)
+    monkeypatch.setattr(orch_api, "set_unassigned_at_by_flow_and_entity_address", _fake_set_unassigned)
+
+    flow_uuid = uuid4()
+    response = await orch_api.unassign_orch_sessions_by_entity_address(
+        workspace_uuid=uuid4(),
+        flow_uuid=flow_uuid,
+        request=orch_api.OrchUnassignSessionRequest(entity_address="5511975620806"),
+        db_session=_DummySession(),  # type: ignore[arg-type]
+    )
+
+    assert response.status == "updated"
+    assert response.updated_count == 3
+    assert captured["entity_address"] == "5511975620806"
+    assert captured["flow_uuid"] == str(flow_uuid)
+
+
+@pytest.mark.asyncio
+async def test_unassign_orch_sessions_by_entity_address_rejects_blank_entity_address(monkeypatch) -> None:
+    def _fake_bind_workspace_context(_workspace_uuid: str):  # type: ignore[no-untyped-def]
+        return "ba7eb0ec-e565-447c-8c11-8f870cf72a60", "ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+
+    async def _fake_ensure_active_workspace(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(orch_api, "bind_workspace_context", _fake_bind_workspace_context)
+    monkeypatch.setattr(orch_api, "ensure_active_workspace", _fake_ensure_active_workspace)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await orch_api.unassign_orch_sessions_by_entity_address(
+            workspace_uuid=uuid4(),
+            flow_uuid=uuid4(),
+            request=orch_api.OrchUnassignSessionRequest(entity_address="   "),
+            db_session=object(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "entity_address" in str(exc_info.value.detail)
