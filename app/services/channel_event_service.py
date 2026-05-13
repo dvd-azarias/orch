@@ -103,7 +103,7 @@ async def persist_channel_events(
         async with tx_context:
             await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
             for event in events:
-                await insert_channel_event(
+                was_inserted = await insert_channel_event(
                     db_session,
                     session_id=session_id,
                     flow_uuid=flow_uuid,
@@ -113,7 +113,8 @@ async def persist_channel_events(
                     event_ts=event.event_ts,
                     payload=event.payload,
                 )
-                persisted += 1
+                if was_inserted:
+                    persisted += 1
     except Exception:
         logger.exception(
             "failed to persist channel events",
