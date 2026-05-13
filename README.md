@@ -135,6 +135,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
   - para com segurança em componente fora do escopo e retorna `workflow_execution`.
 - Para concorrência alta, usa lock transacional por chave lógica via `pg_advisory_xact_lock`.
 - Em condição de corrida/out-of-order, tenta reaproveitar a sessão mais recente pela mesma chave de sessão (`flow_uuid + entity + entity_type + entity_address + entity_session_id`) antes de criar nova.
+- Semântica de origem por sessão:
+  - `entity_origin_app` representa a **origem inicial** da sessão (primeiro app que abriu/reusou a sessão) e não é usado como indicador do evento mais recente.
+  - para identificar a app do evento **corrente**, usar `runtime_variables.source_app` e os snapshots `runtime_variables.last_payload` / `runtime_variables.last_extracted`.
 - Organização atual do código:
   - detector central: `app/services/app_detector.py`
   - extração por App: `app/handlers/*.py`
@@ -342,6 +345,9 @@ Além disso, o SQL inclui:
 - índices para busca por `flow_uuid`, chave de entidade, sessão ativa (`state <> 3`), `entity_session_id`, estado e timestamps de status.
 - migração incremental para ambientes já existentes em `sql/002_add_entity_origin_app.sql`.
 - tabela de alarmes operacionais em `sql/003_create_orch_sessions_alarms.sql`.
+
+Observação importante:
+- `entity_origin_app` é campo de origem histórica da sessão (origem inicial), enquanto a origem do evento mais recente deve ser lida de `runtime_variables.source_app`.
 
 ## Observabilidade
 
