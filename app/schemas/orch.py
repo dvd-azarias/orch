@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class SessionExtraction(BaseModel):
@@ -99,9 +99,10 @@ class OrchMigrateAllResponse(BaseModel):
 
 
 class OrchCreateSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     app_name: str
     entity: str
     entity_type: str
     entity_address: str
-    entity_session_id: str
     payload: dict | None = None

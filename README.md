@@ -86,6 +86,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
   - `GET /v1/orch/sessions/by-entity?entity=...&entity_type=...&entity_address=...&limit=50&cursor=...`
   - `GET /v1/orch/alarms?level=warning|error&code=...&flow_uuid=...&session_uuid=...&app_name=...&limit=50&cursor=...`
   - `POST /v1/orch/{workspace_uuid}/{flow_uuid}/sessions` (criação explícita de sessão por app integradora)
+    - `entity_session_id` é gerado internamente pelo ORCH no formato `entity_address:::flow_uuid`.
 
 ## Endpoints de health (já implementados)
 
