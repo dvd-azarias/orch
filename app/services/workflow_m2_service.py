@@ -195,6 +195,14 @@ def _set_whatsapp_resume_cursor(runtime_variables: dict[str, Any], *, process_ca
     whatsapp_resume["process_card_cursor"] = process_card_cursor
 
 
+def _should_preempt_to_whatsapp_resume_cursor(runtime_variables: dict[str, Any]) -> bool:
+    status = _extract_whatsapp_status_from_runtime(runtime_variables)
+    if status not in WHATSAPP_RESPONSE_BRANCH_BY_STATUS:
+        return False
+    resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
+    return resume_cursor is not None
+
+
 def _extract_whatsapp_status_from_payload(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -1828,9 +1836,10 @@ async def execute_workflow_m2_for_session(
             runtime_variables = {}
 
         frozen_until = session_state.get("frozen_until")
+        should_preempt_to_whatsapp_resume_cursor = _should_preempt_to_whatsapp_resume_cursor(runtime_variables)
         if isinstance(frozen_until, datetime):
             frozen_until_utc = frozen_until if frozen_until.tzinfo is not None else frozen_until.replace(tzinfo=timezone.utc)
-            if frozen_until_utc > datetime.now(timezone.utc):
+            if frozen_until_utc > datetime.now(timezone.utc) and not should_preempt_to_whatsapp_resume_cursor:
                 return await _finalize(
                     WorkflowExecutionResult(
                         True,
@@ -1841,11 +1850,14 @@ async def execute_workflow_m2_for_session(
                     )
                 )
 
-        current_card_uuid = session_state.get("next_card_uuid")
-        if current_card_uuid is None:
-            current_card_uuid = _read_next_cursor(runtime_variables)
-        if current_card_uuid is None and _extract_whatsapp_status_from_runtime(runtime_variables) is not None:
+        if should_preempt_to_whatsapp_resume_cursor:
             current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
+        else:
+            current_card_uuid = session_state.get("next_card_uuid")
+            if current_card_uuid is None:
+                current_card_uuid = _read_next_cursor(runtime_variables)
+            if current_card_uuid is None and _extract_whatsapp_status_from_runtime(runtime_variables) is not None:
+                current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
         if (blocking_stop_reason := _read_blocking_stop_reason(runtime_variables)) is not None:
             if _should_resume_whatsapp_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
