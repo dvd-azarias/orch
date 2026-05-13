@@ -21,8 +21,8 @@ async def insert_channel_event(
     event_id: str | None,
     event_ts: datetime | None,
     payload: dict[str, Any],
-) -> None:
-    await db_session.execute(
+) -> bool:
+    result = await db_session.execute(
         text(
             """
             INSERT INTO orch_channel_events (
@@ -47,6 +47,7 @@ async def insert_channel_event(
                 NOW()
             )
             ON CONFLICT DO NOTHING
+            RETURNING id
             """
         ),
         {
@@ -59,6 +60,8 @@ async def insert_channel_event(
             "payload": json.dumps(payload, ensure_ascii=False),
         },
     )
+    inserted_row = result.first()
+    return inserted_row is not None
 
 
 async def has_pending_channel_events(

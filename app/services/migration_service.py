@@ -32,6 +32,7 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0010_create_orch_discarded_events", "sql/010_create_orch_discarded_events.sql"),
     ("0011_allow_stopped_after_unassign_state", "sql/011_allow_stopped_after_unassign_state.sql"),
     ("0012_create_orch_channel_events", "sql/012_create_orch_channel_events.sql"),
+    ("0013_fix_orch_channel_events_dedupe_scope", "sql/013_fix_orch_channel_events_dedupe_scope.sql"),
 ]
 
 
