@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.core.logging import get_logger
 from app.core.workspace import normalize_workspace_uuid
+from app.repositories.orch_channel_events_repository import list_stale_pending_channel_event_sessions
 from app.services.alarm_service import persist_alarm
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
@@ -34,6 +35,12 @@ def advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_id: int
 def dispatch_pending_sessions_task() -> dict[str, int]:
     claimed_count = asyncio.run(_dispatch_pending_sessions_task())
     return {"claimed_count": claimed_count}
+
+
+@celery_app.task(name="app.tasks.workflow.reconcile_pending_channel_events", ignore_result=True)
+def reconcile_pending_channel_events_task() -> dict[str, int]:
+    enqueued_count = asyncio.run(_reconcile_pending_channel_events_task())
+    return {"enqueued_count": enqueued_count}
 
 
 @celery_app.task(name="app.tasks.workflow.beat_heartbeat", ignore_result=True)
@@ -171,6 +178,134 @@ async def _dispatch_pending_sessions_task() -> int:
         },
     )
     return total_claimed
+
+
+def _reconcile_lock_key(*, workspace_uuid: str, session_id: int) -> str:
+    return f"orch:reconcile:pending-events:{workspace_uuid}:{session_id}"
+
+
+def _try_acquire_reconcile_lock(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    session_id: int,
+    cooldown_seconds: int,
+) -> bool:
+    if redis_client is None:
+        return True
+    try:
+        return bool(
+            redis_client.set(
+                _reconcile_lock_key(workspace_uuid=workspace_uuid, session_id=session_id),
+                "1",
+                ex=max(1, int(cooldown_seconds)),
+                nx=True,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "workflow pending-events reconcile lock failed",
+            extra={
+                "event": "orch.workflow.reconcile.lock_failed",
+                "workspace_uuid": workspace_uuid,
+                "session_id": session_id,
+            },
+        )
+        return True
+
+
+async def _reconcile_pending_channel_events_task() -> int:
+    settings = get_settings()
+    if not settings.celery_enabled or not settings.celery_beat_reconcile_pending_events_enabled:
+        return 0
+
+    redis_client: redis.Redis | None = None
+    if settings.celery_result_backend:
+        try:
+            redis_client = redis.Redis.from_url(settings.celery_result_backend)
+        except Exception:
+            logger.exception(
+                "workflow pending-events reconcile redis setup failed",
+                extra={"event": "orch.workflow.reconcile.redis_setup_failed"},
+            )
+
+    scoped_workspace_uuid = (
+        normalize_workspace_uuid(settings.celery_reconcile_pending_events_workspace_uuid)
+        if settings.celery_reconcile_pending_events_workspace_uuid
+        else None
+    )
+    session_factory = get_session_factory()
+    total_enqueued = 0
+    async with session_factory() as db_session:
+        try:
+            workspaces = await list_completed_workspaces(db_session)
+        except Exception as exc:
+            await persist_alarm(
+                db_session,
+                level="error",
+                code="workflow_reconcile_pending_events_task_failed",
+                message="Falha inesperada no reconciliador de eventos pendentes.",
+                details={
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+                app_name="Celery",
+            )
+            raise
+
+        for workspace in workspaces:
+            workspace_uuid = normalize_workspace_uuid(str(workspace["workspace_uuid"]))
+            if scoped_workspace_uuid is not None and workspace_uuid != scoped_workspace_uuid:
+                continue
+            bind_workspace_context(workspace_uuid)
+            stale_sessions = await list_stale_pending_channel_event_sessions(
+                db_session,
+                stale_seconds=settings.celery_reconcile_pending_events_stale_seconds,
+                limit=settings.celery_reconcile_pending_events_batch_size,
+            )
+            for item in stale_sessions:
+                session_id = int(item["session_id"])
+                flow_uuid = str(item["flow_uuid"])
+                if not _try_acquire_reconcile_lock(
+                    redis_client,
+                    workspace_uuid=workspace_uuid,
+                    session_id=session_id,
+                    cooldown_seconds=settings.celery_reconcile_pending_events_cooldown_seconds,
+                ):
+                    continue
+                try:
+                    advance_session_task.delay(
+                        workspace_uuid=workspace_uuid,
+                        flow_uuid=flow_uuid,
+                        session_id=session_id,
+                    )
+                    total_enqueued += 1
+                except Exception as exc:
+                    await persist_alarm(
+                        db_session,
+                        level="error",
+                        code="workflow_reconcile_pending_events_enqueue_failed",
+                        message="Falha ao reenfileirar sessão com eventos pendentes.",
+                        details={
+                            "session_id": session_id,
+                            "workspace_uuid": workspace_uuid,
+                            "flow_uuid": flow_uuid,
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                        },
+                        flow_uuid=flow_uuid,
+                        app_name="Celery",
+                    )
+
+    logger.info(
+        "workflow pending-events reconcile finished",
+        extra={
+            "event": "orch.workflow.reconcile.finished",
+            "enqueued_count": total_enqueued,
+            "workspace_scope": scoped_workspace_uuid,
+        },
+    )
+    return total_enqueued
 
 
 async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_id: int) -> None:
