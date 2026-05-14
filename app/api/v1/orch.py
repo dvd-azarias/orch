@@ -33,6 +33,7 @@ from app.schemas.orch import (
 from app.repositories.orch_flow_aliases_repository import (
     create_or_get_flow_alias,
     fetch_active_flow_alias,
+    fetch_flow_alias_by_workspace_flow,
 )
 from app.repositories.orch_sessions_repository import (
     set_session_assigned_at_default,
@@ -702,6 +703,36 @@ async def get_orch_flow_alias(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Alias não encontrado.",
+        )
+    return OrchFlowAliasSummary(
+        alias=str(row["alias"]),
+        workspace_uuid=str(row["workspace_uuid"]),
+        flow_uuid=str(row["flow_uuid"]),
+        is_active=bool(row["is_active"]),
+    )
+
+
+@router.get(
+    "/{workspace_uuid}/{flow_uuid}/alias",
+    response_model=OrchFlowAliasSummary,
+    status_code=status.HTTP_200_OK,
+)
+async def get_orch_flow_alias_by_workspace_flow(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchFlowAliasSummary:
+    safe_workspace_uuid, _workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    row = await fetch_flow_alias_by_workspace_flow(
+        db_session,
+        workspace_uuid=safe_workspace_uuid,
+        flow_uuid=str(flow_uuid),
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alias não encontrado para workspace/flow informados.",
         )
     return OrchFlowAliasSummary(
         alias=str(row["alias"]),

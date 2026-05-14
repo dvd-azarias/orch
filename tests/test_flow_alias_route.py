@@ -58,6 +58,60 @@ async def test_create_orch_flow_alias_returns_alias(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_get_orch_flow_alias_by_workspace_flow_returns_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_ensure_active_workspace(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def _fake_bind_workspace_context(_workspace_uuid: str):  # type: ignore[no-untyped-def]
+        return "ba7eb0ec-e565-447c-8c11-8f870cf72a60", "ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+
+    async def _fake_fetch_pair(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "alias": "1a2b3c4d5e6f70",
+            "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            "flow_uuid": "0300054c-5f39-4cda-ae88-fe993fd9044b",
+            "is_active": True,
+        }
+
+    monkeypatch.setattr(orch_api, "ensure_active_workspace", _fake_ensure_active_workspace)
+    monkeypatch.setattr(orch_api, "bind_workspace_context", _fake_bind_workspace_context)
+    monkeypatch.setattr(orch_api, "fetch_flow_alias_by_workspace_flow", _fake_fetch_pair)
+
+    response = await orch_api.get_orch_flow_alias_by_workspace_flow(
+        workspace_uuid=uuid4(),
+        flow_uuid=uuid4(),
+        db_session=object(),  # type: ignore[arg-type]
+    )
+
+    assert response.alias == "1a2b3c4d5e6f70"
+    assert response.is_active is True
+
+
+@pytest.mark.asyncio
+async def test_get_orch_flow_alias_by_workspace_flow_returns_404_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_ensure_active_workspace(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def _fake_bind_workspace_context(_workspace_uuid: str):  # type: ignore[no-untyped-def]
+        return "ba7eb0ec-e565-447c-8c11-8f870cf72a60", "ws_ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+
+    async def _fake_fetch_pair(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(orch_api, "ensure_active_workspace", _fake_ensure_active_workspace)
+    monkeypatch.setattr(orch_api, "bind_workspace_context", _fake_bind_workspace_context)
+    monkeypatch.setattr(orch_api, "fetch_flow_alias_by_workspace_flow", _fake_fetch_pair)
+
+    with pytest.raises(HTTPException) as exc:
+        await orch_api.get_orch_flow_alias_by_workspace_flow(
+            workspace_uuid=uuid4(),
+            flow_uuid=uuid4(),
+            db_session=object(),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_trigger_orch_resolves_alias_and_calls_workspace_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
