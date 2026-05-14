@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,8 @@ from app.schemas.orch import (
     OrchAlarmListResponse,
     OrchAlarmSummary,
     OrchCreateSessionRequest,
+    OrchFlowAliasCreateResponse,
+    OrchFlowAliasSummary,
     OrchMigrateAllResponse,
     OrchMigrateWorkspaceResponse,
     OrchSessionListResponse,
@@ -26,6 +29,10 @@ from app.schemas.orch import (
     OrchUnassignSessionRequest,
     OrchUnassignSessionResponse,
     SessionExtraction,
+)
+from app.repositories.orch_flow_aliases_repository import (
+    create_or_get_flow_alias,
+    fetch_active_flow_alias,
 )
 from app.repositories.orch_sessions_repository import (
     set_session_assigned_at_default,
@@ -61,6 +68,7 @@ router = APIRouter(prefix="/v1/orch", tags=["orch"])
 logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
 _SUPPORTED_MANUAL_APPS = {"ArquivosApp", "WhatsApp", "DialerApp", "GenericApp"}
+_FLOW_ALIAS_PATTERN = re.compile(r"^[0-9a-f]{14}$")
 
 
 def _legacy_workspace_context() -> tuple[str | None, str]:
@@ -84,6 +92,10 @@ def _read_required_text(value: str, *, field_name: str) -> str:
 
 def _build_entity_session_id(*, entity_address: str, flow_uuid: UUID) -> str:
     return f"{entity_address}:::{str(flow_uuid)}"
+
+
+def _is_short_flow_alias(value: str) -> bool:
+    return bool(_FLOW_ALIAS_PATTERN.fullmatch(str(value or "").strip().lower()))
 
 
 async def _trigger_orch_for_workspace(
@@ -638,15 +650,103 @@ async def unassign_orch_sessions_by_entity_address(
 
 
 @router.post(
-    "/{flow_uuid}",
+    "/{workspace_uuid}/{flow_uuid}/alias",
+    response_model=OrchFlowAliasCreateResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def create_orch_flow_alias(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchFlowAliasCreateResponse:
+    safe_workspace_uuid, _workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        row = await create_or_get_flow_alias(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=str(flow_uuid),
+        )
+    return OrchFlowAliasCreateResponse(
+        status="ok",
+        item=OrchFlowAliasSummary(
+            alias=str(row["alias"]),
+            workspace_uuid=str(row["workspace_uuid"]),
+            flow_uuid=str(row["flow_uuid"]),
+            is_active=bool(row["is_active"]),
+        ),
+    )
+
+
+@router.get(
+    "/aliases/{alias}",
+    response_model=OrchFlowAliasSummary,
+    status_code=status.HTTP_200_OK,
+)
+async def get_orch_flow_alias(
+    alias: str,
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchFlowAliasSummary:
+    safe_alias = str(alias or "").strip().lower()
+    if not _is_short_flow_alias(safe_alias):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Alias inválido. Formato esperado: 14 caracteres hexadecimais (lowercase).",
+        )
+    row = await fetch_active_flow_alias(
+        db_session,
+        alias=safe_alias,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alias não encontrado.",
+        )
+    return OrchFlowAliasSummary(
+        alias=str(row["alias"]),
+        workspace_uuid=str(row["workspace_uuid"]),
+        flow_uuid=str(row["flow_uuid"]),
+        is_active=bool(row["is_active"]),
+    )
+
+
+@router.post(
+    "/{alias_or_flow_uuid}",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=OrchTriggerAccepted,
 )
 async def trigger_orch(
-    flow_uuid: UUID,
+    alias_or_flow_uuid: str,
     payload: dict[str, Any] = Body(...),
     db_session: AsyncSession = Depends(get_db_session),
 ) -> OrchTriggerAccepted:
+    raw_target = str(alias_or_flow_uuid or "").strip().lower()
+    if _is_short_flow_alias(raw_target):
+        row = await fetch_active_flow_alias(
+            db_session,
+            alias=raw_target,
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Alias não encontrado.",
+            )
+        return await _trigger_orch_for_workspace(
+            workspace_uuid=str(row["workspace_uuid"]),
+            flow_uuid=UUID(str(row["flow_uuid"])),
+            payload=payload,
+            db_session=db_session,
+        )
+
+    try:
+        flow_uuid = UUID(raw_target)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Parâmetro inválido: use UUID de flow ou alias hex14.",
+        ) from exc
+
     fallback_workspace_uuid, fallback_workspace_schema = _legacy_workspace_context()
     set_workspace_context(
         workspace_uuid=normalize_workspace_uuid(fallback_workspace_uuid) if fallback_workspace_uuid else "legacy",
