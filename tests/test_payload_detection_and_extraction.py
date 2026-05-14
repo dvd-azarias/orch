@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.services.app_detector import detect_app
+from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit
 from app.services.session_extractor import extract_session_fields
 
 PAYLOADS_DIR = Path(__file__).parent / "payloads"
@@ -48,10 +49,10 @@ def test_detect_app_with_phase1_payloads(file_name: str, expected_app: str) -> N
         (
             "whatsapp_sent.json",
             {
-                "entity": "554196311412",
+                "entity": "5541996311412",
                 "entity_type": "person",
-                "entity_address": "554196311412",
-                "entity_session_id": "554196311412",
+                "entity_address": "5541996311412",
+                "entity_session_id": "5541996311412",
             },
         ),
         (
@@ -99,3 +100,51 @@ def test_generic_extraction_returns_422_for_blank_external_id() -> None:
 
     assert exc_info.value.status_code == 422
     assert "external_id" in str(exc_info.value.detail)
+
+
+@pytest.mark.parametrize(
+    ("phone", "expected"),
+    [
+        ("554399056041", "5543999056041"),
+        ("554312345678", "554312345678"),
+        ("5511975620806", "5511975620806"),
+        ("14399056041", "14399056041"),
+    ],
+)
+def test_normalize_br_mobile_missing_ninth_digit(phone: str, expected: str) -> None:
+    assert normalize_br_mobile_missing_ninth_digit(phone) == expected
+
+
+def test_extract_session_fields_normalizes_whatsapp_12_digits_missing_ninth() -> None:
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "contacts": [{"wa_id": "554399056041"}],
+                            "statuses": [{"recipient_id": "554399056041"}],
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+
+    extracted = extract_session_fields("WhatsApp", payload)
+    assert extracted.entity == "5543999056041"
+    assert extracted.entity_address == "5543999056041"
+    assert extracted.entity_session_id == "5543999056041"
+
+
+def test_extract_session_fields_normalizes_dialer_12_digits_missing_ninth() -> None:
+    payload = {
+        "uniqueid": "test-uid",
+        "hangup": {"Event": "Hangup", "CdrMailingData": "{'phone': '554399056041'}"},
+    }
+
+    extracted = extract_session_fields("DialerApp", payload)
+    assert extracted.entity == "test-uid"
+    assert extracted.entity_address == "5543999056041"

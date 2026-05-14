@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from app.schemas.orch import SessionExtraction
+from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit
 
 
 def _pick_first_non_empty(*values: Any) -> str | None:
@@ -73,8 +74,8 @@ def extract_whatsapp_session_fields(payload: dict[str, Any]) -> SessionExtractio
             if contacts_wa_id or recipient_id:
                 break
 
-    identity = _pick_first_non_empty(contacts_wa_id, recipient_id)
-    session_id = _pick_first_non_empty(contacts_wa_id, recipient_id)
+    identity = normalize_br_mobile_missing_ninth_digit(_pick_first_non_empty(contacts_wa_id, recipient_id))
+    session_id = normalize_br_mobile_missing_ninth_digit(_pick_first_non_empty(contacts_wa_id, recipient_id))
     if not (identity and session_id):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

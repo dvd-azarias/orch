@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from app.schemas.orch import SessionExtraction
+from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit
 
 
 def _pick_first_non_empty(*values: Any) -> str | None:
@@ -62,7 +63,7 @@ def extract_dialer_session_fields(payload: dict[str, Any]) -> SessionExtraction:
     hangup = payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {}
     makecall = payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {}
 
-    phone = _extract_phone_from_dialer(payload)
+    phone = normalize_br_mobile_missing_ninth_digit(_extract_phone_from_dialer(payload))
     entity = _pick_first_non_empty(
         hangup.get("DialerActionID"),
         hangup.get("PoolActionID"),
