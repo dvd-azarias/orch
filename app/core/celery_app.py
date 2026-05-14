@@ -42,6 +42,12 @@ if settings.celery_beat_dispatch_enabled:
         "schedule": max(1, settings.celery_dispatch_interval_seconds),
         "options": {"queue": settings.celery_dispatch_queue},
     }
+if settings.celery_beat_reconcile_pending_events_enabled:
+    beat_schedule["orch-reconcile-pending-channel-events"] = {
+        "task": "app.tasks.workflow.reconcile_pending_channel_events",
+        "schedule": max(5, settings.celery_reconcile_pending_events_interval_seconds),
+        "options": {"queue": settings.celery_dispatch_queue},
+    }
 if settings.celery_generate_file_enabled and settings.celery_generate_file_scan_enabled:
     beat_schedule["orch-generate-file-scan-due"] = {
         "task": "app.tasks.component_generate_file.scan_due",
@@ -66,6 +72,7 @@ celery_app.conf.update(
     task_always_eager=settings.celery_task_always_eager,
     task_routes={
         "app.tasks.workflow.dispatch_pending_sessions": {"queue": settings.celery_dispatch_queue},
+        "app.tasks.workflow.reconcile_pending_channel_events": {"queue": settings.celery_dispatch_queue},
         "app.tasks.workflow.beat_heartbeat": {"queue": settings.celery_heartbeat_queue},
         "app.tasks.workflow.advance_session": {"queue": settings.celery_execute_queue},
         "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},

@@ -152,3 +152,46 @@ async def claim_next_pending_channel_event(
             extra={"event": "orch.channel_events.claim_failed", "session_id": session_id, "channel": channel},
         )
         return None
+
+
+async def list_stale_pending_channel_event_sessions(
+    db_session: AsyncSession,
+    *,
+    stale_seconds: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    safe_stale_seconds = max(1, int(stale_seconds))
+    safe_limit = max(1, int(limit))
+    result = await db_session.execute(
+        text(
+            """
+            WITH candidates AS (
+                SELECT
+                    e.session_id,
+                    MIN(COALESCE(e.event_ts, e.received_at)) AS oldest_pending_at,
+                    COUNT(*) AS pending_events
+                FROM orch_channel_events e
+                WHERE e.processed_at IS NULL
+                  AND COALESCE(e.event_ts, e.received_at) <= NOW() - MAKE_INTERVAL(secs => :stale_seconds)
+                GROUP BY e.session_id
+                ORDER BY oldest_pending_at ASC
+                LIMIT :limit
+            )
+            SELECT
+                c.session_id,
+                s.flow_uuid::text AS flow_uuid,
+                c.oldest_pending_at,
+                c.pending_events
+            FROM candidates c
+            JOIN orch_sessions s
+              ON s.id = c.session_id
+            WHERE s.unassigned_at IS NULL
+            ORDER BY c.oldest_pending_at ASC, c.session_id ASC
+            """
+        ),
+        {
+            "stale_seconds": safe_stale_seconds,
+            "limit": safe_limit,
+        },
+    )
+    return [dict(row) for row in result.mappings().all()]

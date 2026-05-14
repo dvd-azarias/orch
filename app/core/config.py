@@ -35,7 +35,9 @@ class Settings:
     celery_heartbeat_queue: str
     celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
+    celery_beat_reconcile_pending_events_enabled: bool
     celery_dispatch_workspace_uuid: str | None
+    celery_reconcile_pending_events_workspace_uuid: str | None
     celery_task_always_eager: bool
     celery_health_heartbeat_key: str
     celery_health_heartbeat_ttl_seconds: int
@@ -52,6 +54,10 @@ class Settings:
     celery_source_list_ingest_queue: str
     celery_fileapp_mailing_assoc_queue: str
     celery_fileapp_mailing_assoc_delay_seconds: int
+    celery_reconcile_pending_events_interval_seconds: int
+    celery_reconcile_pending_events_batch_size: int
+    celery_reconcile_pending_events_stale_seconds: int
+    celery_reconcile_pending_events_cooldown_seconds: int
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
@@ -250,7 +256,12 @@ def get_settings() -> Settings:
         ),
         celery_beat_heartbeat_enabled=_read_env_bool("CELERY_BEAT_HEARTBEAT_ENABLED", True),
         celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
+        celery_beat_reconcile_pending_events_enabled=_read_env_bool("CELERY_BEAT_RECONCILE_PENDING_EVENTS_ENABLED", True),
         celery_dispatch_workspace_uuid=_read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
+        celery_reconcile_pending_events_workspace_uuid=_read_env_optional(
+            "CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID",
+            _read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
+        ),
         celery_task_always_eager=_read_env_bool("CELERY_TASK_ALWAYS_EAGER", False),
         celery_health_heartbeat_key=_read_env_optional("CELERY_HEARTBEAT_KEY", "orch:beat:heartbeat") or "orch:beat:heartbeat",
         celery_health_heartbeat_ttl_seconds=_read_env_int("CELERY_HEARTBEAT_TTL_SECONDS", 30),
@@ -282,6 +293,10 @@ def get_settings() -> Settings:
             or _default_queue_by_profile(queue_profile, "fileapp_mailing_assoc")
         ),
         celery_fileapp_mailing_assoc_delay_seconds=_read_env_int("CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS", 20),
+        celery_reconcile_pending_events_interval_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_INTERVAL_SECONDS", 15),
+        celery_reconcile_pending_events_batch_size=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_BATCH_SIZE", 200),
+        celery_reconcile_pending_events_stale_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_STALE_SECONDS", 30),
+        celery_reconcile_pending_events_cooldown_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_COOLDOWN_SECONDS", 30),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
             "ORCH_DEFAULT_WORKSPACE_UUID",

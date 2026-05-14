@@ -638,10 +638,16 @@ Migrar a movimentação de cards do workflow para execução assíncrona com Cel
   - `CELERY_EXECUTE_QUEUE` (padrão: `orch_execute`)
   - `CELERY_HEARTBEAT_QUEUE` (padrão: `orch_heartbeat`)
   - `CELERY_BEAT_DISPATCH_ENABLED` (padrão: `true`; quando `false`, beat envia somente heartbeat)
+  - `CELERY_BEAT_RECONCILE_PENDING_EVENTS_ENABLED` (padrão: `true`; ativa reconciliador de eventos de canal pendentes)
   - `CELERY_DISPATCH_WORKSPACE_UUID` (opcional; restringe dispatcher a um workspace específico)
+  - `CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID` (opcional; restringe reconciliador a um workspace específico; fallback para `CELERY_DISPATCH_WORKSPACE_UUID`)
   - `CELERY_TASK_ALWAYS_EAGER` (padrão: `false`; útil para testes locais)
   - `CELERY_HEARTBEAT_KEY` (padrão: `orch:beat:heartbeat`)
   - `CELERY_HEARTBEAT_TTL_SECONDS` (padrão: `30`)
+  - `CELERY_RECONCILE_PENDING_EVENTS_INTERVAL_SECONDS` (padrão: `15`)
+  - `CELERY_RECONCILE_PENDING_EVENTS_BATCH_SIZE` (padrão: `200`)
+  - `CELERY_RECONCILE_PENDING_EVENTS_STALE_SECONDS` (padrão: `30`)
+  - `CELERY_RECONCILE_PENDING_EVENTS_COOLDOWN_SECONDS` (padrão: `30`; evita reenfileiramento repetitivo da mesma sessão)
 - Subir worker:
   - `celery -A app.core.celery_app:celery_app worker -Q orch_dispatch,orch_execute,orch_heartbeat -l INFO`
 - Subir beat:
