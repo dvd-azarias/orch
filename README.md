@@ -98,6 +98,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
 - `GET /health/db`
 - `GET /health/ready` (valida conectividade, schema ativo e existência de `orch_sessions`)
 
+## Segurança do `/docs` (produção)
+
+- O acesso a `/docs`, `/redoc` e `/openapi.json` é bloqueado para origem externa por padrão.
+- Faixa interna padrão permitida: `10.1.20.0/24` (além de loopback).
+- A validação considera `X-Forwarded-For` apenas quando o cliente direto está em proxy confiável.
+
+Variáveis de ambiente:
+
+```env
+DOCS_ACCESS_CONTROL_ENABLED=true
+DOCS_INTERNAL_CIDRS=10.1.20.0/24,127.0.0.1/32,::1/128
+DOCS_TRUSTED_PROXY_CIDRS=10.1.20.0/24,127.0.0.1/32,::1/128
+```
+
 ## Endpoint `POST /v1/orch/{flow_uuid}` (base implementada)
 
 - Aceita payload JSON genérico.
