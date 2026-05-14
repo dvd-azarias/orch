@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import time
 from uuid import uuid4
 
@@ -22,8 +23,67 @@ logger = get_logger(__name__)
 app = FastAPI(title="orch", version="0.1.0")
 app.include_router(orch_router)
 
+_DOCS_PROTECTED_PREFIXES = ("/docs", "/redoc")
+_DOCS_PROTECTED_EXACT = {"/openapi.json"}
+
+
+def _is_docs_protected_path(path: str) -> bool:
+    if path in _DOCS_PROTECTED_EXACT:
+        return True
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in _DOCS_PROTECTED_PREFIXES)
+
+
+def _parse_ip(value: str | None) -> ipaddress._BaseAddress | None:
+    if not value:
+        return None
+    try:
+        return ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+
+
+def _parse_networks(raw_networks: tuple[str, ...]) -> list[ipaddress._BaseNetwork]:
+    parsed: list[ipaddress._BaseNetwork] = []
+    for network in raw_networks:
+        try:
+            parsed.append(ipaddress.ip_network(network, strict=False))
+        except ValueError:
+            continue
+    return parsed
+
+
+def _ip_in_networks(address: ipaddress._BaseAddress | None, networks: list[ipaddress._BaseNetwork]) -> bool:
+    if address is None:
+        return False
+    return any(address in network for network in networks)
+
+
+def _resolve_request_origin_ip(
+    request: Request,
+    trusted_proxy_networks: list[ipaddress._BaseNetwork],
+) -> ipaddress._BaseAddress | None:
+    direct_ip = _parse_ip(request.client.host if request.client else None)
+    if not _ip_in_networks(direct_ip, trusted_proxy_networks):
+        return direct_ip
+
+    forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+    if not forwarded_for:
+        return direct_ip
+
+    first_forwarded_ip = _parse_ip(forwarded_for.split(",")[0].strip())
+    return first_forwarded_ip or direct_ip
+
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
+    settings = get_settings()
+    if settings.docs_access_control_enabled and _is_docs_protected_path(request.url.path):
+        internal_networks = _parse_networks(settings.docs_internal_cidrs)
+        trusted_proxy_networks = _parse_networks(settings.docs_trusted_proxy_cidrs)
+        origin_ip = _resolve_request_origin_ip(request, trusted_proxy_networks)
+
+        if not _ip_in_networks(origin_ip, internal_networks):
+            return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not Found"})
+
     request_id = request.headers.get("X-Request-ID") or str(uuid4())
     set_request_id(request_id)
     started_at = time.perf_counter()

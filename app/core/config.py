@@ -70,6 +70,9 @@ class Settings:
     otima_llm_api_key: str | None
     otima_llm_api_timeout_seconds: float
     orch_queue_profile: str
+    docs_access_control_enabled: bool
+    docs_internal_cidrs: tuple[str, ...]
+    docs_trusted_proxy_cidrs: tuple[str, ...]
 
     @property
     def psycopg_dsn(self) -> str:
@@ -123,6 +126,14 @@ def _read_env_bool(name: str, default: bool) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Valor inválido para {name}: {raw}")
+
+
+def _read_env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values or default
 
 
 def _load_dotenv(path: Path) -> None:
@@ -315,4 +326,13 @@ def get_settings() -> Settings:
         otima_llm_api_key=_read_env_optional("OTIMA_LLM_API_KEY"),
         otima_llm_api_timeout_seconds=float(_read_env_optional("OTIMA_LLM_API_TIMEOUT_SECONDS", "10.0") or "10.0"),
         orch_queue_profile=queue_profile,
+        docs_access_control_enabled=_read_env_bool("DOCS_ACCESS_CONTROL_ENABLED", True),
+        docs_internal_cidrs=_read_env_csv(
+            "DOCS_INTERNAL_CIDRS",
+            ("10.1.20.0/24", "127.0.0.1/32", "::1/128"),
+        ),
+        docs_trusted_proxy_cidrs=_read_env_csv(
+            "DOCS_TRUSTED_PROXY_CIDRS",
+            ("10.1.20.0/24", "127.0.0.1/32", "::1/128"),
+        ),
     )
