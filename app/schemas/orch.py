@@ -120,3 +120,17 @@ class OrchUnassignSessionResponse(BaseModel):
     flow_uuid: str
     entity_address: str
     updated_count: int
+
+
+class OrchFlowAliasSummary(BaseModel):
+    api_version: str = "v1"
+    alias: str
+    workspace_uuid: str
+    flow_uuid: str
+    is_active: bool
+
+
+class OrchFlowAliasCreateResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    item: OrchFlowAliasSummary
