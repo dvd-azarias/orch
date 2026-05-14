@@ -404,37 +404,6 @@ async def run_tipo1_manual_pipeline(
         )
     step_results.append({"step": "step2_templates", "status_code": status_code, "mapping_template_uuid": mapping_template_uuid})
 
-    # Step 3
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="GET",
-            url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
-            headers=json_headers,
-            payload=None,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step3_field_mappings_get",
-            message=f"Consulta de field-mappings falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
-    field_mappings_response = _decode_json(body)
-    field_mappings_data = (
-        field_mappings_response.get("data") if isinstance(field_mappings_response.get("data"), dict) else {}
-    )
-    put_suggestion = field_mappings_data.get("put_suggestion") if isinstance(field_mappings_data.get("put_suggestion"), dict) else {}
-    suggested_mappings = put_suggestion.get("mappings")
-    if status_code >= 400 or not isinstance(suggested_mappings, list) or not suggested_mappings:
-        raise FileAppTipo1ManualPipelineError(
-            step="step3_field_mappings_get",
-            message="Consulta de field-mappings não retornou put_suggestion.mappings válido.",
-            details={"status_code": status_code},
-        )
-    step_results.append({"step": "step3_field_mappings_get", "status_code": status_code, "mappings_count": len(suggested_mappings)})
-
     # Step 4
     patch_payload = {
         "mapping_template_id": mapping_template_uuid,
@@ -464,6 +433,47 @@ async def run_tipo1_manual_pipeline(
             details={"status_code": status_code, "response_body": body},
         )
     step_results.append({"step": "step4_patch_mailing", "status_code": status_code})
+
+    # Step 3 (recarrega após aplicar template no PATCH)
+    try:
+        status_code, body = await asyncio.to_thread(
+            _json_request,
+            method="GET",
+            url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
+            headers=json_headers,
+            payload=None,
+            timeout_seconds=settings.sync_ws_timeout_seconds,
+        )
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise FileAppTipo1ManualPipelineError(
+            step="step3_field_mappings_get",
+            message=f"Consulta de field-mappings falhou (HTTP {int(exc.code)}).",
+            details={"status_code": int(exc.code), "response_body": detail},
+        ) from exc
+    field_mappings_response = _decode_json(body)
+    field_mappings_data = (
+        field_mappings_response.get("data") if isinstance(field_mappings_response.get("data"), dict) else {}
+    )
+    put_suggestion = (
+        field_mappings_data.get("put_suggestion")
+        if isinstance(field_mappings_data.get("put_suggestion"), dict)
+        else {}
+    )
+    suggested_mappings = put_suggestion.get("mappings")
+    if status_code >= 400 or not isinstance(suggested_mappings, list) or not suggested_mappings:
+        raise FileAppTipo1ManualPipelineError(
+            step="step3_field_mappings_get",
+            message="Consulta de field-mappings não retornou put_suggestion.mappings válido.",
+            details={"status_code": status_code},
+        )
+    step_results.append(
+        {
+            "step": "step3_field_mappings_get",
+            "status_code": status_code,
+            "mappings_count": len(suggested_mappings),
+        }
+    )
 
     # Step 5
     put_payload = {"mappings": suggested_mappings}
