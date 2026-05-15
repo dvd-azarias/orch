@@ -951,7 +951,7 @@ def _resolve_generate_file_source(source: str, variables: dict[str, Any]) -> Any
     return candidate
 
 
-def _build_generate_file_resolution_scope(
+def _build_runtime_resolution_scope(
     *,
     runtime_variables: dict[str, Any],
     variables: dict[str, Any],
@@ -978,6 +978,17 @@ def _build_generate_file_resolution_scope(
                 customs.setdefault("api_body", api_body)
 
     return scope
+
+
+def _build_generate_file_resolution_scope(
+    *,
+    runtime_variables: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    return _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
 
 
 def _serialize_generate_file_rows(
@@ -1704,8 +1715,12 @@ async def _run_intelligent_agent(
 ) -> str | None:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
 
-    prompt_rendered = _render_value(params.get("user_prompt"), variables)
+    prompt_rendered = _render_value(params.get("user_prompt"), resolution_scope)
     user_prompt = "" if prompt_rendered is None else str(prompt_rendered).strip()
     if not user_prompt:
         raise WorkflowExecutionError("intelligent_agent_missing_prompt", "Componente intelligent_agent sem user_prompt.")

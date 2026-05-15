@@ -769,6 +769,60 @@ async def test_intelligent_agent_maps_schema_output_to_customs(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_intelligent_agent_resolves_runtime_placeholders_without_payload_prefix(monkeypatch) -> None:
+    runtime_variables = {
+        "variables": {
+            "payload": {
+                "file": {
+                    "content": {
+                        "data_ocorrencia": "01/01/2026",
+                    }
+                }
+            },
+            "customs": {},
+        }
+    }
+    component = {
+        "ref_id": "ia-2",
+        "component_id": "intelligent_agent",
+        "parameters": {
+            "llm": {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini"},
+            "user_prompt": "Data em runtime: {{file.content.data_ocorrencia}}",
+            "exit_function": {
+                "json": {"ok": None},
+                "output_var_name": "dados_ia",
+            },
+        },
+    }
+
+    async def fake_fetch_workspace_api_key(db_session, *, workspace_uuid):  # noqa: ANN001
+        return "workspace-key"
+
+    def fake_execute_otima_llm_prompt(**kwargs):  # noqa: ANN003
+        assert "Data em runtime: 01/01/2026" in kwargs["user_prompt"]
+        return {
+            "status_code": 200,
+            "endpoint": "http://llm.test/v1/chat/completions",
+            "raw_text": '{"ok": true}',
+            "parsed_json": {"ok": True},
+            "response_json": {},
+        }
+
+    monkeypatch.setattr(workflow_m2_service, "fetch_workspace_otima_billing_api_key", fake_fetch_workspace_api_key)
+    monkeypatch.setattr(workflow_m2_service, "execute_otima_llm_prompt", fake_execute_otima_llm_prompt)
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "ba7eb0ec-e565-447c-8c11-8f870cf72a60")
+
+    branch = await _run_intelligent_agent(
+        db_session=None,
+        component=component,
+        runtime_variables=runtime_variables,
+    )
+
+    assert branch is None
+    assert runtime_variables["variables"]["customs"]["dados_ia"]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_intelligent_agent_raises_when_llm_response_not_json(monkeypatch) -> None:
     runtime_variables = {"variables": {"payload": {"valor": 144}, "customs": {}}}
     component = {
