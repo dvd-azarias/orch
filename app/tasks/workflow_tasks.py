@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import redis
+from sqlalchemy import text
 
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
@@ -257,7 +258,9 @@ async def _reconcile_pending_channel_events_task() -> int:
             workspace_uuid = normalize_workspace_uuid(str(workspace["workspace_uuid"]))
             if scoped_workspace_uuid is not None and workspace_uuid != scoped_workspace_uuid:
                 continue
-            bind_workspace_context(workspace_uuid)
+            _safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
+            safe_schema = workspace_schema.replace('"', '""')
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
             stale_sessions = await list_stale_pending_channel_event_sessions(
                 db_session,
                 stale_seconds=settings.celery_reconcile_pending_events_stale_seconds,
