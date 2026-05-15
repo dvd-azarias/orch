@@ -8,12 +8,20 @@ from app.tasks import workflow_tasks
 
 
 class _DummySession:
-    pass
+    def __init__(self) -> None:
+        self.executed_sql: list[str] = []
+
+    async def execute(self, statement):  # type: ignore[no-untyped-def]
+        self.executed_sql.append(str(statement))
+        return None
 
 
 class _DummySessionCtx:
+    def __init__(self) -> None:
+        self.session = _DummySession()
+
     async def __aenter__(self) -> _DummySession:
-        return _DummySession()
+        return self.session
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
@@ -35,7 +43,8 @@ async def test_reconcile_pending_events_enqueues_sessions(monkeypatch: pytest.Mo
         celery_reconcile_pending_events_cooldown_seconds=30,
     )
     monkeypatch.setattr(workflow_tasks, "get_settings", lambda: settings)
-    monkeypatch.setattr(workflow_tasks, "get_session_factory", lambda: _dummy_session_factory)
+    session_ctx = _DummySessionCtx()
+    monkeypatch.setattr(workflow_tasks, "get_session_factory", lambda: (lambda: session_ctx))
     async def _list_workspaces(_db):
         return [{"workspace_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}]
 
@@ -68,6 +77,7 @@ async def test_reconcile_pending_events_enqueues_sessions(monkeypatch: pytest.Mo
             "session_id": 102,
         },
     ]
+    assert any('SET LOCAL search_path TO "ws_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"' in sql for sql in session_ctx.session.executed_sql)
 
 
 @pytest.mark.asyncio
@@ -83,7 +93,8 @@ async def test_reconcile_pending_events_respects_workspace_scope(monkeypatch: py
         celery_reconcile_pending_events_cooldown_seconds=30,
     )
     monkeypatch.setattr(workflow_tasks, "get_settings", lambda: settings)
-    monkeypatch.setattr(workflow_tasks, "get_session_factory", lambda: _dummy_session_factory)
+    session_ctx = _DummySessionCtx()
+    monkeypatch.setattr(workflow_tasks, "get_session_factory", lambda: (lambda: session_ctx))
     async def _list_workspaces(_db):
         return [
             {"workspace_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
@@ -111,3 +122,4 @@ async def test_reconcile_pending_events_respects_workspace_scope(monkeypatch: py
             "session_id": 201,
         }
     ]
+    assert any(f'SET LOCAL search_path TO "ws_{scoped_workspace}"' in sql for sql in session_ctx.session.executed_sql)
