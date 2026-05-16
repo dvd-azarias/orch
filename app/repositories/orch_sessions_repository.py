@@ -1347,10 +1347,8 @@ async def assign_whatsapp_routing_for_session(
         return None
 
     current_ani = str(row["ani"]).strip() if row["ani"] is not None else ""
-    should_increment_consumption = bool(current_ani) and not (
-        previous_linked_actuator == "whatsapp"
-        and previous_ani == current_ani
-    )
+    current_linked_actuator = str(row["linked_actuator"]).strip().lower() if row["linked_actuator"] is not None else ""
+    should_increment_consumption = bool(current_ani) and current_linked_actuator == "whatsapp"
     consumption = None
     if should_increment_consumption:
         consumption = await increment_whatsapp_rate_limit_per_flow(
