@@ -1120,6 +1120,7 @@ async def assign_whatsapp_routing_for_session(
     flow_uuid: str,
     session_id: int,
     numbers: list[str],
+    percentual_by_phone: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     normalized_numbers: list[str] = []
     seen: set[str] = set()
@@ -1220,14 +1221,47 @@ async def assign_whatsapp_routing_for_session(
         },
     )
     candidates = [dict(row) for row in candidates_result.mappings().all()]
+    percentual_map = percentual_by_phone if isinstance(percentual_by_phone, dict) else {}
 
-    def _has_remaining_limit(candidate: dict[str, Any]) -> bool:
+    def _normalized_percentual(phone: str) -> int:
+        raw = percentual_map.get(phone, 0)
+        try:
+            value = int(float(str(raw).strip()))
+        except Exception:
+            value = 0
+        if value < 0:
+            return 0
+        if value > 100:
+            return 100
+        return value
+
+    def _effective_limit(candidate: dict[str, Any]) -> int | None:
         allowed_limit_raw = candidate.get("allowed_limit")
         if allowed_limit_raw is None:
+            return None
+        allowed_limit = int(allowed_limit_raw)
+        percentual = _normalized_percentual(str(candidate.get("phone") or "").strip())
+        if percentual <= 0:
+            return allowed_limit
+        return int((allowed_limit * percentual) // 100)
+
+    def _has_remaining_limit(candidate: dict[str, Any]) -> bool:
+        effective_limit = _effective_limit(candidate)
+        if effective_limit is None:
             return True
         consumed_value = int(candidate.get("consumed") or 0)
-        allowed_limit = int(allowed_limit_raw)
-        return consumed_value < allowed_limit
+        return consumed_value < effective_limit
+
+    def _is_rate_limit_block(candidate: dict[str, Any]) -> bool:
+        phone = str(candidate.get("phone") or "").strip()
+        percentual = _normalized_percentual(phone)
+        if percentual <= 0:
+            return False
+        effective_limit = _effective_limit(candidate)
+        if effective_limit is None:
+            return False
+        consumed_value = int(candidate.get("consumed") or 0)
+        return consumed_value >= effective_limit
 
     candidate_by_phone = {str(item.get("phone")): item for item in candidates}
     chosen_phone: str | None = None
@@ -1253,6 +1287,12 @@ async def assign_whatsapp_routing_for_session(
             fallback_phone = previous_ani
         elif candidates:
             fallback_phone = str(candidates[0].get("phone") or "").strip()
+        blocked_by_rate_limit = any(_is_rate_limit_block(item) for item in candidates)
+        limit_exhausted_actuator = (
+            "whatsapp_without_limit_by_rate_limit"
+            if blocked_by_rate_limit
+            else "whatsapp_without_limit"
+        )
 
         update_result = await db_session.execute(
             text(
@@ -1260,7 +1300,7 @@ async def assign_whatsapp_routing_for_session(
                 UPDATE contact_list_members
                 SET
                     ani = :ani,
-                    linked_actuator = 'whatsapp_without_limit',
+                    linked_actuator = CAST(:linked_actuator AS linked_actuator_enum),
                     updated_at = NOW()
                 WHERE id = :member_id
                 RETURNING id, ani, linked_actuator
@@ -1269,6 +1309,7 @@ async def assign_whatsapp_routing_for_session(
             {
                 "member_id": member_id,
                 "ani": fallback_phone or None,
+                "linked_actuator": limit_exhausted_actuator,
             },
         )
         row = update_result.mappings().first()

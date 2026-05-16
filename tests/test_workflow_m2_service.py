@@ -137,10 +137,18 @@ async def test_prepare_send_with_whatsapp_contact_member_updates_runtime(monkeyp
         }
     }
 
-    async def fake_assign_whatsapp_routing_for_session(db_session, *, flow_uuid, session_id, numbers):  # noqa: ANN001
+    async def fake_assign_whatsapp_routing_for_session(  # noqa: ANN001
+        db_session,
+        *,
+        flow_uuid,
+        session_id,
+        numbers,
+        percentual_by_phone,
+    ):
         assert flow_uuid == "0300054c-5f39-4cda-ae88-fe993fd9044b"
         assert session_id == 101
         assert numbers == ["1147371485", "1147371486"]
+        assert percentual_by_phone == {"1147371485": 0, "1147371486": 0}
         return {
             "contact_list_member_id": 10,
             "ani": "1147371485",
