@@ -34,6 +34,7 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0012_create_orch_channel_events", "sql/012_create_orch_channel_events.sql"),
     ("0013_fix_orch_channel_events_dedupe_scope", "sql/013_fix_orch_channel_events_dedupe_scope.sql"),
     ("0014_create_orch_flow_aliases", "sql/014_create_orch_flow_aliases.sql"),
+    ("0015_create_orch_whatsapp_limits_tables", "sql/015_create_orch_whatsapp_limits_tables.sql"),
 ]
 
 

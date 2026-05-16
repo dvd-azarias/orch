@@ -28,6 +28,8 @@ from app.schemas.orch import (
     OrchTriggerAccepted,
     OrchUnassignSessionRequest,
     OrchUnassignSessionResponse,
+    OrchWhatsappLimitUpsertRequest,
+    OrchWhatsappLimitUpsertResponse,
     SessionExtraction,
 )
 from app.repositories.orch_flow_aliases_repository import (
@@ -35,6 +37,7 @@ from app.repositories.orch_flow_aliases_repository import (
     fetch_active_flow_alias,
     fetch_flow_alias_by_workspace_flow,
 )
+from app.repositories.orch_whatsapp_limits_repository import register_whatsapp_limit_event
 from app.repositories.orch_sessions_repository import (
     set_session_assigned_at_default,
     set_unassigned_at_by_flow_and_entity_address,
@@ -647,6 +650,51 @@ async def unassign_orch_sessions_by_entity_address(
         flow_uuid=str(flow_uuid),
         entity_address=entity_address,
         updated_count=updated_count,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/whatsapp/limits",
+    status_code=status.HTTP_200_OK,
+    response_model=OrchWhatsappLimitUpsertResponse,
+)
+async def upsert_whatsapp_limit_for_workspace(
+    workspace_uuid: UUID,
+    request: OrchWhatsappLimitUpsertRequest = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchWhatsappLimitUpsertResponse:
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+
+    phone = _read_required_text(request.phone, field_name="phone")
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        row = await register_whatsapp_limit_event(
+            db_session,
+            phone=phone,
+            allowed_limit=int(request.allowed_limit),
+        )
+
+    logger.info(
+        "whatsapp limit event registered",
+        extra={
+            "event": "orch.whatsapp.limit.registered",
+            "workspace_uuid": safe_workspace_uuid,
+            "workspace_schema": workspace_schema,
+            "phone": phone,
+            "allowed_limit": int(request.allowed_limit),
+            "limit_id": int(row["id"]),
+        },
+    )
+    return OrchWhatsappLimitUpsertResponse(
+        status="ok",
+        id=int(row["id"]),
+        phone=str(row["phone"]),
+        allowed_limit=int(row["allowed_limit"]),
+        received_from_meta_at=row["received_from_meta_at"],
+        in_use=bool(row["in_use"]),
     )
 
 

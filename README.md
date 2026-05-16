@@ -1163,6 +1163,34 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
 - atraso inicial configurável antes do vínculo:
   - `CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS` (default `20`)
 - antes de vincular (`step 7`), a task consulta `GET /v2/mailings/{mailing_id}` e só segue quando o import estiver pronto (`ingested_at` preenchido ou status final de ingestão).
+
+## Fase 13 — Limites de WhatsApp e consumo por flow
+
+### Novas tabelas por workspace
+
+- `orch_whatsapp_limits`
+  - histórico de limites recebidos por telefone;
+  - apenas 1 registro ativo por telefone (`in_use=true`);
+  - ao chegar novo limite para o mesmo telefone, o anterior vira `in_use=false`.
+
+- `orch_whatsapp_rate_limit_per_flow`
+  - consolida consumo diário por `flow_uuid` e `phone`;
+  - chave única por (`flow_uuid`, `phone`, `day`);
+  - atualizado pelo mecanismo de roteamento do `send_with_whatsapp`.
+
+### Nova rota de limite
+
+- `POST /v1/orch/{workspace_uuid}/whatsapp/limits`
+- body:
+  - `phone` (string)
+  - `allowed_limit` (inteiro >= 0)
+- efeito:
+  - grava novo evento em `orch_whatsapp_limits` com `received_from_meta_at=NOW()` e `in_use=true`;
+  - desativa (`in_use=false`) o limite ativo anterior do mesmo `phone`.
+
+### Integração no `send_with_whatsapp`
+
+- ao preparar `ani` + `linked_actuator=whatsapp` no `contact_list_members`, o ORCH também incrementa `consumed` em `orch_whatsapp_rate_limit_per_flow` para o `flow_uuid`/`phone` do dia corrente.
 - falhas HTTP da API externa fazem retry com backoff no Celery.
 
 ### Configuração envolvida

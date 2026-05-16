@@ -1171,13 +1171,17 @@ async def assign_whatsapp_routing_for_session(
             "ani": row["ani"],
             "linked_actuator": row["linked_actuator"],
             "mode": "linked_actuator_only",
+            "consumption": None,
         }
 
     result = await db_session.execute(
         text(
             """
             WITH target_member AS (
-                SELECT clm.id
+                SELECT
+                    clm.id,
+                    clm.ani AS previous_ani,
+                    clm.linked_actuator AS previous_linked_actuator
                 FROM contact_list_members clm
                 JOIN orch_sessions os
                   ON os.entity = clm.contact_identifier
@@ -1231,7 +1235,12 @@ async def assign_whatsapp_routing_for_session(
                 updated_at = NOW()
             FROM target_member tm, chosen
             WHERE clm.id = tm.id
-            RETURNING clm.id, clm.ani, clm.linked_actuator
+            RETURNING
+                clm.id,
+                clm.ani,
+                clm.linked_actuator,
+                tm.previous_ani,
+                tm.previous_linked_actuator
             """
         ),
         {
@@ -1243,10 +1252,74 @@ async def assign_whatsapp_routing_for_session(
     row = result.mappings().first()
     if row is None:
         return None
+    current_ani = str(row["ani"]).strip() if row["ani"] is not None else ""
+    previous_ani = str(row["previous_ani"]).strip() if row["previous_ani"] is not None else ""
+    previous_linked_actuator = (
+        str(row["previous_linked_actuator"]).strip().lower()
+        if row["previous_linked_actuator"] is not None
+        else ""
+    )
+    should_increment_consumption = bool(current_ani) and not (
+        previous_linked_actuator == "whatsapp"
+        and previous_ani == current_ani
+    )
+    consumption = None
+    if should_increment_consumption:
+        consumption = await increment_whatsapp_rate_limit_per_flow(
+            db_session,
+            flow_uuid=flow_uuid,
+            phone=current_ani,
+        )
     return {
         "contact_list_member_id": int(row["id"]),
         "ani": row["ani"],
         "linked_actuator": row["linked_actuator"],
         "mode": "balanced_ani",
         "numbers_pool": normalized_numbers,
+        "consumption": consumption,
     }
+
+
+async def increment_whatsapp_rate_limit_per_flow(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    phone: str,
+) -> dict[str, Any]:
+    result = await db_session.execute(
+        text(
+            """
+            INSERT INTO orch_whatsapp_rate_limit_per_flow (
+                flow_uuid,
+                phone,
+                consumed,
+                day,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                CAST(:flow_uuid AS uuid),
+                :phone,
+                1,
+                CURRENT_DATE,
+                NOW(),
+                NOW()
+            )
+            ON CONFLICT (flow_uuid, phone, day)
+            DO UPDATE
+            SET
+                consumed = orch_whatsapp_rate_limit_per_flow.consumed + 1,
+                updated_at = NOW()
+            RETURNING
+                flow_uuid::text AS flow_uuid,
+                phone,
+                consumed,
+                day
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "phone": str(phone).strip(),
+        },
+    )
+    return dict(result.mappings().one())
