@@ -25,6 +25,7 @@ from app.services.workflow_m2_service import (
     _run_intelligent_agent,
     _run_process_whatsapp_response,
     _run_set_variables,
+    _set_synthetic_whatsapp_status_payload,
     _set_whatsapp_last_preempt_signature,
     _set_whatsapp_resume_cursor,
     _should_preempt_to_whatsapp_resume_cursor,
@@ -129,6 +130,16 @@ def test_is_send_with_whatsapp_limit_exhausted() -> None:
     assert _is_send_with_whatsapp_limit_exhausted({"linked_actuator": "whatsapp_without_limit_by_rate_limit"}) is True
     assert _is_send_with_whatsapp_limit_exhausted({"linked_actuator": "whatsapp"}) is False
     assert _is_send_with_whatsapp_limit_exhausted(None) is False
+
+
+def test_set_synthetic_whatsapp_status_payload_sets_limit_reached() -> None:
+    runtime_variables: dict[str, object] = {}
+    _set_synthetic_whatsapp_status_payload(
+        runtime_variables,
+        status="limit_reached",
+        reason="send_with_whatsapp_limit_exhausted",
+    )
+    assert _extract_whatsapp_status_from_runtime(runtime_variables) == "limit_reached"
 
 
 @pytest.mark.asyncio

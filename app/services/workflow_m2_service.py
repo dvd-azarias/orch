@@ -365,6 +365,36 @@ def _extract_whatsapp_status_from_runtime(runtime_variables: dict[str, Any]) -> 
     return _extract_whatsapp_status_from_payload(variables.get("payload"))
 
 
+def _set_synthetic_whatsapp_status_payload(
+    runtime_variables: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+) -> None:
+    runtime_variables["last_payload"] = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "statuses": [
+                                {
+                                    "status": status,
+                                    "id": f"orch.synthetic.{status}",
+                                    "timestamp": str(int(datetime.now(timezone.utc).timestamp())),
+                                    "recipient_id": "",
+                                    "origin_reason": reason,
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+
+
 def _run_process_whatsapp_response(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
@@ -2222,7 +2252,11 @@ async def execute_workflow_m2_for_session(
                         )
                         if _is_send_with_whatsapp_limit_exhausted(assignment):
                             _clear_blocking_execution(runtime_variables)
-                            branch_label = "limit_reached"
+                            _set_synthetic_whatsapp_status_payload(
+                                runtime_variables,
+                                status="limit_reached",
+                                reason="send_with_whatsapp_limit_exhausted",
+                            )
                             should_block_execution = False
                     if should_block_execution:
                         resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
