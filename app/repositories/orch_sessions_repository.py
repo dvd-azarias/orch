@@ -1136,34 +1136,56 @@ async def assign_whatsapp_routing_for_session(
         {"lock_key": lock_key},
     )
 
+    target_result = await db_session.execute(
+        text(
+            """
+            SELECT
+                clm.id,
+                clm.ani AS previous_ani,
+                clm.linked_actuator AS previous_linked_actuator
+            FROM contact_list_members clm
+            JOIN orch_sessions os
+              ON os.entity = clm.contact_identifier
+            WHERE os.id = :session_id
+              AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+              AND os.unassigned_at IS NULL
+              AND clm.unassigned_at IS NULL
+            ORDER BY clm.created_at DESC, clm.id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+        },
+    )
+    target = target_result.mappings().first()
+    if target is None:
+        return None
+
+    member_id = int(target["id"])
+    previous_ani = str(target["previous_ani"]).strip() if target["previous_ani"] is not None else ""
+    previous_linked_actuator = (
+        str(target["previous_linked_actuator"]).strip().lower()
+        if target["previous_linked_actuator"] is not None
+        else ""
+    )
+
     if not normalized_numbers:
-        result = await db_session.execute(
+        update_result = await db_session.execute(
             text(
                 """
-                WITH target_member AS (
-                    SELECT clm.id
-                    FROM contact_list_members clm
-                    JOIN orch_sessions os
-                      ON os.entity = clm.contact_identifier
-                    WHERE os.id = :session_id
-                      AND os.flow_uuid = CAST(:flow_uuid AS uuid)
-                      AND os.unassigned_at IS NULL
-                      AND clm.unassigned_at IS NULL
-                    ORDER BY clm.created_at DESC, clm.id DESC
-                    LIMIT 1
-                )
-                UPDATE contact_list_members clm
+                UPDATE contact_list_members
                 SET
                     linked_actuator = 'whatsapp',
                     updated_at = NOW()
-                FROM target_member tm
-                WHERE clm.id = tm.id
-                RETURNING clm.id, clm.ani, clm.linked_actuator
+                WHERE id = :member_id
+                RETURNING id, ani, linked_actuator
                 """
             ),
-            {"flow_uuid": flow_uuid, "session_id": session_id},
+            {"member_id": member_id},
         )
-        row = result.mappings().first()
+        row = update_result.mappings().first()
         if row is None:
             return None
         return {
@@ -1174,91 +1196,116 @@ async def assign_whatsapp_routing_for_session(
             "consumption": None,
         }
 
-    result = await db_session.execute(
+    candidates_result = await db_session.execute(
         text(
             """
-            WITH target_member AS (
-                SELECT
-                    clm.id,
-                    clm.ani AS previous_ani,
-                    clm.linked_actuator AS previous_linked_actuator
-                FROM contact_list_members clm
-                JOIN orch_sessions os
-                  ON os.entity = clm.contact_identifier
-                WHERE os.id = :session_id
-                  AND os.flow_uuid = CAST(:flow_uuid AS uuid)
-                  AND os.unassigned_at IS NULL
-                  AND clm.unassigned_at IS NULL
-                ORDER BY clm.created_at DESC, clm.id DESC
-                LIMIT 1
-            ),
-            current_assignment AS (
-                SELECT clm.ani AS chosen_ani
-                FROM contact_list_members clm
-                JOIN target_member tm
-                  ON tm.id = clm.id
-                WHERE clm.linked_actuator = 'whatsapp'
-                  AND clm.ani = ANY(CAST(:numbers AS text[]))
-            ),
-            balanced_candidate AS (
-                SELECT pool.number AS chosen_ani
-                FROM UNNEST(CAST(:numbers AS text[])) AS pool(number)
-                LEFT JOIN (
-                    SELECT clm.ani, COUNT(*) AS used_count
-                    FROM contact_list_members clm
-                    JOIN orch_sessions os
-                      ON os.entity = clm.contact_identifier
-                    WHERE os.flow_uuid = CAST(:flow_uuid AS uuid)
-                      AND os.unassigned_at IS NULL
-                      AND clm.unassigned_at IS NULL
-                      AND clm.linked_actuator = 'whatsapp'
-                      AND clm.ani = ANY(CAST(:numbers AS text[]))
-                    GROUP BY clm.ani
-                ) usage_counts
-                  ON usage_counts.ani = pool.number
-                ORDER BY COALESCE(usage_counts.used_count, 0) ASC, pool.number ASC
-                LIMIT 1
-            ),
-            chosen AS (
-                SELECT chosen_ani
-                FROM current_assignment
-                UNION ALL
-                SELECT chosen_ani
-                FROM balanced_candidate
-                WHERE NOT EXISTS (SELECT 1 FROM current_assignment)
-                LIMIT 1
-            )
-            UPDATE contact_list_members clm
-            SET
-                ani = chosen.chosen_ani,
-                linked_actuator = 'whatsapp',
-                updated_at = NOW()
-            FROM target_member tm, chosen
-            WHERE clm.id = tm.id
-            RETURNING
-                clm.id,
-                clm.ani,
-                clm.linked_actuator,
-                tm.previous_ani,
-                tm.previous_linked_actuator
+            SELECT
+                pool.number AS phone,
+                COALESCE(rate.consumed, 0) AS consumed,
+                lim.allowed_limit AS allowed_limit
+            FROM UNNEST(CAST(:numbers AS text[])) AS pool(number)
+            LEFT JOIN orch_whatsapp_rate_limit_per_flow rate
+              ON rate.flow_uuid = CAST(:flow_uuid AS uuid)
+             AND rate.phone = pool.number
+             AND rate.day = CURRENT_DATE
+            LEFT JOIN orch_whatsapp_limits lim
+              ON lim.phone = pool.number
+             AND lim.in_use = TRUE
+            ORDER BY COALESCE(rate.consumed, 0) ASC, pool.number ASC
             """
         ),
         {
-            "flow_uuid": flow_uuid,
-            "session_id": session_id,
             "numbers": normalized_numbers,
+            "flow_uuid": flow_uuid,
         },
     )
-    row = result.mappings().first()
+    candidates = [dict(row) for row in candidates_result.mappings().all()]
+
+    def _has_remaining_limit(candidate: dict[str, Any]) -> bool:
+        allowed_limit_raw = candidate.get("allowed_limit")
+        if allowed_limit_raw is None:
+            return True
+        consumed_value = int(candidate.get("consumed") or 0)
+        allowed_limit = int(allowed_limit_raw)
+        return consumed_value < allowed_limit
+
+    candidate_by_phone = {str(item.get("phone")): item for item in candidates}
+    chosen_phone: str | None = None
+    mode = "balanced_ani"
+
+    if previous_linked_actuator == "whatsapp" and previous_ani in candidate_by_phone:
+        previous_candidate = candidate_by_phone[previous_ani]
+        if _has_remaining_limit(previous_candidate):
+            chosen_phone = previous_ani
+            mode = "reuse_previous_with_limit"
+
+    if chosen_phone is None:
+        for item in candidates:
+            if _has_remaining_limit(item):
+                chosen_phone = str(item.get("phone") or "").strip()
+                if chosen_phone:
+                    mode = "balanced_with_limit"
+                    break
+
+    if chosen_phone is None:
+        fallback_phone = ""
+        if previous_ani in candidate_by_phone:
+            fallback_phone = previous_ani
+        elif candidates:
+            fallback_phone = str(candidates[0].get("phone") or "").strip()
+
+        update_result = await db_session.execute(
+            text(
+                """
+                UPDATE contact_list_members
+                SET
+                    ani = :ani,
+                    linked_actuator = 'whatsapp_withoud_limit',
+                    updated_at = NOW()
+                WHERE id = :member_id
+                RETURNING id, ani, linked_actuator
+                """
+            ),
+            {
+                "member_id": member_id,
+                "ani": fallback_phone or None,
+            },
+        )
+        row = update_result.mappings().first()
+        if row is None:
+            return None
+        return {
+            "contact_list_member_id": int(row["id"]),
+            "ani": row["ani"],
+            "linked_actuator": row["linked_actuator"],
+            "mode": "all_numbers_without_limit",
+            "numbers_pool": normalized_numbers,
+            "consumption": None,
+            "limit_candidates": candidates,
+        }
+
+    update_result = await db_session.execute(
+        text(
+            """
+            UPDATE contact_list_members
+            SET
+                ani = :ani,
+                linked_actuator = 'whatsapp',
+                updated_at = NOW()
+            WHERE id = :member_id
+            RETURNING id, ani, linked_actuator
+            """
+        ),
+        {
+            "member_id": member_id,
+            "ani": chosen_phone,
+        },
+    )
+    row = update_result.mappings().first()
     if row is None:
         return None
+
     current_ani = str(row["ani"]).strip() if row["ani"] is not None else ""
-    previous_ani = str(row["previous_ani"]).strip() if row["previous_ani"] is not None else ""
-    previous_linked_actuator = (
-        str(row["previous_linked_actuator"]).strip().lower()
-        if row["previous_linked_actuator"] is not None
-        else ""
-    )
     should_increment_consumption = bool(current_ani) and not (
         previous_linked_actuator == "whatsapp"
         and previous_ani == current_ani
@@ -1274,9 +1321,10 @@ async def assign_whatsapp_routing_for_session(
         "contact_list_member_id": int(row["id"]),
         "ani": row["ani"],
         "linked_actuator": row["linked_actuator"],
-        "mode": "balanced_ani",
+        "mode": mode,
         "numbers_pool": normalized_numbers,
         "consumption": consumption,
+        "limit_candidates": candidates,
     }
 
 
