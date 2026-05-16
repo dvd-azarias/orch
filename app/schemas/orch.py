@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SessionExtraction(BaseModel):
@@ -134,3 +134,20 @@ class OrchFlowAliasCreateResponse(BaseModel):
     api_version: str = "v1"
     status: str
     item: OrchFlowAliasSummary
+
+
+class OrchWhatsappLimitUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str
+    allowed_limit: int = Field(ge=0)
+
+
+class OrchWhatsappLimitUpsertResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    id: int
+    phone: str
+    allowed_limit: int
+    received_from_meta_at: datetime
+    in_use: bool
