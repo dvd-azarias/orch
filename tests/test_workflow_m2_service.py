@@ -12,6 +12,7 @@ from app.services.workflow_m2_service import (
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
     _extract_send_with_whatsapp_numbers,
+    _is_send_with_whatsapp_limit_exhausted,
     _mark_blocking_execution,
     _prepare_send_with_whatsapp_contact_member,
     _read_blocking_stop_reason,
@@ -121,6 +122,13 @@ def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -
         }
     }
     assert _extract_send_with_whatsapp_numbers(component) == ["1147371485", "1147371486"]
+
+
+def test_is_send_with_whatsapp_limit_exhausted() -> None:
+    assert _is_send_with_whatsapp_limit_exhausted({"linked_actuator": "whatsapp_without_limit"}) is True
+    assert _is_send_with_whatsapp_limit_exhausted({"linked_actuator": "whatsapp_without_limit_by_rate_limit"}) is True
+    assert _is_send_with_whatsapp_limit_exhausted({"linked_actuator": "whatsapp"}) is False
+    assert _is_send_with_whatsapp_limit_exhausted(None) is False
 
 
 @pytest.mark.asyncio
