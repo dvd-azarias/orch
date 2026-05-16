@@ -1322,4 +1322,8 @@ async def increment_whatsapp_rate_limit_per_flow(
             "phone": str(phone).strip(),
         },
     )
-    return dict(result.mappings().one())
+    row = dict(result.mappings().one())
+    raw_day = row.get("day")
+    if raw_day is not None and hasattr(raw_day, "isoformat"):
+        row["day"] = raw_day.isoformat()
+    return row
