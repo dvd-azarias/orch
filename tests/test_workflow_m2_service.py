@@ -11,7 +11,9 @@ from app.services.workflow_m2_service import (
     _compute_frozen_until,
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
+    _extract_send_with_whatsapp_numbers,
     _mark_blocking_execution,
+    _prepare_send_with_whatsapp_contact_member,
     _read_blocking_stop_reason,
     _read_whatsapp_last_preempt_signature,
     _read_whatsapp_resume_cursor,
@@ -101,6 +103,68 @@ def test_run_process_whatsapp_response_maps_status_to_branch() -> None:
     assert branch == "read"
     assert runtime_variables["whatsapp_last_response"]["status"] == "read"
     assert runtime_variables["whatsapp_last_response"]["branch"] == "read"
+
+
+def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -> None:
+    component = {
+        "parameters": {
+            "whatsapp_numbers_config": {
+                "numbers": [
+                    {"number": "1147371485"},
+                    {"number": "1147371485"},
+                    {"number": "1147371486"},
+                    {"number": "   "},
+                    {},
+                    "invalid",
+                ]
+            }
+        }
+    }
+    assert _extract_send_with_whatsapp_numbers(component) == ["1147371485", "1147371486"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_with_whatsapp_contact_member_updates_runtime(monkeypatch) -> None:
+    runtime_variables: dict[str, object] = {}
+    component = {
+        "parameters": {
+            "whatsapp_numbers_config": {
+                "numbers": [
+                    {"number": "1147371485"},
+                    {"number": "1147371486"},
+                ]
+            }
+        }
+    }
+
+    async def fake_assign_whatsapp_routing_for_session(db_session, *, flow_uuid, session_id, numbers):  # noqa: ANN001
+        assert flow_uuid == "0300054c-5f39-4cda-ae88-fe993fd9044b"
+        assert session_id == 101
+        assert numbers == ["1147371485", "1147371486"]
+        return {
+            "contact_list_member_id": 10,
+            "ani": "1147371485",
+            "linked_actuator": "whatsapp",
+            "mode": "balanced_ani",
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_whatsapp_routing_for_session",
+        fake_assign_whatsapp_routing_for_session,
+    )
+
+    await _prepare_send_with_whatsapp_contact_member(
+        db_session=None,
+        flow_uuid="0300054c-5f39-4cda-ae88-fe993fd9044b",
+        session_id=101,
+        component=component,
+        runtime_variables=runtime_variables,
+    )
+
+    route_data = runtime_variables["send_with_whatsapp_routing"]
+    assert route_data["numbers"] == ["1147371485", "1147371486"]
+    assert route_data["assignment"]["ani"] == "1147371485"
 
 
 def test_should_resume_whatsapp_blocking_execution_only_when_status_available() -> None:

@@ -27,7 +27,11 @@ from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_channel_events_repository import claim_next_pending_channel_event, has_pending_channel_events
-from app.repositories.orch_sessions_repository import fetch_session_workflow_state, replace_session_workflow_state
+from app.repositories.orch_sessions_repository import (
+    assign_whatsapp_routing_for_session,
+    fetch_session_workflow_state,
+    replace_session_workflow_state,
+)
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.otima_llm_service import execute_otima_llm_prompt
@@ -372,6 +376,46 @@ def _run_process_whatsapp_response(
         "branch": branch,
     }
     return branch
+
+
+def _extract_send_with_whatsapp_numbers(component: dict[str, Any]) -> list[str]:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    config = params.get("whatsapp_numbers_config") if isinstance(params.get("whatsapp_numbers_config"), dict) else {}
+    rows = config.get("numbers") if isinstance(config.get("numbers"), list) else []
+
+    numbers: list[str] = []
+    seen: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("number") or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        numbers.append(value)
+    return numbers
+
+
+async def _prepare_send_with_whatsapp_contact_member(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> None:
+    numbers = _extract_send_with_whatsapp_numbers(component)
+    assignment = await assign_whatsapp_routing_for_session(
+        db_session,
+        flow_uuid=flow_uuid,
+        session_id=session_id,
+        numbers=numbers,
+    )
+    runtime_variables["send_with_whatsapp_routing"] = {
+        "numbers": numbers,
+        "assignment": assignment,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _read_status_order_wait_deadline(
@@ -2136,6 +2180,14 @@ async def execute_workflow_m2_for_session(
                         runtime_variables=runtime_variables,
                     )
                 elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
+                    if kind == "send_with_whatsapp":
+                        await _prepare_send_with_whatsapp_contact_member(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
                     resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
                     last_card_uuid = next_card_uuid
                     next_card_uuid = resolved_next

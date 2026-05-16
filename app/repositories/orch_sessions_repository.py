@@ -1112,3 +1112,141 @@ async def set_unassigned_at_by_flow_and_entity_address(
         },
     )
     return int(result.rowcount or 0)
+
+
+async def assign_whatsapp_routing_for_session(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+    numbers: list[str],
+) -> dict[str, Any] | None:
+    normalized_numbers: list[str] = []
+    seen: set[str] = set()
+    for raw in numbers:
+        value = str(raw).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized_numbers.append(value)
+
+    lock_key = f"whatsapp-routing|{flow_uuid}"
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": lock_key},
+    )
+
+    if not normalized_numbers:
+        result = await db_session.execute(
+            text(
+                """
+                WITH target_member AS (
+                    SELECT clm.id
+                    FROM contact_list_members clm
+                    JOIN orch_sessions os
+                      ON os.entity = clm.contact_identifier
+                    WHERE os.id = :session_id
+                      AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                      AND os.unassigned_at IS NULL
+                      AND clm.unassigned_at IS NULL
+                    ORDER BY clm.created_at DESC, clm.id DESC
+                    LIMIT 1
+                )
+                UPDATE contact_list_members clm
+                SET
+                    linked_actuator = 'whatsapp',
+                    updated_at = NOW()
+                FROM target_member tm
+                WHERE clm.id = tm.id
+                RETURNING clm.id, clm.ani, clm.linked_actuator
+                """
+            ),
+            {"flow_uuid": flow_uuid, "session_id": session_id},
+        )
+        row = result.mappings().first()
+        if row is None:
+            return None
+        return {
+            "contact_list_member_id": int(row["id"]),
+            "ani": row["ani"],
+            "linked_actuator": row["linked_actuator"],
+            "mode": "linked_actuator_only",
+        }
+
+    result = await db_session.execute(
+        text(
+            """
+            WITH target_member AS (
+                SELECT clm.id
+                FROM contact_list_members clm
+                JOIN orch_sessions os
+                  ON os.entity = clm.contact_identifier
+                WHERE os.id = :session_id
+                  AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                  AND os.unassigned_at IS NULL
+                  AND clm.unassigned_at IS NULL
+                ORDER BY clm.created_at DESC, clm.id DESC
+                LIMIT 1
+            ),
+            current_assignment AS (
+                SELECT clm.ani AS chosen_ani
+                FROM contact_list_members clm
+                JOIN target_member tm
+                  ON tm.id = clm.id
+                WHERE clm.linked_actuator = 'whatsapp'
+                  AND clm.ani = ANY(CAST(:numbers AS text[]))
+            ),
+            balanced_candidate AS (
+                SELECT pool.number AS chosen_ani
+                FROM UNNEST(CAST(:numbers AS text[])) AS pool(number)
+                LEFT JOIN (
+                    SELECT clm.ani, COUNT(*) AS used_count
+                    FROM contact_list_members clm
+                    JOIN orch_sessions os
+                      ON os.entity = clm.contact_identifier
+                    WHERE os.flow_uuid = CAST(:flow_uuid AS uuid)
+                      AND os.unassigned_at IS NULL
+                      AND clm.unassigned_at IS NULL
+                      AND clm.linked_actuator = 'whatsapp'
+                      AND clm.ani = ANY(CAST(:numbers AS text[]))
+                    GROUP BY clm.ani
+                ) usage_counts
+                  ON usage_counts.ani = pool.number
+                ORDER BY COALESCE(usage_counts.used_count, 0) ASC, pool.number ASC
+                LIMIT 1
+            ),
+            chosen AS (
+                SELECT chosen_ani
+                FROM current_assignment
+                UNION ALL
+                SELECT chosen_ani
+                FROM balanced_candidate
+                WHERE NOT EXISTS (SELECT 1 FROM current_assignment)
+                LIMIT 1
+            )
+            UPDATE contact_list_members clm
+            SET
+                ani = chosen.chosen_ani,
+                linked_actuator = 'whatsapp',
+                updated_at = NOW()
+            FROM target_member tm, chosen
+            WHERE clm.id = tm.id
+            RETURNING clm.id, clm.ani, clm.linked_actuator
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+            "numbers": normalized_numbers,
+        },
+    )
+    row = result.mappings().first()
+    if row is None:
+        return None
+    return {
+        "contact_list_member_id": int(row["id"]),
+        "ani": row["ani"],
+        "linked_actuator": row["linked_actuator"],
+        "mode": "balanced_ani",
+        "numbers_pool": normalized_numbers,
+    }
