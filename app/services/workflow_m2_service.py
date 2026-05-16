@@ -378,12 +378,13 @@ def _run_process_whatsapp_response(
     return branch
 
 
-def _extract_send_with_whatsapp_numbers(component: dict[str, Any]) -> list[str]:
+def _extract_send_with_whatsapp_number_policies(component: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     config = params.get("whatsapp_numbers_config") if isinstance(params.get("whatsapp_numbers_config"), dict) else {}
     rows = config.get("numbers") if isinstance(config.get("numbers"), list) else []
 
     numbers: list[str] = []
+    percentual_by_phone: dict[str, int] = {}
     seen: set[str] = set()
     for item in rows:
         if not isinstance(item, dict):
@@ -391,8 +392,24 @@ def _extract_send_with_whatsapp_numbers(component: dict[str, Any]) -> list[str]:
         value = str(item.get("number") or "").strip()
         if not value or value in seen:
             continue
+        percentual_raw = item.get("percentual_consumo")
+        percentual_value = 0
+        try:
+            percentual_value = int(float(str(percentual_raw).strip()))
+        except Exception:
+            percentual_value = 0
+        if percentual_value < 0:
+            percentual_value = 0
+        if percentual_value > 100:
+            percentual_value = 100
         seen.add(value)
         numbers.append(value)
+        percentual_by_phone[value] = percentual_value
+    return numbers, percentual_by_phone
+
+
+def _extract_send_with_whatsapp_numbers(component: dict[str, Any]) -> list[str]:
+    numbers, _ = _extract_send_with_whatsapp_number_policies(component)
     return numbers
 
 
@@ -404,15 +421,17 @@ async def _prepare_send_with_whatsapp_contact_member(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
 ) -> None:
-    numbers = _extract_send_with_whatsapp_numbers(component)
+    numbers, percentual_by_phone = _extract_send_with_whatsapp_number_policies(component)
     assignment = await assign_whatsapp_routing_for_session(
         db_session,
         flow_uuid=flow_uuid,
         session_id=session_id,
         numbers=numbers,
+        percentual_by_phone=percentual_by_phone,
     )
     runtime_variables["send_with_whatsapp_routing"] = {
         "numbers": numbers,
+        "percentual_by_phone": percentual_by_phone,
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
