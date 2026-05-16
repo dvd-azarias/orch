@@ -1260,7 +1260,7 @@ async def assign_whatsapp_routing_for_session(
                 UPDATE contact_list_members
                 SET
                     ani = :ani,
-                    linked_actuator = 'whatsapp_withoud_limit',
+                    linked_actuator = 'whatsapp_without_limit',
                     updated_at = NOW()
                 WHERE id = :member_id
                 RETURNING id, ani, linked_actuator

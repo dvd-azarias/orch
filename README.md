@@ -1194,7 +1194,7 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
 - regra de saldo:
   - o ORCH avalia os números configurados e tenta escolher um `phone` com limite disponível (`consumed < allowed_limit` do registro `in_use=true`);
   - se o número inicialmente candidato estiver sem saldo, tenta os demais números configurados;
-  - só marca `linked_actuator=whatsapp_withoud_limit` quando todos os números elegíveis estiverem sem saldo.
+  - só marca `linked_actuator=whatsapp_without_limit` quando todos os números elegíveis estiverem sem saldo.
 - falhas HTTP da API externa fazem retry com backoff no Celery.
 
 ### Configuração envolvida
