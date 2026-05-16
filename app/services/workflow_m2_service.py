@@ -62,6 +62,10 @@ WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
     "failed": "failed",
     "limit_reached": "limit_reached",
 }
+SEND_WITH_WHATSAPP_LIMIT_EXHAUSTED_ACTUATORS = {
+    "whatsapp_without_limit",
+    "whatsapp_without_limit_by_rate_limit",
+}
 
 WHATSAPP_BLOCKING_STOP_REASONS = {
     "blocked_send_with_whatsapp",
@@ -420,7 +424,7 @@ async def _prepare_send_with_whatsapp_contact_member(
     session_id: int,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
-) -> None:
+) -> dict[str, Any] | None:
     numbers, percentual_by_phone = _extract_send_with_whatsapp_number_policies(component)
     assignment = await assign_whatsapp_routing_for_session(
         db_session,
@@ -435,6 +439,14 @@ async def _prepare_send_with_whatsapp_contact_member(
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    return assignment
+
+
+def _is_send_with_whatsapp_limit_exhausted(assignment: dict[str, Any] | None) -> bool:
+    if not isinstance(assignment, dict):
+        return False
+    linked_actuator = str(assignment.get("linked_actuator") or "").strip().lower()
+    return linked_actuator in SEND_WITH_WHATSAPP_LIMIT_EXHAUSTED_ACTUATORS
 
 
 def _read_status_order_wait_deadline(
@@ -2199,66 +2211,72 @@ async def execute_workflow_m2_for_session(
                         runtime_variables=runtime_variables,
                     )
                 elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
+                    should_block_execution = True
                     if kind == "send_with_whatsapp":
-                        await _prepare_send_with_whatsapp_contact_member(
+                        assignment = await _prepare_send_with_whatsapp_contact_member(
                             db_session=db_session,
                             flow_uuid=flow_uuid,
                             session_id=session_id,
                             component=component,
                             runtime_variables=runtime_variables,
                         )
-                    resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
-                    last_card_uuid = next_card_uuid
-                    next_card_uuid = resolved_next
-                    executed_steps += 1
-                    _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
-                    _mark_blocking_execution(runtime_variables, stopped_reason=blocking_stop_reason)
+                        if _is_send_with_whatsapp_limit_exhausted(assignment):
+                            _clear_blocking_execution(runtime_variables)
+                            branch_label = "limit_reached"
+                            should_block_execution = False
+                    if should_block_execution:
+                        resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
+                        last_card_uuid = next_card_uuid
+                        next_card_uuid = resolved_next
+                        executed_steps += 1
+                        _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                        _mark_blocking_execution(runtime_variables, stopped_reason=blocking_stop_reason)
 
-                    await replace_session_workflow_state(
-                        db_session,
-                        session_id=session_id,
-                        runtime_variables=runtime_variables,
-                        last_card_uuid=_to_uuid_or_none(last_card_uuid),
-                        next_card_uuid=_to_uuid_or_none(next_card_uuid),
-                    )
-                    step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
-                    step_finished_at = datetime.now(timezone.utc)
-                    _append_metric(
-                        metric_type="card",
-                        status="success",
-                        started_at=step_started_at,
-                        finished_at=step_finished_at,
-                        latency_ms=step_latency_ms,
-                        stopped_reason=blocking_stop_reason,
-                        step_index=executed_steps,
-                        card_cursor=last_card_uuid,
-                        component_kind_value=kind,
-                        details={"next_card_uuid": next_card_uuid},
-                    )
-                    logger.info(
-                        "workflow m2 card blocking",
-                        extra={
-                            "event": "orch.workflow.m2.card.blocking",
-                            "flow_uuid": flow_uuid,
-                            "session_id": session_id,
-                            "session_uuid": session_uuid_for_metrics,
-                            "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
-                            "component_kind": kind,
-                            "step_index": executed_steps,
-                            "latency_ms": round(step_latency_ms, 2),
-                            "stopped_reason": blocking_stop_reason,
-                            "metric_type": "card",
-                        },
-                    )
-                    return await _finalize(
-                        WorkflowExecutionResult(
-                            True,
-                            executed_steps,
-                            blocking_stop_reason,
-                            last_card_uuid,
-                            next_card_uuid,
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=_to_uuid_or_none(next_card_uuid),
                         )
-                    )
+                        step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="success",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=step_latency_ms,
+                            stopped_reason=blocking_stop_reason,
+                            step_index=executed_steps,
+                            card_cursor=last_card_uuid,
+                            component_kind_value=kind,
+                            details={"next_card_uuid": next_card_uuid},
+                        )
+                        logger.info(
+                            "workflow m2 card blocking",
+                            extra={
+                                "event": "orch.workflow.m2.card.blocking",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
+                                "component_kind": kind,
+                                "step_index": executed_steps,
+                                "latency_ms": round(step_latency_ms, 2),
+                                "stopped_reason": blocking_stop_reason,
+                                "metric_type": "card",
+                            },
+                        )
+                        return await _finalize(
+                            WorkflowExecutionResult(
+                                True,
+                                executed_steps,
+                                blocking_stop_reason,
+                                last_card_uuid,
+                                next_card_uuid,
+                            )
+                        )
                 elif kind in {"wait", "scheduling_moment", "scheduling-moment"}:
                     resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
                     frozen_until = _compute_frozen_until(component, runtime_variables)
