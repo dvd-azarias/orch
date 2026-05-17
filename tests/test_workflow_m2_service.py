@@ -12,8 +12,10 @@ from app.services.workflow_m2_service import (
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
     _extract_send_with_whatsapp_numbers,
+    _inject_contact_runtime_scope,
     _is_send_with_whatsapp_limit_exhausted,
     _mark_blocking_execution,
+    _normalize_contact_extra_data,
     _prepare_send_with_whatsapp_contact_member,
     _read_blocking_stop_reason,
     _read_whatsapp_last_preempt_signature,
@@ -161,6 +163,40 @@ def test_set_synthetic_whatsapp_status_payload_sets_limit_reached() -> None:
         reason="send_with_whatsapp_limit_exhausted",
     )
     assert _extract_whatsapp_status_from_runtime(runtime_variables) == "limit_reached"
+
+
+def test_normalize_contact_extra_data_accepts_dict_and_json_string() -> None:
+    assert _normalize_contact_extra_data({"data_ocorrencia": "01/01/2026"}) == {"data_ocorrencia": "01/01/2026"}
+    assert _normalize_contact_extra_data('{"data_ocorrencia":"10/05/2026"}') == {"data_ocorrencia": "10/05/2026"}
+    assert _normalize_contact_extra_data("") == {}
+
+
+def test_inject_contact_runtime_scope_sets_contact_extra() -> None:
+    runtime_variables: dict[str, object] = {}
+    _inject_contact_runtime_scope(
+        runtime_variables=runtime_variables,
+        contact_row={
+            "contact_list_member_id": 10196,
+            "contact_identifier": "70000700001",
+            "contact_name": "Cliente 0001",
+            "contact_full_name": "Cliente 0001",
+            "contact_gender": None,
+            "contact_country": None,
+            "contact_province": None,
+            "contact_city": None,
+            "contact_birth_date": None,
+            "contact_age": None,
+            "contact_channel_type": "voice",
+            "contact_channel_label": "tel1",
+            "contact_channel_address": "5511900700001",
+            "contact_channel_extra_data": {"data_ocorrencia": "01/01/2026"},
+            "person_uuid": "0254807a-840b-4072-93a8-4193d5626fe7",
+        },
+    )
+    variables = runtime_variables["variables"]
+    assert variables["contact"]["identifier"] == "70000700001"
+    assert variables["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
+    assert variables["customs"]["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
 
 
 @pytest.mark.asyncio

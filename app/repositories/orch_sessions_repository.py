@@ -1425,6 +1425,51 @@ async def assign_dialer_routing_for_session(
     }
 
 
+async def fetch_contact_runtime_context_for_session(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                clm.id AS contact_list_member_id,
+                clm.contact_identifier,
+                clm.contact_name,
+                clm.contact_full_name,
+                clm.contact_gender,
+                clm.contact_country,
+                clm.contact_province,
+                clm.contact_city,
+                clm.contact_birth_date,
+                clm.contact_age,
+                clm.contact_channel_type,
+                clm.contact_channel_label,
+                clm.contact_channel_address,
+                clm.contact_channel_extra_data,
+                clm.person_uuid::text AS person_uuid
+            FROM contact_list_members clm
+            JOIN orch_sessions os
+              ON os.entity = clm.contact_identifier
+            WHERE os.id = :session_id
+              AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+              AND os.unassigned_at IS NULL
+              AND clm.unassigned_at IS NULL
+            ORDER BY clm.created_at DESC, clm.id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
 async def increment_whatsapp_rate_limit_per_flow(
     db_session: AsyncSession,
     *,

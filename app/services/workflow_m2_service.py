@@ -30,6 +30,7 @@ from app.repositories.orch_channel_events_repository import claim_next_pending_c
 from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
+    fetch_contact_runtime_context_for_session,
     fetch_session_workflow_state,
     replace_session_workflow_state,
 )
@@ -1229,6 +1230,58 @@ def _build_runtime_resolution_scope(
     return scope
 
 
+def _normalize_contact_extra_data(raw_extra: Any) -> dict[str, Any]:
+    if isinstance(raw_extra, dict):
+        return dict(raw_extra)
+    if isinstance(raw_extra, str):
+        token = raw_extra.strip()
+        if not token:
+            return {}
+        try:
+            parsed = json.loads(token)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    return {}
+
+
+def _inject_contact_runtime_scope(
+    *,
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+) -> None:
+    if not isinstance(contact_row, dict):
+        return
+
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+
+    contact_payload = {
+        "contact_list_member_id": contact_row.get("contact_list_member_id"),
+        "identifier": contact_row.get("contact_identifier"),
+        "name": contact_row.get("contact_name"),
+        "full_name": contact_row.get("contact_full_name"),
+        "gender": contact_row.get("contact_gender"),
+        "country": contact_row.get("contact_country"),
+        "province": contact_row.get("contact_province"),
+        "city": contact_row.get("contact_city"),
+        "birth_date": contact_row.get("contact_birth_date"),
+        "age": contact_row.get("contact_age"),
+        "channel_type": contact_row.get("contact_channel_type"),
+        "channel_label": contact_row.get("contact_channel_label"),
+        "channel_address": contact_row.get("contact_channel_address"),
+        "person_uuid": contact_row.get("person_uuid"),
+        "extra": _normalize_contact_extra_data(contact_row.get("contact_channel_extra_data")),
+    }
+
+    variables["contact"] = contact_payload
+    customs["contact"] = contact_payload
+
+
 def _build_generate_file_resolution_scope(
     *,
     runtime_variables: dict[str, Any],
@@ -2198,6 +2251,15 @@ async def execute_workflow_m2_for_session(
         runtime_variables = session_state.get("runtime_variables")
         if not isinstance(runtime_variables, dict):
             runtime_variables = {}
+        contact_runtime_context = await fetch_contact_runtime_context_for_session(
+            db_session,
+            flow_uuid=flow_uuid,
+            session_id=session_id,
+        )
+        _inject_contact_runtime_scope(
+            runtime_variables=runtime_variables,
+            contact_row=contact_runtime_context,
+        )
 
         has_pending_whatsapp_events = False
         has_pending_dialer_events = False
