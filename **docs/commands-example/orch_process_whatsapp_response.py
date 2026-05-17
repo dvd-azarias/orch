@@ -21,8 +21,8 @@ def _extract_status(state: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-class OrchProccessWhatsappResponseHandler(CommandHandler):
-    component_id = "proccess_whatsapp_response"
+class OrchProcessWhatsappResponseHandler(CommandHandler):
+    component_id = "process_whatsapp_response"
 
     def execute(
         self,

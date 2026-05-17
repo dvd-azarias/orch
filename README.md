@@ -1052,7 +1052,7 @@ Em toda validação de FileApp, deve existir evidência de:
 Componentes adicionados no motor M2 com comportamento bloqueante:
 
 - `send_with_whatsapp`
-- `proccess_whatsapp_response` (compatível também com `process_whatsapp_response`)
+- `process_whatsapp_response`
 - `send_with_dialer`
 - `process_dialer_response`
 
@@ -1130,17 +1130,17 @@ Regra crítica:
 - no passo 5, o status precisa chegar em `READY_TO_INGEST` antes de avançar para import/vínculo.
 - no `tipo_1`, o ORCH não deve fazer escrita direta em `orch_sessions`; a carga segue o caminho do Target Core.
 
-## Fase 12 — `proccess_whatsapp_response` com desvio de branch
+## Fase 12 — `process_whatsapp_response` com desvio de branch
 
 ### Objetivo
 
-Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_card_uuid`/`next_card_uuid`) e executar o componente `proccess_whatsapp_response`/`process_whatsapp_response` para escolher o branch correto e avançar o fluxo.
+Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_card_uuid`/`next_card_uuid`) e executar o componente `process_whatsapp_response` para escolher o branch correto e avançar o fluxo.
 
 ### Regra aplicada
 
 - `send_with_whatsapp` continua bloqueante para aguardar retorno do canal.
 - quando chega evento WhatsApp com `statuses[].status`, o motor libera o bloqueio WhatsApp da sessão e continua do `next_card_uuid` atual.
-- no card `proccess_whatsapp_response`, o branch é decidido por status:
+- no card `process_whatsapp_response`, o branch é decidido por status:
   - `sent` -> `sent`
   - `delivered` -> `delivered`
   - `read` -> `read`
