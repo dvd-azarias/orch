@@ -303,16 +303,6 @@ def _derive_state_update(
     dialer_timestamps: DialerStatusTimestamps,
 ) -> SessionStateUpdate:
     if app_name == "DialerApp":
-        terminal_event_at = (
-            dialer_timestamps.dialer_answered_at
-            or dialer_timestamps.dialer_busy_at
-            or dialer_timestamps.dialer_rejected_at
-            or dialer_timestamps.dialer_invalid_number_at
-            or dialer_timestamps.dialer_not_answered_at
-            or dialer_timestamps.dialer_failed_at
-        )
-        if terminal_event_at is not None:
-            return SessionStateUpdate(state=3, ended_at=terminal_event_at)
         return SessionStateUpdate(state=1, ended_at=None)
 
     if app_name == "WhatsApp":
