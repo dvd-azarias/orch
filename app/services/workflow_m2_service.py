@@ -52,7 +52,6 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "proccess_whatsapp_response": "blocked_process_whatsapp_response",
     "process_whatsapp_response": "blocked_process_whatsapp_response",
     "send_with_dialer": "blocked_send_with_dialer",
-    "proccess_dialer_response": "blocked_process_dialer_response",
     "process_dialer_response": "blocked_process_dialer_response",
 }
 
@@ -2418,7 +2417,7 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
-                elif kind in {"proccess_dialer_response", "process_dialer_response"}:
+                elif kind == "process_dialer_response":
                     _set_dialer_resume_cursor(
                         runtime_variables,
                         process_card_cursor=next_card_uuid,

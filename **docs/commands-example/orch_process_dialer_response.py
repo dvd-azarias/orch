@@ -21,8 +21,8 @@ def _extract_status(state: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-class OrchProccessDialerResponseHandler(CommandHandler):
-    component_id = "proccess_dialer_response"
+class OrchProcessDialerResponseHandler(CommandHandler):
+    component_id = "process_dialer_response"
 
     def execute(
         self,
