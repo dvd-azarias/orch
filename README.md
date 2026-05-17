@@ -1054,7 +1054,7 @@ Componentes adicionados no motor M2 com comportamento bloqueante:
 - `send_with_whatsapp`
 - `proccess_whatsapp_response` (compatível também com `process_whatsapp_response`)
 - `send_with_dialer`
-- `proccess_dialer_response` (compatível também com `process_dialer_response`)
+- `process_dialer_response`
 
 Importante:
 - nesta etapa, estes componentes **não** realizam envio efetivo;
