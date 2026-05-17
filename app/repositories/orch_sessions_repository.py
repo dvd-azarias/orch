@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.workspace import get_current_workspace_schema
 
 SESSION_STATE_FINISHED = 3
 SESSION_STATE_STOPPED_AFTER_UNASSIGN = 5
@@ -822,6 +823,9 @@ async def persist_callback_event_for_active_entity(
         payload=payload,
         extracted=extracted,
     )
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
 
     await db_session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
