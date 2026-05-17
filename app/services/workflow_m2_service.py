@@ -2617,6 +2617,58 @@ async def execute_workflow_m2_for_session(
                     )
                     if branch_label is not None:
                         _clear_run_flow_waiting(runtime_variables)
+                    else:
+                        _set_run_flow_waiting(runtime_variables, card_cursor=next_card_uuid)
+                        last_card_uuid = next_card_uuid
+                        next_card_uuid = last_card_uuid
+                        executed_steps += 1
+                        _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                        _mark_blocking_execution(runtime_variables, stopped_reason="blocked_run_flow")
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                        )
+                        step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="success",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=step_latency_ms,
+                            stopped_reason="blocked_run_flow",
+                            step_index=executed_steps,
+                            card_cursor=last_card_uuid,
+                            component_kind_value=kind,
+                            details={"next_card_uuid": next_card_uuid},
+                        )
+                        logger.info(
+                            "workflow m2 card blocking",
+                            extra={
+                                "event": "orch.workflow.m2.card.blocking",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
+                                "component_kind": kind,
+                                "step_index": executed_steps,
+                                "latency_ms": round(step_latency_ms, 2),
+                                "stopped_reason": "blocked_run_flow",
+                                "metric_type": "card",
+                            },
+                        )
+                        return await _finalize(
+                            WorkflowExecutionResult(
+                                True,
+                                executed_steps,
+                                "blocked_run_flow",
+                                last_card_uuid,
+                                next_card_uuid,
+                            )
+                        )
                 elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
                     should_block_execution = True
                     if kind == "send_with_whatsapp":
