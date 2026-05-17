@@ -28,6 +28,7 @@ from app.core.workspace import get_current_workspace_schema, get_current_workspa
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_channel_events_repository import claim_next_pending_channel_event, has_pending_channel_events
 from app.repositories.orch_sessions_repository import (
+    assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
     fetch_session_workflow_state,
     replace_session_workflow_state,
@@ -71,6 +72,10 @@ WHATSAPP_BLOCKING_STOP_REASONS = {
     "blocked_send_with_whatsapp",
     "blocked_process_whatsapp_response",
 }
+DIALER_BLOCKING_STOP_REASONS = {
+    "blocked_send_with_dialer",
+    "blocked_process_dialer_response",
+}
 WHATSAPP_STATUS_ORDER_PREREQUISITES = {
     "delivered": "whatsapp_sent_at",
     "read": "whatsapp_delivered_at",
@@ -80,6 +85,15 @@ WHATSAPP_STATUS_ORDER_TTL_SECONDS = {
     "read": 45,
 }
 WHATSAPP_STATUS_ORDER_RETRY_SECONDS = 3
+DIALER_RESPONSE_BRANCH_BY_STATUS = {
+    "answered": "answered",
+    "busy": "busy",
+    "rejected": "rejected",
+    "invalid_number": "invalid_number",
+    "no_answer": "no_answer",
+    "failed": "failed",
+    "machine": "machine",
+}
 
 
 @dataclass(frozen=True)
@@ -189,6 +203,21 @@ def _read_whatsapp_resume_cursor(runtime_variables: dict[str, Any]) -> str | Non
     return text or None
 
 
+def _read_dialer_resume_cursor(runtime_variables: dict[str, Any]) -> str | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    channel_resume = workflow_meta.get("channel_resume")
+    if not isinstance(channel_resume, dict):
+        return None
+    dialer_resume = channel_resume.get("dialer")
+    if not isinstance(dialer_resume, dict):
+        return None
+    raw = dialer_resume.get("process_card_cursor")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
 def _set_whatsapp_resume_cursor(runtime_variables: dict[str, Any], *, process_card_cursor: str | None) -> None:
     if not process_card_cursor:
         return
@@ -202,6 +231,21 @@ def _set_whatsapp_resume_cursor(runtime_variables: dict[str, Any], *, process_ca
         whatsapp_resume = {}
         channel_resume["whatsapp"] = whatsapp_resume
     whatsapp_resume["process_card_cursor"] = process_card_cursor
+
+
+def _set_dialer_resume_cursor(runtime_variables: dict[str, Any], *, process_card_cursor: str | None) -> None:
+    if not process_card_cursor:
+        return
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    channel_resume = workflow_meta.get("channel_resume")
+    if not isinstance(channel_resume, dict):
+        channel_resume = {}
+        workflow_meta["channel_resume"] = channel_resume
+    dialer_resume = channel_resume.get("dialer")
+    if not isinstance(dialer_resume, dict):
+        dialer_resume = {}
+        channel_resume["dialer"] = dialer_resume
+    dialer_resume["process_card_cursor"] = process_card_cursor
 
 
 def _extract_whatsapp_status_signature_from_payload(payload: Any) -> str | None:
@@ -365,6 +409,66 @@ def _extract_whatsapp_status_from_runtime(runtime_variables: dict[str, Any]) -> 
     return _extract_whatsapp_status_from_payload(variables.get("payload"))
 
 
+def _extract_dialer_status_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    raw_status = payload.get("status")
+    if raw_status is not None:
+        text = str(raw_status).strip().lower()
+        if text in DIALER_RESPONSE_BRANCH_BY_STATUS:
+            return text
+        if text in {"noanswer", "no_answer"}:
+            return "no_answer"
+        if text in {"invalidnumber", "invalid_number"}:
+            return "invalid_number"
+        if text == "success":
+            return "answered"
+        if text == "failure":
+            return "failed"
+
+    hangup = payload.get("hangup")
+    if not isinstance(hangup, dict):
+        return None
+
+    disposition = str(hangup.get("Disposition", "")).strip().upper()
+    classifier = str(hangup.get("DialerClassifierStatus", "")).strip().upper()
+    cause_txt = str(hangup.get("Cause-txt", "")).strip().upper()
+    hint = " ".join(part for part in [disposition, classifier, cause_txt] if part)
+
+    if "MACHINE" in hint:
+        return "machine"
+    if "ANSWERED" in hint:
+        return "answered"
+    if "BUSY" in hint:
+        return "busy"
+    if any(k in hint for k in ("NO ANSWER", "NOANSWER", "RINGING", "SILENCIO")):
+        return "no_answer"
+    if any(k in hint for k in ("INVALID", "UNALLOCATED", "NOT FOUND")):
+        return "invalid_number"
+    if any(k in hint for k in ("REJECT", "FORBIDDEN", "DECLINED")):
+        return "rejected"
+    return "failed"
+
+
+def _extract_dialer_status_from_runtime(runtime_variables: dict[str, Any]) -> str | None:
+    if not isinstance(runtime_variables, dict):
+        return None
+
+    status = _extract_dialer_status_from_payload(runtime_variables.get("last_payload"))
+    if status is not None:
+        return status
+
+    status = _extract_dialer_status_from_payload(runtime_variables.get("input_payload"))
+    if status is not None:
+        return status
+
+    variables = runtime_variables.get("variables")
+    if not isinstance(variables, dict):
+        return None
+    return _extract_dialer_status_from_payload(variables.get("payload"))
+
+
 def _set_synthetic_whatsapp_status_payload(
     runtime_variables: dict[str, Any],
     *,
@@ -405,6 +509,22 @@ def _run_process_whatsapp_response(
     branch = WHATSAPP_RESPONSE_BRANCH_BY_STATUS.get(status)
 
     runtime_variables["whatsapp_last_response"] = {
+        "component_ref_id": component.get("ref_id"),
+        "status": status,
+        "branch": branch,
+    }
+    return branch
+
+
+def _run_process_dialer_response(
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    status = _extract_dialer_status_from_runtime(runtime_variables)
+    if status is None:
+        return None
+    branch = DIALER_RESPONSE_BRANCH_BY_STATUS.get(status)
+    runtime_variables["dialer_last_response"] = {
         "component_ref_id": component.get("ref_id"),
         "status": status,
         "branch": branch,
@@ -466,6 +586,25 @@ async def _prepare_send_with_whatsapp_contact_member(
     runtime_variables["send_with_whatsapp_routing"] = {
         "numbers": numbers,
         "percentual_by_phone": percentual_by_phone,
+        "assignment": assignment,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return assignment
+
+
+async def _prepare_send_with_dialer_contact_member(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    assignment = await assign_dialer_routing_for_session(
+        db_session,
+        flow_uuid=flow_uuid,
+        session_id=session_id,
+    )
+    runtime_variables["send_with_dialer_routing"] = {
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -555,6 +694,13 @@ def _should_resume_whatsapp_blocking_execution(runtime_variables: dict[str, Any]
     if blocking_stop_reason not in WHATSAPP_BLOCKING_STOP_REASONS:
         return False
     return _extract_whatsapp_status_from_runtime(runtime_variables) is not None
+
+
+def _should_resume_dialer_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
+    blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+    if blocking_stop_reason not in DIALER_BLOCKING_STOP_REASONS:
+        return False
+    return _extract_dialer_status_from_runtime(runtime_variables) is not None
 
 
 def _get_by_dot_path(payload: dict[str, Any], path: str) -> Any:
@@ -2056,12 +2202,20 @@ async def execute_workflow_m2_for_session(
             runtime_variables = {}
 
         has_pending_whatsapp_events = False
+        has_pending_dialer_events = False
         resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
         if resume_cursor is not None:
             has_pending_whatsapp_events = await has_pending_channel_events(
                 db_session,
                 session_id=session_id,
                 channel="whatsapp",
+            )
+        dialer_resume_cursor = _read_dialer_resume_cursor(runtime_variables)
+        if dialer_resume_cursor is not None:
+            has_pending_dialer_events = await has_pending_channel_events(
+                db_session,
+                session_id=session_id,
+                channel="dialer",
             )
 
         current_next_card_uuid = session_state.get("next_card_uuid")
@@ -2076,9 +2230,20 @@ async def execute_workflow_m2_for_session(
             current_next_card_uuid=current_next_card_uuid,
             blocking_stop_reason=blocking_stop_reason,
         )
+        should_preempt_to_dialer_resume_cursor = (
+            has_pending_dialer_events
+            and dialer_resume_cursor is not None
+            and (
+                current_next_card_uuid is None
+                or str(current_next_card_uuid) == str(dialer_resume_cursor)
+                or blocking_stop_reason in DIALER_BLOCKING_STOP_REASONS
+            )
+        )
         if isinstance(frozen_until, datetime):
             frozen_until_utc = frozen_until if frozen_until.tzinfo is not None else frozen_until.replace(tzinfo=timezone.utc)
-            if frozen_until_utc > datetime.now(timezone.utc) and not should_preempt_to_whatsapp_resume_cursor:
+            if frozen_until_utc > datetime.now(timezone.utc) and not (
+                should_preempt_to_whatsapp_resume_cursor or should_preempt_to_dialer_resume_cursor
+            ):
                 return await _finalize(
                     WorkflowExecutionResult(
                         True,
@@ -2094,12 +2259,25 @@ async def execute_workflow_m2_for_session(
             if preempt_signature is not None:
                 _set_whatsapp_last_preempt_signature(runtime_variables, preempt_signature)
             current_card_uuid = resume_cursor
+        elif should_preempt_to_dialer_resume_cursor:
+            current_card_uuid = dialer_resume_cursor
         else:
             current_card_uuid = current_next_card_uuid
             if current_card_uuid is None and _extract_whatsapp_status_from_runtime(runtime_variables) is not None:
                 current_card_uuid = _read_whatsapp_resume_cursor(runtime_variables)
+            if current_card_uuid is None and _extract_dialer_status_from_runtime(runtime_variables) is not None:
+                current_card_uuid = _read_dialer_resume_cursor(runtime_variables)
         if blocking_stop_reason is not None:
             if _should_resume_whatsapp_blocking_execution(runtime_variables):
+                _clear_blocking_execution(runtime_variables)
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
+                )
+            elif _should_resume_dialer_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -2240,6 +2418,24 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
+                elif kind in {"proccess_dialer_response", "process_dialer_response"}:
+                    _set_dialer_resume_cursor(
+                        runtime_variables,
+                        process_card_cursor=next_card_uuid,
+                    )
+                    pending_dialer_event = await claim_next_pending_channel_event(
+                        db_session,
+                        session_id=session_id,
+                        channel="dialer",
+                    )
+                    if isinstance(pending_dialer_event, dict):
+                        payload = pending_dialer_event.get("payload")
+                        if isinstance(payload, dict):
+                            runtime_variables["last_payload"] = payload
+                    branch_label = _run_process_dialer_response(
+                        component=component,
+                        runtime_variables=runtime_variables,
+                    )
                 elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
                     should_block_execution = True
                     if kind == "send_with_whatsapp":
@@ -2258,6 +2454,13 @@ async def execute_workflow_m2_for_session(
                                 reason="send_with_whatsapp_limit_exhausted",
                             )
                             should_block_execution = False
+                    elif kind == "send_with_dialer":
+                        await _prepare_send_with_dialer_contact_member(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                        )
                     if should_block_execution:
                         resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
                         last_card_uuid = next_card_uuid

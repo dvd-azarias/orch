@@ -47,3 +47,21 @@ def test_extract_channel_events_returns_whatsapp_status_items() -> None:
 def test_extract_channel_events_ignores_non_supported_app() -> None:
     events = extract_channel_events("GenericApp", {"payload": "x"})
     assert events == []
+
+
+def test_extract_channel_events_returns_dialer_item() -> None:
+    payload = {
+        "uniqueid": "GW01-444.1",
+        "hangup": {
+            "Event": "Hangup",
+            "Disposition": "BUSY",
+            "Uniqueid": "GW01-444.1",
+        },
+    }
+
+    events = extract_channel_events("DialerApp", payload)
+
+    assert len(events) == 1
+    assert events[0].channel == "dialer"
+    assert events[0].event_type == "busy"
+    assert events[0].event_id == "GW01-444.1"

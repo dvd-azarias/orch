@@ -78,9 +78,67 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
     return items
 
 
+def _extract_dialer_status(payload: dict[str, Any]) -> str | None:
+    raw_status = payload.get("status")
+    if raw_status is not None:
+        text = str(raw_status).strip().lower()
+        if text:
+            return text
+
+    hangup = payload.get("hangup")
+    if not isinstance(hangup, dict):
+        return None
+
+    disposition = str(hangup.get("Disposition", "")).strip().upper()
+    classifier = str(hangup.get("DialerClassifierStatus", "")).strip().upper()
+    cause_txt = str(hangup.get("Cause-txt", "")).strip().upper()
+    hint = " ".join(part for part in [disposition, classifier, cause_txt] if part)
+
+    if "MACHINE" in hint:
+        return "machine"
+    if "ANSWERED" in hint:
+        return "answered"
+    if "BUSY" in hint:
+        return "busy"
+    if any(k in hint for k in ("NO ANSWER", "NOANSWER", "RINGING", "SILENCIO")):
+        return "no_answer"
+    if any(k in hint for k in ("INVALID", "UNALLOCATED", "NOT FOUND")):
+        return "invalid_number"
+    if any(k in hint for k in ("REJECT", "FORBIDDEN", "DECLINED")):
+        return "rejected"
+    return "failed"
+
+
+def _extract_dialer_channel_events(payload: dict[str, Any]) -> list[ChannelEventItem]:
+    event_type = _extract_dialer_status(payload)
+    if not event_type:
+        return []
+
+    hangup = payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {}
+    makecall = payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {}
+    event_id = (
+        str(payload.get("uniqueid") or "").strip()
+        or str(hangup.get("Uniqueid") or "").strip()
+        or str(hangup.get("Linkedid") or "").strip()
+        or str(makecall.get("DestUniqueid") or "").strip()
+        or None
+    )
+    return [
+        ChannelEventItem(
+            channel="dialer",
+            event_type=event_type,
+            event_id=event_id,
+            event_ts=None,
+            payload=payload,
+        )
+    ]
+
+
 def extract_channel_events(app_name: str, payload: dict[str, Any]) -> list[ChannelEventItem]:
     if app_name == "WhatsApp":
         return _extract_whatsapp_channel_events(payload)
+    if app_name == "DialerApp":
+        return _extract_dialer_channel_events(payload)
     return []
 
 
