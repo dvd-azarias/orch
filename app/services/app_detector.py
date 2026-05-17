@@ -28,5 +28,8 @@ def detect_app(payload: dict[str, Any]) -> str:
 
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="Payload não reconhecido. Para GenericApp, informe ao menos o campo 'external_id'.",
+        detail=(
+            "Payload não reconhecido. Para GenericApp, informe 'external_id' "
+            "ou use callback com 'event_name=callback' e 'entity'."
+        ),
     )

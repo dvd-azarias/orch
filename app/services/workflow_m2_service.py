@@ -53,6 +53,7 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "process_whatsapp_response": "blocked_process_whatsapp_response",
     "send_with_dialer": "blocked_send_with_dialer",
     "process_dialer_response": "blocked_process_dialer_response",
+    "run_flow": "blocked_run_flow",
 }
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
@@ -74,6 +75,9 @@ WHATSAPP_BLOCKING_STOP_REASONS = {
 DIALER_BLOCKING_STOP_REASONS = {
     "blocked_send_with_dialer",
     "blocked_process_dialer_response",
+}
+RUN_FLOW_BLOCKING_STOP_REASONS = {
+    "blocked_run_flow",
 }
 WHATSAPP_STATUS_ORDER_PREREQUISITES = {
     "delivered": "whatsapp_sent_at",
@@ -245,6 +249,59 @@ def _set_dialer_resume_cursor(runtime_variables: dict[str, Any], *, process_card
         dialer_resume = {}
         channel_resume["dialer"] = dialer_resume
     dialer_resume["process_card_cursor"] = process_card_cursor
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _extract_callback_payload_from_runtime(runtime_variables: dict[str, Any]) -> dict[str, Any] | None:
+    callback = runtime_variables.get("callback")
+    if not isinstance(callback, dict):
+        return None
+    event_name = str(callback.get("event_name", "")).strip().lower()
+    entity = str(callback.get("entity", "")).strip()
+    if event_name != "callback" or not entity:
+        return None
+    return callback
+
+
+def _set_run_flow_waiting(runtime_variables: dict[str, Any], *, card_cursor: str | None) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta["run_flow_waiting"] = {
+        "card_cursor": card_cursor,
+        "blocked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _clear_run_flow_waiting(runtime_variables: dict[str, Any]) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta.pop("run_flow_waiting", None)
+
+
+def _is_new_callback_for_waiting_run_flow(runtime_variables: dict[str, Any]) -> bool:
+    callback = _extract_callback_payload_from_runtime(runtime_variables)
+    if not isinstance(callback, dict):
+        return False
+
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    waiting = workflow_meta.get("run_flow_waiting")
+    if not isinstance(waiting, dict):
+        return True
+
+    callback_at = _parse_iso_datetime(callback.get("received_at"))
+    blocked_at = _parse_iso_datetime(waiting.get("blocked_at"))
+    if callback_at is None or blocked_at is None:
+        return True
+    return callback_at >= blocked_at
 
 
 def _extract_whatsapp_status_signature_from_payload(payload: Any) -> str | None:
@@ -531,6 +588,27 @@ def _run_process_dialer_response(
     return branch
 
 
+def _run_run_flow(
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    callback = _extract_callback_payload_from_runtime(runtime_variables)
+    if not isinstance(callback, dict):
+        return None
+    result = str(callback.get("result", "")).strip().lower()
+    if not result:
+        return None
+    runtime_variables["run_flow_last_callback"] = {
+        "component_ref_id": component.get("ref_id"),
+        "result": result,
+        "event_name": callback.get("event_name"),
+        "entity": callback.get("entity"),
+        "received_at": callback.get("received_at"),
+        "data": callback.get("data") if isinstance(callback.get("data"), dict) else {},
+    }
+    return result
+
+
 def _extract_send_with_whatsapp_number_policies(component: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     config = params.get("whatsapp_numbers_config") if isinstance(params.get("whatsapp_numbers_config"), dict) else {}
@@ -700,6 +778,13 @@ def _should_resume_dialer_blocking_execution(runtime_variables: dict[str, Any]) 
     if blocking_stop_reason not in DIALER_BLOCKING_STOP_REASONS:
         return False
     return _extract_dialer_status_from_runtime(runtime_variables) is not None
+
+
+def _should_resume_run_flow_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
+    blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+    if blocking_stop_reason not in RUN_FLOW_BLOCKING_STOP_REASONS:
+        return False
+    return _is_new_callback_for_waiting_run_flow(runtime_variables)
 
 
 def _get_by_dot_path(payload: dict[str, Any], path: str) -> Any:
@@ -1280,6 +1365,23 @@ def _inject_contact_runtime_scope(
 
     variables["contact"] = contact_payload
     customs["contact"] = contact_payload
+
+
+def _inject_callback_runtime_scope(
+    *,
+    runtime_variables: dict[str, Any],
+) -> None:
+    callback_payload = _extract_callback_payload_from_runtime(runtime_variables)
+    if not isinstance(callback_payload, dict):
+        return
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    callback_copy = dict(callback_payload)
+    variables["callback"] = callback_copy
+    customs["callback"] = callback_copy
 
 
 def _build_generate_file_resolution_scope(
@@ -2260,6 +2362,9 @@ async def execute_workflow_m2_for_session(
             runtime_variables=runtime_variables,
             contact_row=contact_runtime_context,
         )
+        _inject_callback_runtime_scope(
+            runtime_variables=runtime_variables,
+        )
 
         has_pending_whatsapp_events = False
         has_pending_dialer_events = False
@@ -2338,6 +2443,15 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
             elif _should_resume_dialer_blocking_execution(runtime_variables):
+                _clear_blocking_execution(runtime_variables)
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
+                )
+            elif _should_resume_run_flow_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -2496,6 +2610,13 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
+                elif kind == "run_flow":
+                    branch_label = _run_run_flow(
+                        component=component,
+                        runtime_variables=runtime_variables,
+                    )
+                    if branch_label is not None:
+                        _clear_run_flow_waiting(runtime_variables)
                 elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
                     should_block_execution = True
                     if kind == "send_with_whatsapp":
@@ -2521,8 +2642,10 @@ async def execute_workflow_m2_for_session(
                             session_id=session_id,
                             runtime_variables=runtime_variables,
                         )
+                    elif kind == "run_flow":
+                        _set_run_flow_waiting(runtime_variables, card_cursor=next_card_uuid)
                     if should_block_execution:
-                        resolved_next = resolve_next_card_uuid(definition, next_card_uuid)
+                        resolved_next = next_card_uuid if kind == "run_flow" else resolve_next_card_uuid(definition, next_card_uuid)
                         last_card_uuid = next_card_uuid
                         next_card_uuid = resolved_next
                         executed_steps += 1

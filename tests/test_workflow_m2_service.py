@@ -13,6 +13,7 @@ from app.services.workflow_m2_service import (
     _extract_whatsapp_status_from_runtime,
     _extract_send_with_whatsapp_numbers,
     _inject_contact_runtime_scope,
+    _inject_callback_runtime_scope,
     _is_send_with_whatsapp_limit_exhausted,
     _mark_blocking_execution,
     _normalize_contact_extra_data,
@@ -26,6 +27,7 @@ from app.services.workflow_m2_service import (
     _run_generate_file,
     _run_intelligent_agent,
     _run_process_dialer_response,
+    _run_run_flow,
     _run_process_whatsapp_response,
     _run_set_variables,
     _set_synthetic_whatsapp_status_payload,
@@ -35,7 +37,9 @@ from app.services.workflow_m2_service import (
     _read_dialer_resume_cursor,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
+    _should_resume_run_flow_blocking_execution,
     _should_resume_whatsapp_blocking_execution,
+    _set_run_flow_waiting,
 )
 
 
@@ -44,6 +48,7 @@ def test_blocking_stop_reason_for_whatsapp_components() -> None:
     assert _blocking_stop_reason_for_component("process_whatsapp_response") == "blocked_process_whatsapp_response"
     assert _blocking_stop_reason_for_component("send_with_dialer") == "blocked_send_with_dialer"
     assert _blocking_stop_reason_for_component("process_dialer_response") == "blocked_process_dialer_response"
+    assert _blocking_stop_reason_for_component("run_flow") == "blocked_run_flow"
     assert _blocking_stop_reason_for_component("generate_file") is None
 
 
@@ -197,6 +202,57 @@ def test_inject_contact_runtime_scope_sets_contact_extra() -> None:
     assert variables["contact"]["identifier"] == "70000700001"
     assert variables["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
     assert variables["customs"]["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
+
+
+def test_inject_callback_runtime_scope_sets_callback_builtin() -> None:
+    runtime_variables: dict[str, object] = {
+        "callback": {
+            "event_name": "callback",
+            "entity": "30392287848",
+            "result": "success",
+            "data": {"ticket_id": "abc-123"},
+            "received_at": "2026-05-17T01:10:00+00:00",
+        }
+    }
+    _inject_callback_runtime_scope(runtime_variables=runtime_variables)
+    variables = runtime_variables["variables"]
+    assert variables["callback"]["result"] == "success"
+    assert variables["customs"]["callback"]["data"]["ticket_id"] == "abc-123"
+
+
+def test_run_run_flow_maps_callback_result_to_branch() -> None:
+    runtime_variables = {
+        "callback": {
+            "event_name": "callback",
+            "entity": "30392287848",
+            "result": "unsuccess",
+            "data": {"reason": "timeout"},
+            "received_at": "2026-05-17T01:10:00+00:00",
+        }
+    }
+    branch = _run_run_flow(component={"ref_id": "run-flow-1"}, runtime_variables=runtime_variables)
+    assert branch == "unsuccess"
+    assert runtime_variables["run_flow_last_callback"]["result"] == "unsuccess"
+
+
+def test_should_resume_run_flow_blocking_execution_only_with_new_callback() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_run_flow",
+        },
+    }
+    _set_run_flow_waiting(runtime_variables, card_cursor="run-1")
+    assert _should_resume_run_flow_blocking_execution(runtime_variables) is False
+
+    runtime_variables["callback"] = {
+        "event_name": "callback",
+        "entity": "30392287848",
+        "result": "success",
+        "data": {},
+        "received_at": datetime.now(timezone.utc).isoformat(),
+    }
+    assert _should_resume_run_flow_blocking_execution(runtime_variables) is True
 
 
 @pytest.mark.asyncio

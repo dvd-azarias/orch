@@ -37,6 +37,7 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0015_create_orch_whatsapp_limits_tables", "sql/015_create_orch_whatsapp_limits_tables.sql"),
     ("0016_add_whatsapp_without_limit_to_linked_actuator_enum", "sql/016_add_whatsapp_without_limit_to_linked_actuator_enum.sql"),
     ("0017_add_whatsapp_without_limit_by_rate_limit_to_linked_actuator_enum", "sql/017_add_whatsapp_without_limit_by_rate_limit_to_linked_actuator_enum.sql"),
+    ("0018_add_callback_at_to_orch_sessions", "sql/018_add_callback_at_to_orch_sessions.sql"),
 ]
 
 

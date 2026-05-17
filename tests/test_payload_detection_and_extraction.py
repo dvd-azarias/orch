@@ -27,6 +27,7 @@ def _load_payload(file_name: str) -> dict:
         ("whatsapp_failed.json", "WhatsApp"),
         ("dialer_app.json", "DialerApp"),
         ("generic_app.json", "GenericApp"),
+        ("callback_app.json", "GenericApp"),
     ],
 )
 def test_detect_app_with_phase1_payloads(file_name: str, expected_app: str) -> None:
@@ -71,6 +72,15 @@ def test_detect_app_with_phase1_payloads(file_name: str, expected_app: str) -> N
                 "entity_type": "api_request",
                 "entity_address": "123456",
                 "entity_session_id": "123456",
+            },
+        ),
+        (
+            "callback_app.json",
+            {
+                "entity": "30392287848",
+                "entity_type": "person",
+                "entity_address": "30392287848",
+                "entity_session_id": "30392287848",
             },
         ),
     ],

@@ -25,6 +25,7 @@ BLOCKING_RUNNING_STOP_REASONS = {
     "blocked_process_whatsapp_response",
     "blocked_send_with_dialer",
     "blocked_process_dialer_response",
+    "blocked_run_flow",
 }
 FINAL_STOP_REASONS = {
     "finished_by_component",
