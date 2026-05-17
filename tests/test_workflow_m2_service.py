@@ -23,12 +23,16 @@ from app.services.workflow_m2_service import (
     _run_condition,
     _run_generate_file,
     _run_intelligent_agent,
+    _run_process_dialer_response,
     _run_process_whatsapp_response,
     _run_set_variables,
     _set_synthetic_whatsapp_status_payload,
     _set_whatsapp_last_preempt_signature,
     _set_whatsapp_resume_cursor,
+    _set_dialer_resume_cursor,
+    _read_dialer_resume_cursor,
     _should_preempt_to_whatsapp_resume_cursor,
+    _should_resume_dialer_blocking_execution,
     _should_resume_whatsapp_blocking_execution,
 )
 
@@ -105,6 +109,25 @@ def test_run_process_whatsapp_response_maps_status_to_branch() -> None:
     assert branch == "read"
     assert runtime_variables["whatsapp_last_response"]["status"] == "read"
     assert runtime_variables["whatsapp_last_response"]["branch"] == "read"
+
+
+def test_run_process_dialer_response_maps_status_to_branch() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "hangup": {
+                "Disposition": "BUSY",
+                "DialerClassifierStatus": "",
+                "Cause-txt": "",
+            }
+        }
+    }
+    branch = _run_process_dialer_response(
+        component={"ref_id": "dialer-1"},
+        runtime_variables=runtime_variables,
+    )
+    assert branch == "busy"
+    assert runtime_variables["dialer_last_response"]["status"] == "busy"
+    assert runtime_variables["dialer_last_response"]["branch"] == "busy"
 
 
 def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -> None:
@@ -221,11 +244,36 @@ def test_should_resume_whatsapp_blocking_execution_only_when_status_available() 
     assert _should_resume_whatsapp_blocking_execution(runtime_variables) is False
 
 
+def test_should_resume_dialer_blocking_execution_only_when_status_available() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_dialer",
+        },
+        "last_payload": {
+            "hangup": {
+                "Disposition": "ANSWERED",
+            },
+        },
+    }
+    assert _should_resume_dialer_blocking_execution(runtime_variables) is True
+
+    runtime_variables["last_payload"] = {"external_id": "generic-event"}
+    assert _should_resume_dialer_blocking_execution(runtime_variables) is False
+
+
 def test_set_and_read_whatsapp_resume_cursor_roundtrip() -> None:
     runtime_variables: dict[str, object] = {}
     assert _read_whatsapp_resume_cursor(runtime_variables) is None
     _set_whatsapp_resume_cursor(runtime_variables, process_card_cursor="card-process-1")
     assert _read_whatsapp_resume_cursor(runtime_variables) == "card-process-1"
+
+
+def test_set_and_read_dialer_resume_cursor_roundtrip() -> None:
+    runtime_variables: dict[str, object] = {}
+    assert _read_dialer_resume_cursor(runtime_variables) is None
+    _set_dialer_resume_cursor(runtime_variables, process_card_cursor="card-dialer-process-1")
+    assert _read_dialer_resume_cursor(runtime_variables) == "card-dialer-process-1"
 
 
 def test_should_preempt_to_whatsapp_resume_cursor_when_status_and_cursor_exist() -> None:

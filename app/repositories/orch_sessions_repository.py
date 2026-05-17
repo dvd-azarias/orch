@@ -1367,6 +1367,64 @@ async def assign_whatsapp_routing_for_session(
     }
 
 
+async def assign_dialer_routing_for_session(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+) -> dict[str, Any] | None:
+    target_result = await db_session.execute(
+        text(
+            """
+            SELECT
+                clm.id
+            FROM contact_list_members clm
+            JOIN orch_sessions os
+              ON os.entity = clm.contact_identifier
+            WHERE os.id = :session_id
+              AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+              AND os.unassigned_at IS NULL
+              AND clm.unassigned_at IS NULL
+            ORDER BY clm.created_at DESC, clm.id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+        },
+    )
+    target = target_result.mappings().first()
+    if target is None:
+        return None
+
+    member_id = int(target["id"])
+    update_result = await db_session.execute(
+        text(
+            """
+            UPDATE contact_list_members
+            SET
+                linked_actuator = 'dialer',
+                updated_at = NOW()
+            WHERE id = :member_id
+            RETURNING id, ani, linked_actuator
+            """
+        ),
+        {"member_id": member_id},
+    )
+    row = update_result.mappings().first()
+    if row is None:
+        return None
+
+    return {
+        "contact_list_member_id": int(row["id"]),
+        "ani": row["ani"],
+        "linked_actuator": row["linked_actuator"],
+        "mode": "dialer",
+        "consumption": None,
+    }
+
+
 async def increment_whatsapp_rate_limit_per_flow(
     db_session: AsyncSession,
     *,
