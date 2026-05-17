@@ -14,13 +14,14 @@ from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_sessions_repository import (
     WHATSAPP_STATUS_COLUMNS,
     fetch_latest_session_by_flow_entity_address,
+    persist_callback_event_for_active_entity,
 )
 from app.schemas.orch import OrchTriggerAccepted
 from app.services.alarm_service import persist_alarm
 from app.services.channel_event_service import persist_channel_events
 from app.services.discarded_event_service import persist_discarded_event
 from app.services.session_extractor import extract_session_fields
-from app.services.session_service import persist_session
+from app.services.session_service import SessionPersistResponse, persist_session
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.tasks.workflow_tasks import advance_session_task
@@ -144,14 +145,20 @@ async def process_single_payload(
     extracted = None
     try:
         extracted = extract_session_fields(app_name, payload)
-        if app_name == "WhatsApp":
-            should_discard, discard_reason = await _should_discard_whatsapp_event(
+        is_callback_event = (
+            app_name == "GenericApp"
+            and str(payload.get("event_name", "")).strip().lower() == "callback"
+        )
+        if is_callback_event:
+            callback_persisted = await persist_callback_event_for_active_entity(
                 db_session,
                 flow_uuid=flow_uuid,
-                extracted=extracted,
+                app_name=app_name,
+                entity=extracted.entity,
                 payload=payload,
+                extracted=extracted.model_dump(),
             )
-            if should_discard:
+            if callback_persisted is None:
                 await persist_discarded_event(
                     db_session,
                     flow_uuid=flow_uuid,
@@ -160,7 +167,7 @@ async def process_single_payload(
                     entity_type=extracted.entity_type,
                     entity_address=extracted.entity_address,
                     entity_session_id=extracted.entity_session_id,
-                    discard_reason=discard_reason or "whatsapp_discarded",
+                    discard_reason="callback_session_not_found",
                     payload=payload,
                 )
                 return OrchTriggerAccepted(
@@ -177,16 +184,59 @@ async def process_single_payload(
                     workflow_execution={
                         "mode": "async",
                         "enqueued": False,
-                        "reason": discard_reason,
+                        "reason": "callback_session_not_found",
                     },
                 )
-        persisted = await persist_session(
-            db_session,
-            flow_uuid=flow_uuid,
-            app_name=app_name,
-            extracted=extracted.model_dump(),
-            payload=payload,
-        )
+            persisted = SessionPersistResponse(
+                session_id=callback_persisted.id,
+                session_uuid=callback_persisted.uuid,
+                session_state=callback_persisted.state,
+                session_created=False,
+            )
+        else:
+            if app_name == "WhatsApp":
+                should_discard, discard_reason = await _should_discard_whatsapp_event(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                    extracted=extracted,
+                    payload=payload,
+                )
+                if should_discard:
+                    await persist_discarded_event(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        app_name=app_name,
+                        entity=extracted.entity,
+                        entity_type=extracted.entity_type,
+                        entity_address=extracted.entity_address,
+                        entity_session_id=extracted.entity_session_id,
+                        discard_reason=discard_reason or "whatsapp_discarded",
+                        payload=payload,
+                    )
+                    return OrchTriggerAccepted(
+                        status="ignored",
+                        accepted=False,
+                        flow_uuid=flow_uuid,
+                        app=app_name,
+                        persistence="ignored",
+                        extracted=extracted,
+                        session_id=0,
+                        session_uuid="",
+                        session_state=0,
+                        session_created=False,
+                        workflow_execution={
+                            "mode": "async",
+                            "enqueued": False,
+                            "reason": discard_reason,
+                        },
+                    )
+            persisted = await persist_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                app_name=app_name,
+                extracted=extracted.model_dump(),
+                payload=payload,
+            )
     except HTTPException as exc:
         alarm_level = "warning" if exc.status_code < 500 else "error"
         await persist_alarm(

@@ -86,6 +86,29 @@ def _build_runtime_patch(
     return json.dumps(runtime_patch, ensure_ascii=False)
 
 
+def _build_callback_runtime_patch(
+    *,
+    app_name: str,
+    payload: dict[str, Any],
+    extracted: dict[str, Any],
+) -> str:
+    callback_payload = {
+        "event_name": str(payload.get("event_name", "")).strip().lower(),
+        "entity": str(extracted.get("entity", "")).strip(),
+        "result": str(payload.get("result", "")).strip().lower(),
+        "data": payload.get("data") if isinstance(payload.get("data"), dict) else {},
+        "received_at": _now_utc_iso(),
+    }
+    runtime_patch = {
+        "source_app": app_name,
+        "last_event_received_at": _now_utc_iso(),
+        "last_payload": payload,
+        "last_extracted": extracted,
+        "callback": callback_payload,
+    }
+    return json.dumps(runtime_patch, ensure_ascii=False)
+
+
 def _parse_unix_timestamp(raw_value: Any) -> datetime | None:
     if raw_value is None:
         return None
@@ -782,6 +805,66 @@ async def fetch_latest_session_by_flow_entity_address(
     )
     row = result.mappings().first()
     return dict(row) if row is not None else None
+
+
+async def persist_callback_event_for_active_entity(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    app_name: str,
+    entity: str,
+    payload: dict[str, Any],
+    extracted: dict[str, Any],
+) -> PersistResult | None:
+    lock_key = f"callback|{flow_uuid}|{entity}"
+    runtime_patch_json = _build_callback_runtime_patch(
+        app_name=app_name,
+        payload=payload,
+        extracted=extracted,
+    )
+
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": lock_key},
+    )
+
+    update_result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                callback_at = NOW(),
+                updated_at = NOW()
+            WHERE id = (
+                SELECT id
+                FROM orch_sessions
+                WHERE
+                    flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND entity = :entity
+                    AND unassigned_at IS NULL
+                    AND ended_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING id, uuid::text AS uuid, state
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity": entity,
+            "runtime_patch": runtime_patch_json,
+        },
+    )
+    row = update_result.mappings().first()
+    if row is None:
+        return None
+    return PersistResult(
+        id=int(row["id"]),
+        uuid=str(row["uuid"]),
+        state=int(row["state"]),
+        created=False,
+    )
 
 
 async def fetch_session_by_uuid(

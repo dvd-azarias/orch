@@ -1,0 +1,2 @@
+ALTER TABLE orch_sessions
+    ADD COLUMN IF NOT EXISTS callback_at TIMESTAMPTZ NULL;
