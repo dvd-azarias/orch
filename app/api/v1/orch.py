@@ -64,7 +64,11 @@ from app.services.workflow_m2_service import WorkflowExecutionError, execute_wor
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
 from app.services.session_service import persist_session
-from app.services.workspace_service import bind_workspace_context, ensure_active_workspace
+from app.services.workspace_service import (
+    bind_workspace_context,
+    ensure_active_workspace,
+    ensure_workspace_ready_for_orch_migrate,
+)
 from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task, ingest_fileapp_tipo1_event_task
 from app.tasks.workflow_tasks import advance_session_task
 
@@ -1004,7 +1008,7 @@ async def migrate_workspace_orch(
     db_session: AsyncSession = Depends(get_db_session),
 ) -> OrchMigrateWorkspaceResponse:
     safe_workspace_uuid = normalize_workspace_uuid(str(workspace_uuid))
-    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    await ensure_workspace_ready_for_orch_migrate(db_session, workspace_uuid=safe_workspace_uuid)
     result = await migrate_workspace(
         db_session,
         workspace_uuid=safe_workspace_uuid,

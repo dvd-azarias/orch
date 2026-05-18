@@ -15,7 +15,8 @@ async def fetch_active_workspace(
             SELECT
                 workspace_uuid::text AS workspace_uuid,
                 name,
-                provision_status
+                provision_status,
+                provision_step
             FROM target.workspaces
             WHERE
                 workspace_uuid = CAST(:workspace_uuid AS uuid)
