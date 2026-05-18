@@ -643,11 +643,11 @@ def test_resolve_code_editor_branch_redirects_to_exception_on_runtime_error() ->
     runtime_variables: dict[str, object] = {}
     resolved = _resolve_code_editor_branch(
         branch_label=None,
-        branch_labels=["success", "exception"],
+        branch_labels=["success", "exception_abc123"],
         runtime_variables=runtime_variables,  # type: ignore[arg-type]
         execution_error=WorkflowExecutionError("code_editor_runtime_error", "boom"),
     )
-    assert resolved == "exception"
+    assert resolved == "exception_abc123"
     assert runtime_variables["code_editor_last_error"]["code"] == "code_editor_runtime_error"
 
 
@@ -655,11 +655,31 @@ def test_resolve_code_editor_branch_redirects_to_exception_on_unmapped_branch() 
     runtime_variables: dict[str, object] = {}
     resolved = _resolve_code_editor_branch(
         branch_label="failure",
-        branch_labels=["success", "exception"],
+        branch_labels=["success", "exception_abc123"],
         runtime_variables=runtime_variables,  # type: ignore[arg-type]
     )
-    assert resolved == "exception"
-    assert runtime_variables["code_editor_last_error"]["code"] == "code_editor_branch_not_mapped"
+    assert resolved == "exception_abc123"
+    assert "code_editor_last_error" not in runtime_variables
+
+
+def test_code_editor_branches_payload_maps_failure_to_exception_alias() -> None:
+    runtime_variables = {"variables": {"customs": {}}}
+    component = {
+        "parameters": {
+            "timeout_ms": 500,
+            "code": """
+export default async function main(ctx) {
+  return { branch: ctx.branches.failure, payload: { ok: false } };
+}
+""",
+        }
+    }
+    branch = _run_code_editor(
+        component=component,
+        runtime_variables=runtime_variables,
+        branch_labels=["success", "exception_6509b0nud"],
+    )
+    assert branch == "exception_6509b0nud"
 
 
 def test_resolve_code_editor_branch_raises_when_unmapped_and_no_exception() -> None:
