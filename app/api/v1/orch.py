@@ -60,6 +60,7 @@ from app.services.session_query_service import (
     list_sessions_by_entity,
     list_sessions_by_flow_uuid,
 )
+from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
@@ -670,7 +671,13 @@ async def upsert_whatsapp_limit_for_workspace(
     safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
     await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
 
-    phone = _read_required_text(request.phone, field_name="phone")
+    phone_raw = _read_required_text(request.phone, field_name="phone")
+    phone = str(normalize_phone_to_canonical_ani(phone_raw) or "").strip()
+    if not phone:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Campo 'phone' inválido após normalização.",
+        )
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:
         safe_schema = workspace_schema.replace('"', '""')

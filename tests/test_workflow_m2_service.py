@@ -9,6 +9,7 @@ from app.services.workflow_m2_service import (
     _clear_blocking_execution,
     _compute_whatsapp_status_order_delay,
     _compute_frozen_until,
+    _extract_send_with_whatsapp_number_policies,
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
     _extract_send_with_whatsapp_numbers,
@@ -151,6 +152,22 @@ def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -
         }
     }
     assert _extract_send_with_whatsapp_numbers(component) == ["1147371485", "1147371486"]
+
+
+def test_extract_send_with_whatsapp_number_policies_normalizes_country_code() -> None:
+    component = {
+        "parameters": {
+            "whatsapp_numbers_config": {
+                "numbers": [
+                    {"number": "551147371485", "percentual_consumo": 50},
+                    {"number": "1147371486", "percentual_consumo": 30},
+                ]
+            }
+        }
+    }
+    numbers, percentual_by_phone = _extract_send_with_whatsapp_number_policies(component)
+    assert numbers == ["1147371485", "1147371486"]
+    assert percentual_by_phone == {"1147371485": 50, "1147371486": 30}
 
 
 def test_is_send_with_whatsapp_limit_exhausted() -> None:
