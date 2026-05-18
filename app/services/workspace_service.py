@@ -28,6 +28,32 @@ async def ensure_active_workspace(
     return row
 
 
+async def ensure_workspace_ready_for_orch_migrate(
+    db_session: AsyncSession,
+    *,
+    workspace_uuid: str,
+) -> dict:
+    safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
+    row = await fetch_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace não encontrado ou inativo.",
+        )
+
+    provision_status = str(row.get("provision_status") or "").strip().lower()
+    provision_step = str(row.get("provision_step") or "").strip().lower()
+    is_eligible = provision_status == "completed" or (
+        provision_status == "running" and provision_step == "orch_migrate"
+    )
+    if not is_eligible:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workspace ainda não elegível para migrate do ORCH.",
+        )
+    return row
+
+
 def bind_workspace_context(workspace_uuid: str) -> tuple[str, str]:
     safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
     schema = workspace_schema_from_uuid(safe_workspace_uuid)

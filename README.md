@@ -946,6 +946,9 @@ Adaptar o `orch` para arquitetura por workspace/schema (`ws_{workspace_uuid}`), 
 - [x] Implementar controle de migração próprio em `orch_alembic_version` (sem tocar `alembic_version` da outra aplicação).
 - [x] Criar endpoint para migrate por workspace:
   - `POST /v1/orch/admin/workspaces/{workspace_uuid}/migrate`
+  - elegível quando `deleted_at IS NULL` e:
+    - `provision_status = completed`; ou
+    - `provision_status = running` com `provision_step = orch_migrate`.
 - [x] Criar endpoint para migrate all workspaces ativos:
   - `POST /v1/orch/admin/workspaces/migrate-all`
 - [x] Incluir migration incremental para suportar métricas assíncronas (`dispatch`/`executor`).
