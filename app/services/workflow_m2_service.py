@@ -1749,11 +1749,22 @@ def _run_code_editor(
     variables = _ensure_variables(runtime_variables)
     timeout_ms = _coerce_timeout_ms(params.get("timeout_ms"), default=400)
 
+    normalized_labels = [str(label).strip().lower() for label in branch_labels if str(label).strip()]
+    exception_label = next(
+        (label for label in normalized_labels if label == "exception" or label.startswith("exception_")),
+        None,
+    )
+    branch_payload = {label: label for label in normalized_labels}
+    if exception_label:
+        branch_payload.setdefault("exception", exception_label)
+        branch_payload.setdefault("failure", exception_label)
+        branch_payload.setdefault("error", exception_label)
+
     node_payload = {
         "code": code,
         "timeoutMs": timeout_ms,
         "variables": variables,
-        "branches": {label: label for label in branch_labels},
+        "branches": branch_payload,
     }
 
     runner_js = textwrap.dedent(
@@ -1848,7 +1859,10 @@ def _resolve_code_editor_branch(
     execution_error: WorkflowExecutionError | None = None,
 ) -> str | None:
     normalized_labels = [str(label).strip().lower() for label in branch_labels if str(label).strip()]
-    has_exception_branch = "exception" in normalized_labels
+    exception_label = next(
+        (label for label in normalized_labels if label == "exception" or label.startswith("exception_")),
+        None,
+    )
 
     def _set_last_error(code: str, message: str, details: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {
@@ -1865,14 +1879,16 @@ def _resolve_code_editor_branch(
             execution_error.message,
             {"available_branches": normalized_labels},
         )
-        if has_exception_branch:
-            return "exception"
+        if exception_label:
+            return exception_label
         raise execution_error
 
     if branch_label is None:
         return None
 
     normalized_branch = str(branch_label).strip().lower()
+    if normalized_branch in {"exception", "failure", "error"} and exception_label:
+        return exception_label
     if normalized_branch in normalized_labels:
         return normalized_branch
 
@@ -1882,8 +1898,8 @@ def _resolve_code_editor_branch(
         message,
         {"returned_branch": normalized_branch, "available_branches": normalized_labels},
     )
-    if has_exception_branch:
-        return "exception"
+    if exception_label:
+        return exception_label
     raise WorkflowExecutionError("code_editor_branch_not_mapped", message)
 
 
