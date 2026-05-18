@@ -9,6 +9,7 @@ Garantir mudanças de schema com segurança em ambiente multi-workspace (`ws_*`)
 ## Regras de Ouro
 
 - **Nunca** alterar tabelas da aplicação core.
+- **Nunca** alterar enums/tabelas que pertençam a outra aplicação (mesmo dentro de `ws_*`).
 - **Nunca** tocar na tabela `alembic_version` existente dos workspaces.
 - Controle de versão do `orch` é **somente** em `orch_alembic_version` (por schema `ws_*`).
 - Toda mudança estrutural (nova tabela, coluna, índice, constraint) deve virar **arquivo SQL versionado** em `sql/`.
@@ -47,6 +48,49 @@ Garantir mudanças de schema com segurança em ambiente multi-workspace (`ws_*`)
 7. Aplicar em todos os workspaces ativos:
    - `python -m app.cli migrate-all`
 8. Validar cobertura de schemas `ws_*` e registrar evidência no PR/commit.
+
+## Handoff de ownership: `contact_list_members.linked_actuator`
+
+Contexto:
+- `contact_list_members` e o enum `linked_actuator_enum` são de ownership da API parceira (Target Core), não do ORCH.
+- O ORCH **não deve mais** aplicar migrations para adicionar valores nesse enum.
+- Workspaces que já receberam alterações antigas via ORCH permanecem como estão (sem rollback estrutural).
+
+Contrato entre equipes (daqui em diante):
+- ORCH apenas **consome** valores já existentes no enum.
+- API parceira é responsável por criar novos valores de enum antes de publicar código que os utilize.
+
+SQL recomendado para a API parceira (idempotente):
+
+```sql
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_enum e
+    JOIN pg_type t ON t.oid = e.enumtypid
+    WHERE t.typname = 'linked_actuator_enum'
+      AND e.enumlabel = 'whatsapp_without_limit'
+  ) THEN
+    ALTER TYPE linked_actuator_enum ADD VALUE 'whatsapp_without_limit';
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_enum e
+    JOIN pg_type t ON t.oid = e.enumtypid
+    WHERE t.typname = 'linked_actuator_enum'
+      AND e.enumlabel = 'whatsapp_without_limit_by_rate_limit'
+  ) THEN
+    ALTER TYPE linked_actuator_enum ADD VALUE 'whatsapp_without_limit_by_rate_limit';
+  END IF;
+END
+$$;
+```
 
 ## Padrões SQL recomendados
 

@@ -1213,6 +1213,13 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
   - quando o bloqueio ocorrer por `percentual_consumo` (rate limit efetivo), marca `linked_actuator=whatsapp_without_limit_by_rate_limit`.
 - falhas HTTP da API externa fazem retry com backoff no Celery.
 
+### Ownership de enum (`linked_actuator_enum`)
+
+- O ORCH **não aplica mais** migration de enum para `contact_list_members.linked_actuator`.
+- A criação dos valores do enum passa a ser responsabilidade da API dona dessa tabela.
+- Pré-requisito operacional: antes de usar valores novos (`whatsapp_without_limit`, `whatsapp_without_limit_by_rate_limit`), garantir que o enum já foi atualizado pela API parceira.
+- Referência de SQL idempotente para essa atualização: `docs/MIGRATIONS_PLAYBOOK.md` (seção de handoff de ownership).
+
 ### Configuração envolvida
 
 - `SYNC_WEBHOOK_BASE_URL` (base da API Target Core)
