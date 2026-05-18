@@ -33,6 +33,29 @@ def _is_docs_protected_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in _DOCS_PROTECTED_PREFIXES)
 
 
+def _normalize_host(value: str | None) -> str:
+    if not value:
+        return ""
+    host = value.strip().lower()
+    if not host:
+        return ""
+    if "," in host:
+        host = host.split(",", 1)[0].strip()
+    if ":" in host:
+        host = host.split(":", 1)[0].strip()
+    return host
+
+
+def _is_docs_blocked_by_host(request: Request, blocked_hosts: tuple[str, ...]) -> bool:
+    blocked = {_normalize_host(host) for host in blocked_hosts if _normalize_host(host)}
+    if not blocked:
+        return False
+
+    forwarded_host = _normalize_host(request.headers.get("x-forwarded-host"))
+    request_host = _normalize_host(request.headers.get("host"))
+    return forwarded_host in blocked or request_host in blocked
+
+
 def _parse_ip(value: str | None) -> ipaddress._BaseAddress | None:
     if not value:
         return None
@@ -77,6 +100,9 @@ def _resolve_request_origin_ip(
 async def request_context_middleware(request: Request, call_next):
     settings = get_settings()
     if settings.docs_access_control_enabled and _is_docs_protected_path(request.url.path):
+        if _is_docs_blocked_by_host(request, settings.docs_blocked_hosts):
+            return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not Found"})
+
         internal_networks = _parse_networks(settings.docs_internal_cidrs)
         trusted_proxy_networks = _parse_networks(settings.docs_trusted_proxy_cidrs)
         origin_ip = _resolve_request_origin_ip(request, trusted_proxy_networks)
