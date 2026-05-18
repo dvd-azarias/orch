@@ -1358,7 +1358,7 @@ async def assign_whatsapp_routing_for_session(
         allowed_limit = int(allowed_limit_raw)
         percentual = _normalized_percentual(str(candidate.get("phone") or "").strip())
         if percentual <= 0:
-            return allowed_limit
+            return 0
         return int((allowed_limit * percentual) // 100)
 
     def _has_remaining_limit(candidate: dict[str, Any]) -> bool:
@@ -1369,10 +1369,6 @@ async def assign_whatsapp_routing_for_session(
         return consumed_value < effective_limit
 
     def _is_rate_limit_block(candidate: dict[str, Any]) -> bool:
-        phone = str(candidate.get("phone") or "").strip()
-        percentual = _normalized_percentual(phone)
-        if percentual <= 0:
-            return False
         effective_limit = _effective_limit(candidate)
         if effective_limit is None:
             return False
