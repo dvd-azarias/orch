@@ -69,6 +69,17 @@ def test_resolve_origin_ip_ignores_forwarded_for_from_untrusted_proxy() -> None:
     assert str(origin_ip) == "8.8.8.8"
 
 
+def test_resolve_origin_ip_fails_closed_when_trusted_proxy_without_forwarded_for() -> None:
+    req = _FakeRequest(
+        client=_FakeClient(host="10.1.20.130"),
+        headers={},
+        url=_FakeUrl(path="/docs"),
+    )
+    trusted_proxy_networks = _parse_networks(("10.1.20.130/32",))
+    origin_ip = _resolve_request_origin_ip(req, trusted_proxy_networks)
+    assert origin_ip is None
+
+
 def test_external_origin_is_blocked_by_internal_network_rule() -> None:
     req = _FakeRequest(
         client=_FakeClient(host="10.1.20.11"),
@@ -90,6 +101,19 @@ def test_internal_origin_is_allowed_by_internal_network_rule() -> None:
     )
     trusted_proxy_networks = _parse_networks(("10.1.20.0/24",))
     internal_networks = _parse_networks(("10.1.20.0/24",))
+
+    origin_ip = _resolve_request_origin_ip(req, trusted_proxy_networks)
+    assert _ip_in_networks(origin_ip, internal_networks)
+
+
+def test_vpn_origin_is_allowed_by_internal_network_rule() -> None:
+    req = _FakeRequest(
+        client=_FakeClient(host="10.1.20.130"),
+        headers={"x-forwarded-for": "10.100.105.129"},
+        url=_FakeUrl(path="/docs"),
+    )
+    trusted_proxy_networks = _parse_networks(("10.1.20.130/32",))
+    internal_networks = _parse_networks(("10.1.20.0/24", "10.100.105.0/24"))
 
     origin_ip = _resolve_request_origin_ip(req, trusted_proxy_networks)
     assert _ip_in_networks(origin_ip, internal_networks)

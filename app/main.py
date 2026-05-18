@@ -68,10 +68,10 @@ def _resolve_request_origin_ip(
 
     forwarded_for = request.headers.get("x-forwarded-for", "").strip()
     if not forwarded_for:
-        return direct_ip
+        return None
 
     first_forwarded_ip = _parse_ip(forwarded_for.split(",")[0].strip())
-    return first_forwarded_ip or direct_ip
+    return first_forwarded_ip
 
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
