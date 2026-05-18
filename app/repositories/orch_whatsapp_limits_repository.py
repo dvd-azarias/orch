@@ -5,6 +5,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.phone_normalizer import normalize_phone_to_canonical_ani
+
 
 async def register_whatsapp_limit_event(
     db_session: AsyncSession,
@@ -12,24 +14,44 @@ async def register_whatsapp_limit_event(
     phone: str,
     allowed_limit: int,
 ) -> dict[str, Any]:
-    lock_key = f"whatsapp-limit|{phone}"
+    canonical_phone = str(normalize_phone_to_canonical_ani(phone) or "").strip()
+    if not canonical_phone:
+        raise ValueError("phone inválido para limite de WhatsApp.")
+
+    lock_key = f"whatsapp-limit|{canonical_phone}"
     await db_session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
         {"lock_key": lock_key},
     )
-    await db_session.execute(
+    active_rows = await db_session.execute(
         text(
             """
-            UPDATE orch_whatsapp_limits
-            SET
-                in_use = FALSE,
-                updated_at = NOW()
-            WHERE phone = :phone
-              AND in_use = TRUE
+            SELECT id, phone
+            FROM orch_whatsapp_limits
+            WHERE in_use = TRUE
             """
-        ),
-        {"phone": phone},
+        )
     )
+    deactivate_ids: list[int] = []
+    for row in active_rows.mappings().all():
+        current_phone = str(row["phone"] or "").strip()
+        if str(normalize_phone_to_canonical_ani(current_phone) or "").strip() == canonical_phone:
+            deactivate_ids.append(int(row["id"]))
+
+    if deactivate_ids:
+        await db_session.execute(
+            text(
+                """
+                UPDATE orch_whatsapp_limits
+                SET
+                    in_use = FALSE,
+                    updated_at = NOW()
+                WHERE id = ANY(CAST(:deactivate_ids AS BIGINT[]))
+                """
+            ),
+            {"deactivate_ids": deactivate_ids},
+        )
+
     result = await db_session.execute(
         text(
             """
@@ -60,7 +82,7 @@ async def register_whatsapp_limit_event(
             """
         ),
         {
-            "phone": phone,
+            "phone": canonical_phone,
             "allowed_limit": allowed_limit,
         },
     )

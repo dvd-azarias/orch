@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.services.app_detector import detect_app
-from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit
+from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit, normalize_phone_to_canonical_ani
 from app.services.session_extractor import extract_session_fields
 
 PAYLOADS_DIR = Path(__file__).parent / "payloads"
@@ -157,3 +157,16 @@ def test_extract_session_fields_normalizes_dialer_12_digits_missing_ninth() -> N
     extracted = extract_session_fields("DialerApp", payload)
     assert extracted.entity == "test-uid"
     assert extracted.entity_address == "5543999056041"
+
+
+@pytest.mark.parametrize(
+    ("phone", "expected"),
+    [
+        ("551147371485", "1147371485"),
+        ("+55 (11) 4737-1485", "1147371485"),
+        ("1147371485", "1147371485"),
+        ("5511497371485", "11497371485"),
+    ],
+)
+def test_normalize_phone_to_canonical_ani(phone: str, expected: str) -> None:
+    assert normalize_phone_to_canonical_ani(phone) == expected

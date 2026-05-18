@@ -37,6 +37,7 @@ from app.repositories.orch_sessions_repository import (
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.otima_llm_service import execute_otima_llm_prompt
+from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workflow_engine import (
     component_kind,
@@ -620,7 +621,7 @@ def _extract_send_with_whatsapp_number_policies(component: dict[str, Any]) -> tu
     for item in rows:
         if not isinstance(item, dict):
             continue
-        value = str(item.get("number") or "").strip()
+        value = str(normalize_phone_to_canonical_ani(item.get("number")) or "").strip()
         if not value or value in seen:
             continue
         percentual_raw = item.get("percentual_consumo")

@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.workspace import get_current_workspace_schema
+from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 
 SESSION_STATE_FINISHED = 3
 SESSION_STATE_STOPPED_AFTER_UNASSIGN = 5
@@ -1199,10 +1200,13 @@ async def assign_whatsapp_routing_for_session(
     numbers: list[str],
     percentual_by_phone: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
+    def _canonical_phone(value: str | None) -> str:
+        return str(normalize_phone_to_canonical_ani(value) or "").strip()
+
     normalized_numbers: list[str] = []
     seen: set[str] = set()
     for raw in numbers:
-        value = str(raw).strip()
+        value = _canonical_phone(raw)
         if not value or value in seen:
             continue
         seen.add(value)
@@ -1243,6 +1247,7 @@ async def assign_whatsapp_routing_for_session(
 
     member_id = int(target["id"])
     previous_ani = str(target["previous_ani"]).strip() if target["previous_ani"] is not None else ""
+    previous_ani_canonical = _canonical_phone(previous_ani)
     previous_linked_actuator = (
         str(target["previous_linked_actuator"]).strip().lower()
         if target["previous_linked_actuator"] is not None
@@ -1282,13 +1287,47 @@ async def assign_whatsapp_routing_for_session(
                 COALESCE(rate.consumed, 0) AS consumed,
                 lim.allowed_limit AS allowed_limit
             FROM UNNEST(CAST(:numbers AS text[])) AS pool(number)
-            LEFT JOIN orch_whatsapp_rate_limit_per_flow rate
-              ON rate.flow_uuid = CAST(:flow_uuid AS uuid)
-             AND rate.phone = pool.number
-             AND rate.day = CURRENT_DATE
-            LEFT JOIN orch_whatsapp_limits lim
-              ON lim.phone = pool.number
-             AND lim.in_use = TRUE
+            LEFT JOIN (
+                SELECT
+                    CASE
+                        WHEN LEFT(regexp_replace(phone, '\\D', '', 'g'), 2) = '55'
+                             AND LENGTH(regexp_replace(phone, '\\D', '', 'g')) IN (12, 13)
+                        THEN SUBSTRING(regexp_replace(phone, '\\D', '', 'g') FROM 3)
+                        ELSE regexp_replace(phone, '\\D', '', 'g')
+                    END AS canonical_phone,
+                    SUM(consumed)::bigint AS consumed
+                FROM orch_whatsapp_rate_limit_per_flow
+                WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+                  AND day = CURRENT_DATE
+                GROUP BY 1
+            ) rate
+              ON rate.canonical_phone = pool.number
+            LEFT JOIN (
+                SELECT canonical_phone, allowed_limit
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN LEFT(regexp_replace(phone, '\\D', '', 'g'), 2) = '55'
+                                 AND LENGTH(regexp_replace(phone, '\\D', '', 'g')) IN (12, 13)
+                            THEN SUBSTRING(regexp_replace(phone, '\\D', '', 'g') FROM 3)
+                            ELSE regexp_replace(phone, '\\D', '', 'g')
+                        END AS canonical_phone,
+                        allowed_limit,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY CASE
+                                WHEN LEFT(regexp_replace(phone, '\\D', '', 'g'), 2) = '55'
+                                     AND LENGTH(regexp_replace(phone, '\\D', '', 'g')) IN (12, 13)
+                                THEN SUBSTRING(regexp_replace(phone, '\\D', '', 'g') FROM 3)
+                                ELSE regexp_replace(phone, '\\D', '', 'g')
+                            END
+                            ORDER BY received_from_meta_at DESC, id DESC
+                        ) AS rn
+                    FROM orch_whatsapp_limits
+                    WHERE in_use = TRUE
+                ) ranked_limits
+                WHERE rn = 1
+            ) lim
+              ON lim.canonical_phone = pool.number
             ORDER BY COALESCE(rate.consumed, 0) ASC, pool.number ASC
             """
         ),
@@ -1344,10 +1383,10 @@ async def assign_whatsapp_routing_for_session(
     chosen_phone: str | None = None
     mode = "balanced_ani"
 
-    if previous_linked_actuator == "whatsapp" and previous_ani in candidate_by_phone:
-        previous_candidate = candidate_by_phone[previous_ani]
+    if previous_linked_actuator == "whatsapp" and previous_ani_canonical in candidate_by_phone:
+        previous_candidate = candidate_by_phone[previous_ani_canonical]
         if _has_remaining_limit(previous_candidate):
-            chosen_phone = previous_ani
+            chosen_phone = previous_ani_canonical
             mode = "reuse_previous_with_limit"
 
     if chosen_phone is None:
@@ -1360,8 +1399,8 @@ async def assign_whatsapp_routing_for_session(
 
     if chosen_phone is None:
         fallback_phone = ""
-        if previous_ani in candidate_by_phone:
-            fallback_phone = previous_ani
+        if previous_ani_canonical in candidate_by_phone:
+            fallback_phone = previous_ani_canonical
         elif candidates:
             fallback_phone = str(candidates[0].get("phone") or "").strip()
         blocked_by_rate_limit = any(_is_rate_limit_block(item) for item in candidates)
@@ -1423,7 +1462,7 @@ async def assign_whatsapp_routing_for_session(
     if row is None:
         return None
 
-    current_ani = str(row["ani"]).strip() if row["ani"] is not None else ""
+    current_ani = _canonical_phone(str(row["ani"]).strip()) if row["ani"] is not None else ""
     current_linked_actuator = str(row["linked_actuator"]).strip().lower() if row["linked_actuator"] is not None else ""
     should_increment_consumption = bool(current_ani) and current_linked_actuator == "whatsapp"
     consumption = None
@@ -1553,6 +1592,10 @@ async def increment_whatsapp_rate_limit_per_flow(
     flow_uuid: str,
     phone: str,
 ) -> dict[str, Any]:
+    canonical_phone = str(normalize_phone_to_canonical_ani(phone) or "").strip()
+    if not canonical_phone:
+        raise ValueError("phone inválido para incremento de consumo de WhatsApp.")
+
     result = await db_session.execute(
         text(
             """
@@ -1586,7 +1629,7 @@ async def increment_whatsapp_rate_limit_per_flow(
         ),
         {
             "flow_uuid": flow_uuid,
-            "phone": str(phone).strip(),
+            "phone": canonical_phone,
         },
     )
     row = dict(result.mappings().one())
