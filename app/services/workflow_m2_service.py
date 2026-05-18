@@ -98,6 +98,9 @@ DIALER_RESPONSE_BRANCH_BY_STATUS = {
     "failed": "failed",
     "machine": "machine",
 }
+LOOP_GUARD_WORKFLOW_META_KEY = "loop_guard"
+LOOP_GUARD_COUNTER_KEY = "continuous_steps"
+LOOP_GUARD_LAST_TRANSITION_KEY = "last_transition_signature"
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,15 @@ def _read_max_steps(settings: Any) -> int:
     return max(1, min(200, value))
 
 
+def _read_loop_guard_repeat_threshold(settings: Any) -> int:
+    raw = getattr(settings, "workflow_m2_loop_guard_repeat_threshold", 300)
+    try:
+        value = int(raw)
+    except Exception:
+        value = 300
+    return max(1, min(5000, value))
+
+
 def _to_uuid_or_none(raw_value: str | None) -> str | None:
     if raw_value is None:
         return None
@@ -164,6 +176,39 @@ def _ensure_workflow_meta(runtime_variables: dict[str, Any]) -> dict[str, Any]:
     workflow_meta = {}
     runtime_variables["workflow_v2"] = workflow_meta
     return workflow_meta
+
+
+def _ensure_loop_guard_meta(runtime_variables: dict[str, Any]) -> dict[str, Any]:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    loop_guard_meta = workflow_meta.get(LOOP_GUARD_WORKFLOW_META_KEY)
+    if isinstance(loop_guard_meta, dict):
+        return loop_guard_meta
+    loop_guard_meta = {}
+    workflow_meta[LOOP_GUARD_WORKFLOW_META_KEY] = loop_guard_meta
+    return loop_guard_meta
+
+
+def _register_loop_guard_step(
+    runtime_variables: dict[str, Any],
+    *,
+    transition_signature: str | None,
+) -> int:
+    loop_guard_meta = _ensure_loop_guard_meta(runtime_variables)
+    raw_counter = loop_guard_meta.get(LOOP_GUARD_COUNTER_KEY, 0)
+    try:
+        counter = int(raw_counter)
+    except Exception:
+        counter = 0
+    counter = max(0, counter) + 1
+    loop_guard_meta[LOOP_GUARD_COUNTER_KEY] = counter
+    if transition_signature:
+        loop_guard_meta[LOOP_GUARD_LAST_TRANSITION_KEY] = transition_signature
+    return counter
+
+
+def _reset_loop_guard_counter(runtime_variables: dict[str, Any]) -> None:
+    loop_guard_meta = _ensure_loop_guard_meta(runtime_variables)
+    loop_guard_meta[LOOP_GUARD_COUNTER_KEY] = 0
 
 
 def _read_next_cursor(runtime_variables: dict[str, Any]) -> str | None:
@@ -2289,6 +2334,7 @@ async def execute_workflow_m2_for_session(
 
     safe_schema = get_current_workspace_schema().replace('"', '""')
     max_steps = _read_max_steps(settings)
+    loop_guard_repeat_threshold = _read_loop_guard_repeat_threshold(settings)
     execution_started_at = datetime.now(timezone.utc)
     execution_started_perf = time.perf_counter()
     session_uuid_for_metrics: str | None = None
@@ -2701,6 +2747,7 @@ async def execute_workflow_m2_for_session(
                         executed_steps += 1
                         _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
                         _mark_blocking_execution(runtime_variables, stopped_reason="blocked_run_flow")
+                        _reset_loop_guard_counter(runtime_variables)
                         await replace_session_workflow_state(
                             db_session,
                             session_id=session_id,
@@ -2780,6 +2827,7 @@ async def execute_workflow_m2_for_session(
                         executed_steps += 1
                         _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
                         _mark_blocking_execution(runtime_variables, stopped_reason=blocking_stop_reason)
+                        _reset_loop_guard_counter(runtime_variables)
 
                         await replace_session_workflow_state(
                             db_session,
@@ -2833,6 +2881,7 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid = resolved_next
                     executed_steps += 1
                     _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                    _reset_loop_guard_counter(runtime_variables)
 
                     await replace_session_workflow_state(
                         db_session,
@@ -2887,6 +2936,47 @@ async def execute_workflow_m2_for_session(
                         next_card_uuid = resume_cursor_for_channel
                         executed_steps += 1
                         _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                        transition_signature = f"{last_card_uuid}->{next_card_uuid}"
+                        loop_guard_counter = _register_loop_guard_step(
+                            runtime_variables,
+                            transition_signature=transition_signature,
+                        )
+                        if loop_guard_counter >= loop_guard_repeat_threshold:
+                            await replace_session_workflow_state(
+                                db_session,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                                next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                                ended_at=datetime.now(timezone.utc),
+                                state=3,
+                            )
+                            step_finished_at = datetime.now(timezone.utc)
+                            _append_metric(
+                                metric_type="card",
+                                status="stopped",
+                                started_at=step_started_at,
+                                finished_at=step_finished_at,
+                                latency_ms=(time.perf_counter() - step_started_perf) * 1000,
+                                stopped_reason="loop_guard_repeat_limit",
+                                step_index=executed_steps,
+                                card_cursor=last_card_uuid,
+                                component_kind_value=kind,
+                                details={
+                                    "next_card_uuid": next_card_uuid,
+                                    "loop_guard_counter": loop_guard_counter,
+                                    "loop_guard_threshold": loop_guard_repeat_threshold,
+                                },
+                            )
+                            return await _finalize(
+                                WorkflowExecutionResult(
+                                    True,
+                                    executed_steps,
+                                    "loop_guard_repeat_limit",
+                                    last_card_uuid,
+                                    next_card_uuid,
+                                )
+                            )
                         await replace_session_workflow_state(
                             db_session,
                             session_id=session_id,
@@ -2916,6 +3006,7 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid = None
                     executed_steps += 1
                     _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                    _reset_loop_guard_counter(runtime_variables)
 
                     await replace_session_workflow_state(
                         db_session,
@@ -3002,6 +3093,49 @@ async def execute_workflow_m2_for_session(
             next_card_uuid = resolved_next
             executed_steps += 1
             _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+            transition_signature = f"{current}->{resolved_next or 'END'}"
+            loop_guard_counter = _register_loop_guard_step(
+                runtime_variables,
+                transition_signature=transition_signature,
+            )
+            if loop_guard_counter >= loop_guard_repeat_threshold:
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                    next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                    ended_at=datetime.now(timezone.utc),
+                    state=3,
+                )
+                step_finished_at = datetime.now(timezone.utc)
+                step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                _append_metric(
+                    metric_type="card",
+                    status="stopped",
+                    started_at=step_started_at,
+                    finished_at=step_finished_at,
+                    latency_ms=step_latency_ms,
+                    stopped_reason="loop_guard_repeat_limit",
+                    step_index=executed_steps,
+                    card_cursor=last_card_uuid,
+                    component_kind_value=kind,
+                    details={
+                        "branch_label": branch_label,
+                        "next_card_uuid": next_card_uuid,
+                        "loop_guard_counter": loop_guard_counter,
+                        "loop_guard_threshold": loop_guard_repeat_threshold,
+                    },
+                )
+                return await _finalize(
+                    WorkflowExecutionResult(
+                        True,
+                        executed_steps,
+                        "loop_guard_repeat_limit",
+                        last_card_uuid,
+                        next_card_uuid,
+                    )
+                )
 
             await replace_session_workflow_state(
                 db_session,

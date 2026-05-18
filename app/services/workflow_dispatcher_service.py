@@ -37,6 +37,7 @@ FATAL_NON_RESUMABLE_STOP_REASONS = {
     "revision_not_found",
     "session_not_found",
     "component_not_found",
+    "loop_guard_repeat_limit",
 }
 
 
