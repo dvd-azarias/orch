@@ -112,6 +112,17 @@ DOCS_INTERNAL_CIDRS=10.1.20.0/24,127.0.0.1/32,::1/128
 DOCS_TRUSTED_PROXY_CIDRS=10.1.20.0/24,127.0.0.1/32,::1/128
 ```
 
+Recomendação de hardening para ambiente com bridge externa em `10.1.20.130` e acesso VPN:
+
+```env
+DOCS_ACCESS_CONTROL_ENABLED=true
+DOCS_INTERNAL_CIDRS=10.1.20.0/24,10.100.105.0/24,127.0.0.1/32,::1/128
+DOCS_TRUSTED_PROXY_CIDRS=10.1.20.130/32,127.0.0.1/32,::1/128
+```
+
+Observação:
+- quando o cliente direto está em proxy confiável, sem `X-Forwarded-For`, o acesso é negado por segurança (fail-closed).
+
 ## Endpoint `POST /v1/orch/{flow_uuid}` (base implementada)
 
 - Aceita payload JSON genérico.
