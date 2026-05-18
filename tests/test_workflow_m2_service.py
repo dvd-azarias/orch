@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
+    WorkflowExecutionError,
     _blocking_stop_reason_for_component,
     _clear_blocking_execution,
     _compute_whatsapp_status_order_delay,
@@ -36,6 +37,7 @@ from app.services.workflow_m2_service import (
     _set_whatsapp_resume_cursor,
     _set_dialer_resume_cursor,
     _read_dialer_resume_cursor,
+    _resolve_code_editor_branch,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
     _should_resume_run_flow_blocking_execution,
@@ -635,6 +637,40 @@ export default async function main(ctx) {
 
     assert branch == "success"
     assert runtime_variables["variables"]["customs"]["resultado"] == 228
+
+
+def test_resolve_code_editor_branch_redirects_to_exception_on_runtime_error() -> None:
+    runtime_variables: dict[str, object] = {}
+    resolved = _resolve_code_editor_branch(
+        branch_label=None,
+        branch_labels=["success", "exception"],
+        runtime_variables=runtime_variables,  # type: ignore[arg-type]
+        execution_error=WorkflowExecutionError("code_editor_runtime_error", "boom"),
+    )
+    assert resolved == "exception"
+    assert runtime_variables["code_editor_last_error"]["code"] == "code_editor_runtime_error"
+
+
+def test_resolve_code_editor_branch_redirects_to_exception_on_unmapped_branch() -> None:
+    runtime_variables: dict[str, object] = {}
+    resolved = _resolve_code_editor_branch(
+        branch_label="failure",
+        branch_labels=["success", "exception"],
+        runtime_variables=runtime_variables,  # type: ignore[arg-type]
+    )
+    assert resolved == "exception"
+    assert runtime_variables["code_editor_last_error"]["code"] == "code_editor_branch_not_mapped"
+
+
+def test_resolve_code_editor_branch_raises_when_unmapped_and_no_exception() -> None:
+    runtime_variables: dict[str, object] = {}
+    with pytest.raises(WorkflowExecutionError) as exc:
+        _resolve_code_editor_branch(
+            branch_label="failure",
+            branch_labels=["success"],
+            runtime_variables=runtime_variables,  # type: ignore[arg-type]
+        )
+    assert exc.value.code == "code_editor_branch_not_mapped"
 
 
 def test_api_call_maps_response_into_customs(monkeypatch) -> None:
