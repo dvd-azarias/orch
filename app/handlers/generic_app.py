@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from uuid import uuid4
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -16,7 +17,11 @@ def is_callback(payload: dict[str, Any]) -> bool:
 
 
 def is_generic(payload: dict[str, Any]) -> bool:
-    return is_callback(payload) or "external_id" in payload
+    if is_callback(payload):
+        return True
+    if "external_id" in payload:
+        return True
+    return bool(payload)
 
 
 def extract_callback_session_fields(payload: dict[str, Any]) -> SessionExtraction:
@@ -45,10 +50,7 @@ def extract_generic_session_fields(payload: dict[str, Any]) -> SessionExtraction
 
     external_id = str(payload.get("external_id", "")).strip()
     if not external_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Payload de GenericApp inválido: campo 'external_id' obrigatório.",
-        )
+        external_id = f"generated-{uuid4()}"
 
     return SessionExtraction(
         entity=external_id,

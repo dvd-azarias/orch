@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
 
 from app.services.app_detector import detect_app
 from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit
@@ -92,24 +91,24 @@ def test_extract_session_fields_with_phase1_payloads(file_name: str, expected_ex
     assert extracted.model_dump() == expected_extracted
 
 
-def test_detect_app_returns_422_for_unknown_payload() -> None:
+def test_detect_app_returns_generic_for_unknown_payload() -> None:
     payload = _load_payload("unknown_invalid.json")
-
-    with pytest.raises(HTTPException) as exc_info:
-        detect_app(payload)
-
-    assert exc_info.value.status_code == 422
-    assert "external_id" in str(exc_info.value.detail)
+    assert detect_app(payload) == "GenericApp"
 
 
-def test_generic_extraction_returns_422_for_blank_external_id() -> None:
+def test_generic_extraction_generates_external_id_for_blank_external_id() -> None:
     payload = {"external_id": "   "}
+    extracted = extract_session_fields("GenericApp", payload)
+    assert extracted.entity.startswith("generated-")
+    assert extracted.entity_type == "api_request"
 
-    with pytest.raises(HTTPException) as exc_info:
-        extract_session_fields("GenericApp", payload)
 
-    assert exc_info.value.status_code == 422
-    assert "external_id" in str(exc_info.value.detail)
+def test_generic_extraction_generates_external_id_when_missing() -> None:
+    payload = {"valor_recebido": 100}
+    extracted = extract_session_fields("GenericApp", payload)
+    assert extracted.entity.startswith("generated-")
+    assert extracted.entity == extracted.entity_address
+    assert extracted.entity == extracted.entity_session_id
 
 
 @pytest.mark.parametrize(
