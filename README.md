@@ -130,7 +130,7 @@ Observação:
 
 - Aceita payload JSON genérico.
 - Detecta App de origem nesta ordem: `ArquivosApp`, `WhatsApp`, `DialerApp`, `GenericApp`.
-- Para `GenericApp`, exige ao menos `external_id`; sem isso retorna `422` com mensagem em pt-BR.
+- Para `GenericApp`, usa `external_id` quando presente; quando ausente, gera identificador interno (`generated-<uuid4>`).
 - Extrai campos mínimos de sessão por App: `entity`, `entity_type`, `entity_address`, `entity_session_id`.
 - Persiste sessão na `orch_sessions` com regra de sessão ativa (`state <> 3 AND unassigned_at IS NULL`):
   - se já existir sessão ativa para a combinação (`flow_uuid`, `entity`, `entity_type`, `entity_address`), atualiza;
@@ -320,15 +320,13 @@ Extração de telefone:
 
 Identificação:
 - não classificar como ArquivosApp/WhatsApp/DialerApp
-- payload conter `external_id`
+- payload genérico não vazio (usa `external_id` quando enviado)
 
 Mapeamento:
-- `entity = external_id`
+- `entity = external_id` (ou `generated-<uuid4>` quando ausente)
 - `entity_type = api_request`
-- `entity_address = external_id`
-- `entity_session_id = external_id`
-
-Se não for reconhecido e não houver `external_id`, retornar `422 Unprocessable Entity` (mensagem clara em pt-BR).
+- `entity_address = entity`
+- `entity_session_id = entity`
 
 ## Regra de abertura/reuso de sessão
 
@@ -468,7 +466,7 @@ Payload de teste (GenericApp):
 
 ```json
 {
-  "external_id": "fffffff",
+  "external_id": "20260518-00001",
   "valor_recebido": 114
 }
 ```
