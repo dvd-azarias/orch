@@ -28,6 +28,7 @@ from app.services.workflow_m2_service import (
     _run_condition,
     _run_generate_file,
     _run_intelligent_agent,
+    _read_loop_guard_repeat_threshold,
     _run_process_dialer_response,
     _run_run_flow,
     _run_process_whatsapp_response,
@@ -37,6 +38,8 @@ from app.services.workflow_m2_service import (
     _set_whatsapp_resume_cursor,
     _set_dialer_resume_cursor,
     _read_dialer_resume_cursor,
+    _register_loop_guard_step,
+    _reset_loop_guard_counter,
     _resolve_code_editor_branch,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
@@ -71,6 +74,27 @@ def test_clear_blocking_execution_resets_runtime_meta() -> None:
     _mark_blocking_execution(runtime_variables, stopped_reason="blocked_process_whatsapp_response")
     _clear_blocking_execution(runtime_variables)
     assert _read_blocking_stop_reason(runtime_variables) is None
+
+
+def test_loop_guard_counter_roundtrip() -> None:
+    runtime_variables: dict[str, object] = {}
+    first = _register_loop_guard_step(runtime_variables, transition_signature="card-a->card-b")
+    second = _register_loop_guard_step(runtime_variables, transition_signature="card-b->card-c")
+    assert first == 1
+    assert second == 2
+    assert runtime_variables["workflow_v2"]["loop_guard"]["last_transition_signature"] == "card-b->card-c"
+    _reset_loop_guard_counter(runtime_variables)
+    assert runtime_variables["workflow_v2"]["loop_guard"]["continuous_steps"] == 0
+
+
+def test_read_loop_guard_repeat_threshold_bounds_values() -> None:
+    class _Settings:
+        workflow_m2_loop_guard_repeat_threshold = "0"
+
+    assert _read_loop_guard_repeat_threshold(_Settings()) == 1
+
+    _Settings.workflow_m2_loop_guard_repeat_threshold = "999999"
+    assert _read_loop_guard_repeat_threshold(_Settings()) == 5000
 
 
 def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:

@@ -25,6 +25,7 @@ class Settings:
     workflow_v2_enabled: bool
     workflow_v2_execute_m2: bool
     workflow_v2_max_steps: int
+    workflow_m2_loop_guard_repeat_threshold: int
     celery_enabled: bool
     celery_broker_url: str
     celery_result_backend: str | None
@@ -249,6 +250,7 @@ def get_settings() -> Settings:
         workflow_v2_enabled=_read_env_bool("WORKFLOW_V2_ENABLED", False),
         workflow_v2_execute_m2=_read_env_bool("WORKFLOW_V2_EXECUTE_M2", False),
         workflow_v2_max_steps=_read_env_int("WORKFLOW_V2_MAX_STEPS", 25),
+        workflow_m2_loop_guard_repeat_threshold=_read_env_int("WORKFLOW_M2_LOOP_GUARD_REPEAT_THRESHOLD", 300),
         celery_enabled=_read_env_bool("CELERY_ENABLED", False),
         celery_broker_url=broker_url,
         celery_result_backend=result_backend,

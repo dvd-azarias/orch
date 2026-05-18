@@ -112,6 +112,12 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
             "workflow_m2_max_steps_reached",
             "Execução M2 interrompida por limite de passos.",
         )
+    if stopped_reason == "loop_guard_repeat_limit":
+        return (
+            "error",
+            "workflow_m2_loop_guard_repeat_limit",
+            "Execução M2 interrompida por proteção de loop infinito.",
+        )
     if stopped_reason == "session_execution_locked":
         return (
             "warning",
