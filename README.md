@@ -110,6 +110,7 @@ Variáveis de ambiente:
 DOCS_ACCESS_CONTROL_ENABLED=true
 DOCS_INTERNAL_CIDRS=10.1.20.0/24,127.0.0.1/32,::1/128
 DOCS_TRUSTED_PROXY_CIDRS=10.1.20.0/24,127.0.0.1/32,::1/128
+DOCS_BLOCKED_HOSTS=orch.otima.digital
 ```
 
 Recomendação de hardening para ambiente com bridge externa em `10.1.20.130` e acesso VPN:
@@ -118,10 +119,12 @@ Recomendação de hardening para ambiente com bridge externa em `10.1.20.130` e 
 DOCS_ACCESS_CONTROL_ENABLED=true
 DOCS_INTERNAL_CIDRS=10.1.20.0/24,10.100.105.0/24,127.0.0.1/32,::1/128
 DOCS_TRUSTED_PROXY_CIDRS=10.1.20.130/32,127.0.0.1/32,::1/128
+DOCS_BLOCKED_HOSTS=orch.otima.digital
 ```
 
 Observação:
 - quando o cliente direto está em proxy confiável, sem `X-Forwarded-For`, o acesso é negado por segurança (fail-closed).
+- quando `Host`/`X-Forwarded-Host` estiver em `DOCS_BLOCKED_HOSTS` (ex.: `orch.otima.digital`), `/docs` é negado independentemente do IP de origem.
 
 ## Endpoint `POST /v1/orch/{flow_uuid}` (base implementada)
 

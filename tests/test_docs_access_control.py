@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.main import (
+    _is_docs_blocked_by_host,
     _ip_in_networks,
     _is_docs_protected_path,
     _parse_ip,
@@ -121,3 +122,30 @@ def test_vpn_origin_is_allowed_by_internal_network_rule() -> None:
 
 def test_parse_ip_invalid_returns_none() -> None:
     assert _parse_ip("not-an-ip") is None
+
+
+def test_docs_blocked_by_host_when_host_matches() -> None:
+    req = _FakeRequest(
+        client=_FakeClient(host="10.1.20.11"),
+        headers={"host": "orch.otima.digital"},
+        url=_FakeUrl(path="/docs"),
+    )
+    assert _is_docs_blocked_by_host(req, ("orch.otima.digital",))
+
+
+def test_docs_blocked_by_host_when_forwarded_host_matches() -> None:
+    req = _FakeRequest(
+        client=_FakeClient(host="10.1.20.11"),
+        headers={"x-forwarded-host": "orch.otima.digital"},
+        url=_FakeUrl(path="/docs"),
+    )
+    assert _is_docs_blocked_by_host(req, ("orch.otima.digital",))
+
+
+def test_docs_not_blocked_by_host_when_internal_ip_host_used() -> None:
+    req = _FakeRequest(
+        client=_FakeClient(host="10.1.20.11"),
+        headers={"host": "10.1.20.239:7777"},
+        url=_FakeUrl(path="/docs"),
+    )
+    assert not _is_docs_blocked_by_host(req, ("orch.otima.digital",))

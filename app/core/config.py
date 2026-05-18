@@ -73,6 +73,7 @@ class Settings:
     docs_access_control_enabled: bool
     docs_internal_cidrs: tuple[str, ...]
     docs_trusted_proxy_cidrs: tuple[str, ...]
+    docs_blocked_hosts: tuple[str, ...]
 
     @property
     def psycopg_dsn(self) -> str:
@@ -334,5 +335,9 @@ def get_settings() -> Settings:
         docs_trusted_proxy_cidrs=_read_env_csv(
             "DOCS_TRUSTED_PROXY_CIDRS",
             ("10.1.20.0/24", "127.0.0.1/32", "::1/128"),
+        ),
+        docs_blocked_hosts=_read_env_csv(
+            "DOCS_BLOCKED_HOSTS",
+            ("orch.otima.digital",),
         ),
     )
