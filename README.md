@@ -1211,6 +1211,7 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
   - comparações de limite/consumo usam a mesma chave canônica de telefone;
   - o ORCH avalia os números configurados e tenta escolher um `phone` com limite disponível (`consumed < allowed_limit` do registro `in_use=true`);
   - quando `percentual_consumo > 0` no número configurado, o limite efetivo do dia passa a ser `floor(allowed_limit * percentual_consumo / 100)` para aquele `phone`;
+  - quando `percentual_consumo = 0`, o limite efetivo do número é `0` (não envia por esse número);
   - se o número inicialmente candidato estiver sem saldo, tenta os demais números configurados;
   - só marca `linked_actuator=whatsapp_without_limit` quando todos os números elegíveis estiverem sem saldo.
   - quando o bloqueio ocorrer por `percentual_consumo` (rate limit efetivo), marca `linked_actuator=whatsapp_without_limit_by_rate_limit`.
