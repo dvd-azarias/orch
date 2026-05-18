@@ -1840,6 +1840,53 @@ def _run_code_editor(
     return text_branch or None
 
 
+def _resolve_code_editor_branch(
+    *,
+    branch_label: str | None,
+    branch_labels: list[str],
+    runtime_variables: dict[str, Any],
+    execution_error: WorkflowExecutionError | None = None,
+) -> str | None:
+    normalized_labels = [str(label).strip().lower() for label in branch_labels if str(label).strip()]
+    has_exception_branch = "exception" in normalized_labels
+
+    def _set_last_error(code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        payload: dict[str, Any] = {
+            "code": code,
+            "message": message,
+        }
+        if isinstance(details, dict) and details:
+            payload["details"] = details
+        runtime_variables["code_editor_last_error"] = payload
+
+    if execution_error is not None:
+        _set_last_error(
+            execution_error.code,
+            execution_error.message,
+            {"available_branches": normalized_labels},
+        )
+        if has_exception_branch:
+            return "exception"
+        raise execution_error
+
+    if branch_label is None:
+        return None
+
+    normalized_branch = str(branch_label).strip().lower()
+    if normalized_branch in normalized_labels:
+        return normalized_branch
+
+    message = f"Branch '{normalized_branch}' retornado pelo code_editor não está mapeado no fluxo."
+    _set_last_error(
+        "code_editor_branch_not_mapped",
+        message,
+        {"returned_branch": normalized_branch, "available_branches": normalized_labels},
+    )
+    if has_exception_branch:
+        return "exception"
+    raise WorkflowExecutionError("code_editor_branch_not_mapped", message)
+
+
 def _parse_headers(raw_headers: Any, variables: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
     if isinstance(raw_headers, dict):
@@ -2513,11 +2560,24 @@ async def execute_workflow_m2_for_session(
                     branch_label = _run_condition(component, runtime_variables)
                 elif kind == "code_editor":
                     branch_candidates = outgoing_branch_labels(definition, current_card_uuid=next_card_uuid)
-                    branch_label = _run_code_editor(
-                        component=component,
-                        runtime_variables=runtime_variables,
-                        branch_labels=branch_candidates,
-                    )
+                    try:
+                        branch_label = _run_code_editor(
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            branch_labels=branch_candidates,
+                        )
+                        branch_label = _resolve_code_editor_branch(
+                            branch_label=branch_label,
+                            branch_labels=branch_candidates,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        branch_label = _resolve_code_editor_branch(
+                            branch_label=None,
+                            branch_labels=branch_candidates,
+                            runtime_variables=runtime_variables,
+                            execution_error=exc,
+                        )
                 elif kind == "api_call":
                     branch_label = _run_api_call(
                         component=component,

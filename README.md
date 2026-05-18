@@ -548,6 +548,7 @@ Flow UUIDs para validação:
 - [x] Implementar `api_call` com timeout e registro de resultado (`success/error`).
 - [x] Adicionar retry controlado no `api_call` (tentativas limitadas + backoff configurável).
 - [x] Implementar `code_editor` (JS) com sandbox e limites.
+- [x] Hardening de `code_editor`: branch retornado inválido não segue fallback silencioso; usa branch `exception` quando mapeado.
 - [x] Registrar warnings/errors de execução em `orch_sessions_alarms`.
 - [x] Executar e validar os 2 fluxos reais:
   - `2cb9482a-131e-4b2a-8507-484745661836`
