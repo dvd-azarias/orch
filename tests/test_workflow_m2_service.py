@@ -16,6 +16,7 @@ from app.services.workflow_m2_service import (
     _extract_send_with_whatsapp_numbers,
     _inject_contact_runtime_scope,
     _inject_callback_runtime_scope,
+    _inject_system_runtime_scope,
     _is_send_with_whatsapp_limit_exhausted,
     _mark_blocking_execution,
     _normalize_contact_extra_data,
@@ -40,6 +41,7 @@ from app.services.workflow_m2_service import (
     _read_dialer_resume_cursor,
     _register_loop_guard_step,
     _reset_loop_guard_counter,
+    _ensure_variables,
     _resolve_code_editor_branch,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
@@ -95,6 +97,16 @@ def test_read_loop_guard_repeat_threshold_bounds_values() -> None:
 
     _Settings.workflow_m2_loop_guard_repeat_threshold = "999999"
     assert _read_loop_guard_repeat_threshold(_Settings()) == 5000
+
+
+def test_ensure_variables_seeds_callback_and_file_content_scopes() -> None:
+    runtime_variables: dict[str, object] = {"input_payload": {"a": 1}}
+    variables = _ensure_variables(runtime_variables)
+    assert isinstance(variables["payload"], dict)
+    assert isinstance(variables["customs"], dict)
+    assert isinstance(variables["callback"], dict)
+    assert isinstance(variables["file"], dict)
+    assert isinstance(variables["file"]["content"], dict)
 
 
 def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:
@@ -261,6 +273,85 @@ def test_inject_callback_runtime_scope_sets_callback_builtin() -> None:
     variables = runtime_variables["variables"]
     assert variables["callback"]["result"] == "success"
     assert variables["customs"]["callback"]["data"]["ticket_id"] == "abc-123"
+
+
+def test_inject_system_runtime_scope_sets_whatsapp_payload_callback_and_file_content() -> None:
+    runtime_variables: dict[str, object] = {
+        "input_payload": {
+            "object": "whatsapp_business_account",
+            "external_id": "evt-001",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "referral": {
+                                            "headline": "Honda Migoto",
+                                            "source_id": "120247",
+                                            "source_url": "https://instagram.com/p/abc",
+                                            "source_type": "ad",
+                                        }
+                                    }
+                                ],
+                                "statuses": [{"status": "sent"}],
+                            }
+                        }
+                    ]
+                }
+            ],
+            "file": {"content": {"cpf": "09089978634", "nome": "Ana"}},
+        },
+        "callback": {
+            "event_name": "callback",
+            "entity": "30392287848",
+            "result": "success",
+            "data": {"protocol": "cbk-001"},
+            "received_at": "2026-05-19T01:10:00+00:00",
+        },
+    }
+    _inject_callback_runtime_scope(runtime_variables=runtime_variables)
+    _inject_contact_runtime_scope(
+        runtime_variables=runtime_variables,
+        contact_row={
+            "contact_list_member_id": 10196,
+            "contact_identifier": "70000700001",
+            "contact_name": "Cliente 0001",
+            "contact_full_name": "Cliente 0001",
+            "contact_gender": None,
+            "contact_country": None,
+            "contact_province": None,
+            "contact_city": None,
+            "contact_birth_date": None,
+            "contact_age": None,
+            "contact_channel_type": "voice",
+            "contact_channel_label": "tel1",
+            "contact_channel_address": "5511900700001",
+            "contact_channel_extra_data": {"data_ocorrencia": "01/01/2026"},
+            "person_uuid": "0254807a-840b-4072-93a8-4193d5626fe7",
+        },
+    )
+    _inject_system_runtime_scope(
+        runtime_variables=runtime_variables,
+        session_state={
+            "whatsapp_sent_at": None,
+            "whatsapp_delivered_at": None,
+            "whatsapp_read_at": None,
+            "whatsapp_failed_at": None,
+        },
+        contact_row=None,
+    )
+
+    variables = runtime_variables["variables"]
+    system = variables["system"]
+    assert system["external_id"] == "evt-001"
+    assert system["whatsapp"]["sent"] is True
+    assert system["whatsapp.sent"] is True
+    assert system["whatsapp"]["referral"]["head_line"] == "Honda Migoto"
+    assert system["callback"]["result"] == "success"
+    assert system["file"]["content"]["cpf"] == "09089978634"
+    assert variables["file"]["content"]["nome"] == "Ana"
 
 
 def test_run_run_flow_maps_callback_result_to_branch() -> None:

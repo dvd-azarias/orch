@@ -909,10 +909,22 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
         payload = runtime_variables.get("input_payload")
         if isinstance(payload, dict) and not isinstance(variables.get("payload"), dict):
             variables["payload"] = dict(payload)
+        if not isinstance(variables.get("payload"), dict):
+            variables["payload"] = {}
         customs = variables.get("customs")
         if not isinstance(customs, dict):
             seed = variables.get("payload")
             variables["customs"] = dict(seed) if isinstance(seed, dict) else {}
+        callback = variables.get("callback")
+        if not isinstance(callback, dict):
+            variables["callback"] = {}
+        file_scope = variables.get("file")
+        if not isinstance(file_scope, dict):
+            file_scope = {}
+            variables["file"] = file_scope
+        file_content = file_scope.get("content")
+        if not isinstance(file_content, dict):
+            file_scope["content"] = {}
         return variables
 
     input_payload = runtime_variables.get("input_payload")
@@ -920,10 +932,17 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
         runtime_variables["variables"] = {
             "payload": dict(input_payload),
             "customs": dict(input_payload),
+            "callback": {},
+            "file": {"content": {}},
             **dict(input_payload),
         }
     else:
-        runtime_variables["variables"] = {"payload": {}, "customs": {}}
+        runtime_variables["variables"] = {
+            "payload": {},
+            "customs": {},
+            "callback": {},
+            "file": {"content": {}},
+        }
     return runtime_variables["variables"]
 
 
@@ -1417,17 +1436,207 @@ def _inject_callback_runtime_scope(
     *,
     runtime_variables: dict[str, Any],
 ) -> None:
-    callback_payload = _extract_callback_payload_from_runtime(runtime_variables)
-    if not isinstance(callback_payload, dict):
-        return
     variables = _ensure_variables(runtime_variables)
     customs = variables.get("customs")
     if not isinstance(customs, dict):
         customs = {}
         variables["customs"] = customs
-    callback_copy = dict(callback_payload)
+    callback_payload = _extract_callback_payload_from_runtime(runtime_variables)
+    callback_copy = dict(callback_payload) if isinstance(callback_payload, dict) else {}
     variables["callback"] = callback_copy
     customs["callback"] = callback_copy
+
+
+def _extract_runtime_payload_for_system(runtime_variables: dict[str, Any]) -> dict[str, Any]:
+    payload = runtime_variables.get("last_payload")
+    if isinstance(payload, dict):
+        return dict(payload)
+
+    payload = runtime_variables.get("input_payload")
+    if isinstance(payload, dict):
+        return dict(payload)
+
+    variables = runtime_variables.get("variables")
+    if isinstance(variables, dict):
+        payload = variables.get("payload")
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {}
+
+
+def _extract_file_content_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    file_scope = payload.get("file")
+    if isinstance(file_scope, dict):
+        file_content = file_scope.get("content")
+        if isinstance(file_content, dict):
+            return dict(file_content)
+    return {}
+
+
+def _extract_whatsapp_referral_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("object") != "whatsapp_business_account":
+        return {
+            "head_line": None,
+            "source_id": None,
+            "source_url": None,
+            "source_type": None,
+        }
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return {
+            "head_line": None,
+            "source_id": None,
+            "source_url": None,
+            "source_type": None,
+        }
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            messages = value.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                referral = message.get("referral")
+                if not isinstance(referral, dict):
+                    continue
+                head_line = referral.get("headline")
+                return {
+                    "head_line": None if head_line is None else str(head_line),
+                    "source_id": referral.get("source_id"),
+                    "source_url": referral.get("source_url"),
+                    "source_type": referral.get("source_type"),
+                }
+    return {
+        "head_line": None,
+        "source_id": None,
+        "source_url": None,
+        "source_type": None,
+    }
+
+
+def _build_system_whatsapp_payload(
+    *,
+    runtime_variables: dict[str, Any],
+    session_state: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    status = _extract_whatsapp_status_from_runtime(runtime_variables)
+    sent = bool(session_state.get("whatsapp_sent_at")) or status == "sent"
+    delivered = bool(session_state.get("whatsapp_delivered_at")) or status == "delivered"
+    read = bool(session_state.get("whatsapp_read_at")) or status == "read"
+    failed = bool(session_state.get("whatsapp_failed_at")) or status == "failed"
+    limit_reached = status == "limit_reached"
+    referral_payload = _extract_whatsapp_referral_from_payload(payload)
+    return {
+        "read": read,
+        "sent": sent,
+        "failed": failed,
+        "referral": referral_payload,
+        "delivered": delivered,
+        "limit_reached": limit_reached,
+    }
+
+
+def _inject_system_runtime_scope(
+    *,
+    runtime_variables: dict[str, Any],
+    session_state: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+
+    payload = _extract_runtime_payload_for_system(runtime_variables)
+    callback_payload = variables.get("callback") if isinstance(variables.get("callback"), dict) else {}
+    file_content = _extract_file_content_from_payload(payload)
+
+    contact_payload = variables.get("contact") if isinstance(variables.get("contact"), dict) else {}
+    contact_attempts = {
+        "busy": None,
+        "noanswer": None,
+        "machine": None,
+        "rejected": None,
+        "invalidnumber": None,
+        "failure": None,
+    }
+    contact_channel = {
+        "type": contact_payload.get("channel_type"),
+        "label": contact_payload.get("channel_label"),
+        "address": contact_payload.get("channel_address"),
+    }
+    system_contact = {
+        "id": contact_payload.get("contact_list_member_id"),
+        "identifier": contact_payload.get("identifier"),
+        "status": None,
+        "name": contact_payload.get("name"),
+        "full_name": contact_payload.get("full_name"),
+        "gender": contact_payload.get("gender"),
+        "country": contact_payload.get("country"),
+        "province": contact_payload.get("province"),
+        "city": contact_payload.get("city"),
+        "birth_date": contact_payload.get("birth_date"),
+        "age": contact_payload.get("age"),
+        "message": None,
+        "draft_id": None,
+        "created_at": None,
+        "attempts": contact_attempts,
+        "channel": contact_channel,
+        "extra": contact_payload.get("extra") if isinstance(contact_payload.get("extra"), dict) else {},
+    }
+    if isinstance(contact_row, dict):
+        system_contact["status"] = contact_row.get("status")
+
+    whatsapp_payload = _build_system_whatsapp_payload(
+        runtime_variables=runtime_variables,
+        session_state=session_state,
+        payload=payload,
+    )
+    external_id = payload.get("external_id")
+    session_external_id = payload.get("session_external_id")
+    external_session_id = payload.get("external_session_id")
+    if external_session_id is None and session_external_id is not None:
+        external_session_id = session_external_id
+    if session_external_id is None and external_session_id is not None:
+        session_external_id = external_session_id
+
+    system_payload = {
+        "contact": system_contact,
+        "whatsapp": whatsapp_payload,
+        "external_id": external_id,
+        "external_session_id": external_session_id,
+        "session_external_id": session_external_id,
+        "whatsapp.read": whatsapp_payload["read"],
+        "whatsapp.sent": whatsapp_payload["sent"],
+        "whatsapp.failed": whatsapp_payload["failed"],
+        "whatsapp.referral": whatsapp_payload["referral"],
+        "whatsapp.delivered": whatsapp_payload["delivered"],
+        "whatsapp.limit_reached": whatsapp_payload["limit_reached"],
+        "whatsapp.referral.head_line": whatsapp_payload["referral"]["head_line"],
+        "whatsapp.referral.source_id": whatsapp_payload["referral"]["source_id"],
+        "whatsapp.referral.source_url": whatsapp_payload["referral"]["source_url"],
+        "whatsapp.referral.source_type": whatsapp_payload["referral"]["source_type"],
+        "payload": payload,
+        "callback": callback_payload,
+        "file": {"content": file_content},
+    }
+
+    variables["system"] = system_payload
+    customs["system"] = system_payload
+    variables["file"] = {"content": file_content}
 
 
 def _build_generate_file_resolution_scope(
@@ -2475,6 +2684,11 @@ async def execute_workflow_m2_for_session(
         _inject_callback_runtime_scope(
             runtime_variables=runtime_variables,
         )
+        _inject_system_runtime_scope(
+            runtime_variables=runtime_variables,
+            session_state=session_state,
+            contact_row=contact_runtime_context,
+        )
 
         has_pending_whatsapp_events = False
         has_pending_dialer_events = False
@@ -2673,6 +2887,11 @@ async def execute_workflow_m2_for_session(
                         payload = pending_whatsapp_event.get("payload")
                         if isinstance(payload, dict):
                             runtime_variables["last_payload"] = payload
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
+                            )
                     if (defer_until := _compute_whatsapp_status_order_delay(
                         runtime_variables=runtime_variables,
                         session_state=session_state,
@@ -2729,6 +2948,11 @@ async def execute_workflow_m2_for_session(
                         payload = pending_dialer_event.get("payload")
                         if isinstance(payload, dict):
                             runtime_variables["last_payload"] = payload
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
+                            )
                     branch_label = _run_process_dialer_response(
                         component=component,
                         runtime_variables=runtime_variables,
@@ -2809,6 +3033,11 @@ async def execute_workflow_m2_for_session(
                                 runtime_variables,
                                 status="limit_reached",
                                 reason="send_with_whatsapp_limit_exhausted",
+                            )
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
                             )
                             should_block_execution = False
                     elif kind == "send_with_dialer":
