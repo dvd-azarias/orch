@@ -157,6 +157,24 @@ def _parse_int_code(raw_value: Any) -> int | None:
     return None
 
 
+def _compute_effective_whatsapp_limit(
+    *,
+    allowed_limit_raw: Any,
+    percentual_consumo: int,
+) -> int | None:
+    if allowed_limit_raw is None:
+        return None
+
+    allowed_limit = int(allowed_limit_raw)
+    if allowed_limit < 0:
+        return None
+
+    percentual = max(0, min(100, int(percentual_consumo)))
+    if percentual <= 0:
+        return 0
+    return int((allowed_limit * percentual) // 100)
+
+
 def _extract_whatsapp_status_timestamps(payload: dict[str, Any]) -> WhatsappStatusTimestamps:
     if payload.get("object") != "whatsapp_business_account":
         return WhatsappStatusTimestamps(None, None, None, None)
@@ -1352,14 +1370,11 @@ async def assign_whatsapp_routing_for_session(
         return value
 
     def _effective_limit(candidate: dict[str, Any]) -> int | None:
-        allowed_limit_raw = candidate.get("allowed_limit")
-        if allowed_limit_raw is None:
-            return None
-        allowed_limit = int(allowed_limit_raw)
         percentual = _normalized_percentual(str(candidate.get("phone") or "").strip())
-        if percentual <= 0:
-            return 0
-        return int((allowed_limit * percentual) // 100)
+        return _compute_effective_whatsapp_limit(
+            allowed_limit_raw=candidate.get("allowed_limit"),
+            percentual_consumo=percentual,
+        )
 
     def _has_remaining_limit(candidate: dict[str, Any]) -> bool:
         effective_limit = _effective_limit(candidate)

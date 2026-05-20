@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from app.repositories.orch_sessions_repository import (
     DialerStatusTimestamps,
     WhatsappStatusTimestamps,
+    _compute_effective_whatsapp_limit,
     _derive_state_update,
 )
 
@@ -34,3 +35,22 @@ def test_derive_state_update_dialer_answered_does_not_finish_session() -> None:
     assert result.state == 1
     assert result.ended_at is None
 
+
+def test_compute_effective_whatsapp_limit_with_unlimited_minus_one() -> None:
+    assert (
+        _compute_effective_whatsapp_limit(
+            allowed_limit_raw=-1,
+            percentual_consumo=50,
+        )
+        is None
+    )
+
+
+def test_compute_effective_whatsapp_limit_with_percentual_zero() -> None:
+    assert (
+        _compute_effective_whatsapp_limit(
+            allowed_limit_raw=1000,
+            percentual_consumo=0,
+        )
+        == 0
+    )

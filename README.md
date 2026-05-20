@@ -1200,7 +1200,8 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
 - `POST /v1/orch/{workspace_uuid}/whatsapp/limits`
 - body:
   - `phone` (string)
-  - `allowed_limit` (inteiro >= 0)
+  - `allowed_limit` (inteiro >= -1)
+    - `-1` significa ilimitado
 - efeito:
   - normaliza `phone` para chave canônica (somente dígitos; removendo prefixo `55` quando aplicável);
   - grava novo evento em `orch_whatsapp_limits` com `received_from_meta_at=NOW()` e `in_use=true`;
@@ -1213,6 +1214,7 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
   - comparações de limite/consumo usam a mesma chave canônica de telefone;
   - o ORCH avalia os números configurados e tenta escolher um `phone` com limite disponível (`consumed < allowed_limit` do registro `in_use=true`);
   - quando `percentual_consumo > 0` no número configurado, o limite efetivo do dia passa a ser `floor(allowed_limit * percentual_consumo / 100)` para aquele `phone`;
+  - quando `allowed_limit = -1`, o número é tratado como ilimitado (não bloqueia por saldo/percentual);
   - quando `percentual_consumo = 0`, o limite efetivo do número é `0` (não envia por esse número);
   - se o número inicialmente candidato estiver sem saldo, tenta os demais números configurados;
   - só marca `linked_actuator=whatsapp_without_limit` quando todos os números elegíveis estiverem sem saldo.

@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS orch_whatsapp_limits (
     id BIGSERIAL PRIMARY KEY,
     phone TEXT NOT NULL,
-    allowed_limit INTEGER NOT NULL CHECK (allowed_limit >= 0),
+    allowed_limit INTEGER NOT NULL CHECK (allowed_limit >= -1),
     received_from_meta_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     in_use BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

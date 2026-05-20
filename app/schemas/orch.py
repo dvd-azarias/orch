@@ -140,7 +140,7 @@ class OrchWhatsappLimitUpsertRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     phone: str
-    allowed_limit: int = Field(ge=0)
+    allowed_limit: int = Field(ge=-1)
 
 
 class OrchWhatsappLimitUpsertResponse(BaseModel):
