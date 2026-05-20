@@ -36,6 +36,7 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0014_create_orch_flow_aliases", "sql/014_create_orch_flow_aliases.sql"),
     ("0015_create_orch_whatsapp_limits_tables", "sql/015_create_orch_whatsapp_limits_tables.sql"),
     ("0018_add_callback_at_to_orch_sessions", "sql/018_add_callback_at_to_orch_sessions.sql"),
+    ("0019_allow_minus_one_in_orch_whatsapp_limits", "sql/019_allow_minus_one_in_orch_whatsapp_limits.sql"),
 ]
 
 
