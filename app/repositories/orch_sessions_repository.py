@@ -1597,6 +1597,436 @@ async def fetch_contact_runtime_context_for_session(
     return dict(row) if row is not None else None
 
 
+def _detect_channel_type_for_create_contact(address: str) -> str:
+    token = str(address or "").strip()
+    if not token:
+        return "phone"
+    if "@" in token:
+        return "email"
+    return "phone"
+
+
+async def ensure_default_source_list_for_create_contact(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+) -> dict[str, Any]:
+    existing_result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                public_id::text AS public_id
+            FROM source_lists
+            WHERE
+                name = 'default_list'
+                AND origin = 'orch_create_contact'
+                AND file_path = :flow_uuid
+                AND status = 'READY_TO_INGEST'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ),
+        {"flow_uuid": flow_uuid},
+    )
+    existing = existing_result.mappings().first()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "public_id": str(existing["public_id"]),
+            "created": False,
+        }
+
+    inserted_result = await db_session.execute(
+        text(
+            """
+            INSERT INTO source_lists (
+                name,
+                description,
+                status,
+                origin,
+                file_name,
+                file_path,
+                rows_total,
+                rows_processed,
+                rows_discarded,
+                rows_error,
+                rows_without_channel,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                'default_list',
+                :description,
+                'READY_TO_INGEST',
+                'orch_create_contact',
+                'default_list',
+                :flow_uuid,
+                0,
+                0,
+                0,
+                0,
+                0,
+                NOW(),
+                NOW()
+            )
+            RETURNING id, public_id::text AS public_id
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "description": f"Lista padrão automática do componente create_contact ({flow_uuid})",
+        },
+    )
+    inserted = inserted_result.mappings().one()
+    return {
+        "id": int(inserted["id"]),
+        "public_id": str(inserted["public_id"]),
+        "created": True,
+    }
+
+
+async def increment_source_list_counters_for_create_contact(
+    db_session: AsyncSession,
+    *,
+    source_list_id: int,
+    created_members: int,
+) -> None:
+    increment_value = max(0, int(created_members))
+    if increment_value <= 0:
+        return
+    await db_session.execute(
+        text(
+            """
+            UPDATE source_lists
+            SET
+                rows_total = COALESCE(rows_total, 0) + :created_members,
+                rows_processed = COALESCE(rows_processed, 0) + :created_members,
+                updated_at = NOW()
+            WHERE id = :source_list_id
+            """
+        ),
+        {
+            "source_list_id": source_list_id,
+            "created_members": increment_value,
+        },
+    )
+
+
+async def upsert_person_for_create_contact(
+    db_session: AsyncSession,
+    *,
+    identifier: str,
+    address: str,
+    full_name: str | None,
+    extras: dict[str, Any],
+    source_list_id: int,
+) -> dict[str, Any]:
+    canonical_identifier = str(identifier or "").strip()
+    canonical_address = str(address or "").strip()
+    normalized_phone = str(normalize_phone_to_canonical_ani(canonical_address) or "").strip()
+    primary_channel_value = normalized_phone or canonical_address
+    primary_channel_type = _detect_channel_type_for_create_contact(primary_channel_value)
+    channels = [{"type": primary_channel_type, "value": primary_channel_value, "label": "create_contact"}]
+
+    result = await db_session.execute(
+        text(
+            """
+            INSERT INTO persons (
+                identifier,
+                full_name,
+                primary_channel_type,
+                primary_channel_value,
+                primary_channel_label,
+                channels,
+                extras,
+                last_source_list_id,
+                last_mailing_id,
+                last_seen_at,
+                updated_at
+            ) VALUES (
+                :identifier,
+                :full_name,
+                :primary_channel_type,
+                :primary_channel_value,
+                :primary_channel_label,
+                CAST(:channels AS jsonb),
+                CAST(:extras AS jsonb),
+                :source_list_id,
+                :source_list_id,
+                NOW(),
+                NOW()
+            )
+            ON CONFLICT (identifier) DO UPDATE SET
+                full_name = COALESCE(EXCLUDED.full_name, persons.full_name),
+                primary_channel_type = EXCLUDED.primary_channel_type,
+                primary_channel_value = EXCLUDED.primary_channel_value,
+                primary_channel_label = EXCLUDED.primary_channel_label,
+                channels = EXCLUDED.channels,
+                extras = COALESCE(persons.extras, '{}'::jsonb) || EXCLUDED.extras,
+                last_source_list_id = EXCLUDED.last_source_list_id,
+                last_mailing_id = EXCLUDED.last_mailing_id,
+                last_seen_at = NOW(),
+                updated_at = NOW()
+            RETURNING id, uuid::text AS uuid
+            """
+        ),
+        {
+            "identifier": canonical_identifier,
+            "full_name": str(full_name).strip() if full_name is not None and str(full_name).strip() else None,
+            "primary_channel_type": primary_channel_type,
+            "primary_channel_value": primary_channel_value,
+            "primary_channel_label": "create_contact",
+            "channels": json.dumps(channels, ensure_ascii=False),
+            "extras": json.dumps(extras or {}, ensure_ascii=False),
+            "source_list_id": source_list_id,
+        },
+    )
+    row = result.mappings().one()
+    return {
+        "id": int(row["id"]),
+        "uuid": str(row["uuid"]),
+        "channel_type": primary_channel_type,
+        "channel_value": primary_channel_value,
+    }
+
+
+async def ensure_contact_list_member_for_create_contact(
+    db_session: AsyncSession,
+    *,
+    source_list_id: int,
+    person_uuid: str,
+    identifier: str,
+    address: str,
+    full_name: str | None,
+    extras: dict[str, Any],
+) -> dict[str, Any]:
+    canonical_identifier = str(identifier or "").strip()
+    canonical_address = str(address or "").strip()
+    normalized_phone = str(normalize_phone_to_canonical_ani(canonical_address) or "").strip()
+    channel_address = normalized_phone or canonical_address
+    channel_type = _detect_channel_type_for_create_contact(channel_address)
+    contact_name = str(full_name or "").strip() or None
+    extra_payload = extras if isinstance(extras, dict) else {}
+
+    existing_result = await db_session.execute(
+        text(
+            """
+            SELECT id
+            FROM contact_list_members
+            WHERE
+                contact_identifier = :contact_identifier
+                AND mailing_id = :mailing_id
+                AND unassigned_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "contact_identifier": canonical_identifier,
+            "mailing_id": source_list_id,
+        },
+    )
+    existing = existing_result.mappings().first()
+    if existing is not None:
+        member_id = int(existing["id"])
+        await db_session.execute(
+            text(
+                """
+                UPDATE contact_list_members
+                SET
+                    contact_name = COALESCE(:contact_name, contact_name),
+                    contact_full_name = COALESCE(:contact_full_name, contact_full_name),
+                    contact_channel_type = :contact_channel_type,
+                    contact_channel_label = :contact_channel_label,
+                    contact_channel_address = :contact_channel_address,
+                    contact_channel_extra_data = CAST(:contact_channel_extra_data AS jsonb),
+                    person_uuid = CAST(:person_uuid AS uuid),
+                    ani = :ani,
+                    updated_at = NOW()
+                WHERE id = :member_id
+                """
+            ),
+            {
+                "member_id": member_id,
+                "contact_name": contact_name,
+                "contact_full_name": contact_name,
+                "contact_channel_type": channel_type,
+                "contact_channel_label": "create_contact",
+                "contact_channel_address": channel_address,
+                "contact_channel_extra_data": json.dumps(extra_payload, ensure_ascii=False),
+                "person_uuid": person_uuid,
+                "ani": normalized_phone or None,
+            },
+        )
+        return {
+            "id": member_id,
+            "created": False,
+            "contact_channel_address": channel_address,
+            "contact_channel_type": channel_type,
+        }
+
+    insert_result = await db_session.execute(
+        text(
+            """
+            INSERT INTO contact_list_members (
+                contact_identifier,
+                contact_name,
+                contact_full_name,
+                contact_channel_type,
+                contact_channel_label,
+                contact_channel_address,
+                contact_channel_extra_data,
+                contact_channel_id,
+                mailing_id,
+                linked_actuator,
+                created_at,
+                updated_at,
+                person_uuid,
+                ani
+            ) VALUES (
+                :contact_identifier,
+                :contact_name,
+                :contact_full_name,
+                :contact_channel_type,
+                :contact_channel_label,
+                :contact_channel_address,
+                CAST(:contact_channel_extra_data AS jsonb),
+                gen_random_uuid(),
+                :mailing_id,
+                NULL,
+                NOW(),
+                NOW(),
+                CAST(:person_uuid AS uuid),
+                :ani
+            )
+            RETURNING id
+            """
+        ),
+        {
+            "contact_identifier": canonical_identifier,
+            "contact_name": contact_name,
+            "contact_full_name": contact_name,
+            "contact_channel_type": channel_type,
+            "contact_channel_label": "create_contact",
+            "contact_channel_address": channel_address,
+            "contact_channel_extra_data": json.dumps(extra_payload, ensure_ascii=False),
+            "mailing_id": source_list_id,
+            "person_uuid": person_uuid,
+            "ani": normalized_phone or None,
+        },
+    )
+    row = insert_result.mappings().one()
+    return {
+        "id": int(row["id"]),
+        "created": True,
+        "contact_channel_address": channel_address,
+        "contact_channel_type": channel_type,
+    }
+
+
+async def ensure_session_for_created_contact(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    entity: str,
+    entity_type: str,
+    entity_address: str,
+    entity_session_id: str,
+    last_card_uuid: str,
+    next_card_uuid: str,
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any]:
+    existing_result = await db_session.execute(
+        text(
+            """
+            SELECT id, uuid::text AS uuid
+            FROM orch_sessions
+            WHERE
+                flow_uuid = CAST(:flow_uuid AS uuid)
+                AND entity = :entity
+                AND entity_type = :entity_type
+                AND entity_address = :entity_address
+                AND unassigned_at IS NULL
+                AND ended_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity": entity,
+            "entity_type": entity_type,
+            "entity_address": entity_address,
+        },
+    )
+    existing = existing_result.mappings().first()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "uuid": str(existing["uuid"]),
+            "created": False,
+        }
+
+    inserted_result = await db_session.execute(
+        text(
+            """
+            INSERT INTO orch_sessions (
+                flow_uuid,
+                state,
+                entity_origin_app,
+                entity,
+                entity_type,
+                entity_address,
+                entity_session_id,
+                started_at,
+                ended_at,
+                runtime_variables,
+                last_card_uuid,
+                next_card_uuid,
+                assigned_at,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                CAST(:flow_uuid AS uuid),
+                0,
+                'CreateContact',
+                :entity,
+                :entity_type,
+                :entity_address,
+                :entity_session_id,
+                NOW(),
+                NULL,
+                CAST(:runtime_variables AS jsonb),
+                CAST(:last_card_uuid AS uuid),
+                CAST(:next_card_uuid AS uuid),
+                NOW(),
+                NOW(),
+                NOW()
+            )
+            RETURNING id, uuid::text AS uuid
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity": entity,
+            "entity_type": entity_type,
+            "entity_address": entity_address,
+            "entity_session_id": entity_session_id,
+            "runtime_variables": json.dumps(runtime_variables, ensure_ascii=False),
+            "last_card_uuid": last_card_uuid,
+            "next_card_uuid": next_card_uuid,
+        },
+    )
+    row = inserted_result.mappings().one()
+    return {
+        "id": int(row["id"]),
+        "uuid": str(row["uuid"]),
+        "created": True,
+    }
+
+
 async def increment_whatsapp_rate_limit_per_flow(
     db_session: AsyncSession,
     *,
