@@ -6,6 +6,7 @@ import pytest
 import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
     WorkflowExecutionError,
+    _build_create_contact_records,
     _blocking_stop_reason_for_component,
     _clear_blocking_execution,
     _compute_whatsapp_status_order_delay,
@@ -43,6 +44,7 @@ from app.services.workflow_m2_service import (
     _reset_loop_guard_counter,
     _ensure_variables,
     _resolve_code_editor_branch,
+    _resolve_component_exception_branch_label,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
     _should_resume_run_flow_blocking_execution,
@@ -107,6 +109,81 @@ def test_ensure_variables_seeds_callback_and_file_content_scopes() -> None:
     assert isinstance(variables["callback"], dict)
     assert isinstance(variables["file"], dict)
     assert isinstance(variables["file"]["content"], dict)
+
+
+def test_build_create_contact_records_renders_required_fields() -> None:
+    component = {
+        "parameters": {
+            "mapping": [
+                {"key": "identificador", "value": "{{api_body.id}}"},
+                {"key": "endereço", "value": "{{api_body.phone}}"},
+                {"key": "nome", "value": "{{api_body.name}}"},
+                {"key": "origem", "value": "campanha_xyz"},
+            ]
+        }
+    }
+    scope = {
+        "api_body": {
+            "id": "10392279998",
+            "phone": "5594975620806",
+            "name": "Maria Antonieta Dos Reis",
+        }
+    }
+    records = _build_create_contact_records(component=component, resolution_scope=scope)
+    assert len(records) == 1
+    assert records[0]["identifier"] == "10392279998"
+    assert records[0]["address"] == "5594975620806"
+    assert records[0]["full_name"] == "Maria Antonieta Dos Reis"
+    assert records[0]["extras"]["origem"] == "campanha_xyz"
+
+
+def test_build_create_contact_records_supports_list_values() -> None:
+    component = {
+        "parameters": {
+            "mapping": [
+                {"key": "identifier", "value": ["1001", "1002"]},
+                {"key": "address", "value": ["551190000001", "551190000002"]},
+            ]
+        }
+    }
+    records = _build_create_contact_records(component=component, resolution_scope={})
+    assert [item["identifier"] for item in records] == ["1001", "1002"]
+    assert [item["address"] for item in records] == ["551190000001", "551190000002"]
+
+
+def test_build_create_contact_records_raises_when_required_missing() -> None:
+    component = {
+        "parameters": {
+            "mapping": [
+                {"key": "identifier", "value": "1001"},
+                {"key": "address", "value": ""},
+            ]
+        }
+    }
+    with pytest.raises(WorkflowExecutionError) as exc:
+        _build_create_contact_records(component=component, resolution_scope={})
+    assert exc.value.code == "create_contact_missing_required_fields"
+
+
+def test_resolve_component_exception_branch_label_returns_exception_alias() -> None:
+    definition = {
+        "components": [
+            {"ref_id": "card-1", "component_id": "create_contact"},
+            {"ref_id": "card-2", "component_id": "finish_flow"},
+            {"ref_id": "card-3", "component_id": "api_call"},
+        ],
+        "branches": [
+            {"from": "card-1", "to": "card-2", "branch": "action_after_creating_contact"},
+            {"from": "card-1", "to": "card-3", "branch": "exception_hgdxh542k"},
+        ],
+    }
+    assert (
+        _resolve_component_exception_branch_label(
+            definition=definition,
+            current_card_uuid="card-1",
+        )
+        == "exception_hgdxh542k"
+    )
 
 
 def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:
