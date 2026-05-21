@@ -1787,10 +1787,20 @@ def _build_child_runtime_for_create_contact(
     record: dict[str, Any],
     component_ref_id: str | None,
     parent_session_id: int,
+    flow_uuid: str,
+    last_card_cursor: str,
+    next_card_cursor: str,
 ) -> dict[str, Any]:
     child_runtime: dict[str, Any] = {
         "source_app": "CreateContact",
         "last_event_received_at": datetime.now(timezone.utc).isoformat(),
+        "workflow_v2": {
+            "flow_id": flow_uuid,
+            "engine_phase": "m2",
+            "last_card_cursor": last_card_cursor,
+            "next_card_cursor": next_card_cursor,
+            "definition_loaded_at": datetime.now(timezone.utc).isoformat(),
+        },
         "create_contact": {
             "parent_session_id": parent_session_id,
             "component_ref_id": component_ref_id,
@@ -1878,6 +1888,9 @@ async def _run_create_contact(
             record=record,
             component_ref_id=component.get("ref_id"),
             parent_session_id=session_id,
+            flow_uuid=flow_uuid,
+            last_card_cursor=current_card_uuid_cast,
+            next_card_cursor=next_for_created_uuid,
         )
         child_session = await ensure_session_for_created_contact(
             db_session,
