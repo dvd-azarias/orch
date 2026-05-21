@@ -1620,7 +1620,7 @@ async def ensure_default_source_list_for_create_contact(
             FROM source_lists
             WHERE
                 name = 'default_list'
-                AND origin = 'orch_create_contact'
+                AND origin = 'api'
                 AND file_path = :flow_uuid
                 AND status = 'READY_TO_INGEST'
             ORDER BY id DESC
@@ -1659,7 +1659,7 @@ async def ensure_default_source_list_for_create_contact(
                 'default_list',
                 :description,
                 'READY_TO_INGEST',
-                'orch_create_contact',
+                'api',
                 'default_list',
                 :flow_uuid,
                 0,
