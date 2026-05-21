@@ -1962,6 +1962,29 @@ async def ensure_session_for_created_contact(
     )
     existing = existing_result.mappings().first()
     if existing is not None:
+        await db_session.execute(
+            text(
+                """
+                UPDATE orch_sessions
+                SET
+                    state = 0,
+                    ended_at = NULL,
+                    entity_session_id = :entity_session_id,
+                    runtime_variables = CAST(:runtime_variables AS jsonb),
+                    last_card_uuid = CAST(:last_card_uuid AS uuid),
+                    next_card_uuid = CAST(:next_card_uuid AS uuid),
+                    updated_at = NOW()
+                WHERE id = :session_id
+                """
+            ),
+            {
+                "session_id": int(existing["id"]),
+                "entity_session_id": entity_session_id,
+                "runtime_variables": json.dumps(runtime_variables, ensure_ascii=False),
+                "last_card_uuid": last_card_uuid,
+                "next_card_uuid": next_card_uuid,
+            },
+        )
         return {
             "id": int(existing["id"]),
             "uuid": str(existing["uuid"]),
