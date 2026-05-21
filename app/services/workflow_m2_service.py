@@ -2003,21 +2003,6 @@ def _gzip_if_needed(*, payload: bytes, compression: str, file_name: str) -> tupl
     raise WorkflowExecutionError("generate_file_invalid_compression", "Compressão não suportada.")
 
 
-def _resolve_renamed_filename(*, existing_names: set[str], original_name: str) -> str:
-    if original_name not in existing_names:
-        return original_name
-    stem = original_name
-    suffix = ""
-    if "." in original_name:
-        stem, suffix = original_name.rsplit(".", 1)
-        suffix = f".{suffix}"
-    for idx in range(2, 10_000):
-        candidate = f"{stem}_{idx}{suffix}"
-        if candidate not in existing_names:
-            return candidate
-    raise WorkflowExecutionError("generate_file_rename_failed", "Não foi possível gerar nome alternativo.")
-
-
 def _sftp_upload_bytes(
     *,
     host: str,
@@ -2027,11 +2012,26 @@ def _sftp_upload_bytes(
     destination_path: str,
     file_name: str,
     write_mode: str,
-    if_exists_policy: str,
     payload: bytes,
     encoding: str,
     line_break: str,
 ) -> dict[str, Any]:
+    def _permission_like_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        return (
+            "permission denied" in message
+            or "permissionerror" in message
+            or "errno 13" in message
+            or "access denied" in message
+        )
+
+    def _suffix_name(original_name: str, sequence: int) -> str:
+        suffix_token = f"_{int(sequence):04d}"
+        if "." not in original_name:
+            return f"{original_name}{suffix_token}"
+        stem, ext = original_name.rsplit(".", 1)
+        return f"{stem}{suffix_token}.{ext}"
+
     try:
         import paramiko
     except Exception as exc:
@@ -2067,32 +2067,52 @@ def _sftp_upload_bytes(
             exists_before = file_name in existing_names
 
             target_name = file_name
-            if exists_before and if_exists_policy == "fail" and write_mode != "append":
-                raise WorkflowExecutionError("generate_file_file_exists", "Arquivo já existe no destino.")
-            if exists_before and if_exists_policy == "rename" and write_mode != "append":
-                target_name = _resolve_renamed_filename(existing_names=existing_names, original_name=file_name)
-                remote_file = f"{base}/{target_name}" if base else f"/{target_name}"
-
             if write_mode in {"create", "create_per_session"} and exists_before and target_name == file_name:
                 raise WorkflowExecutionError("generate_file_create_exists", "Arquivo já existe para write_mode=create.")
 
-            if write_mode == "append":
-                if exists_before and target_name == file_name:
-                    with sftp.open(remote_file, "rb") as remote_reader:
-                        previous = remote_reader.read()
-                    previous_text = previous.decode(encoding, errors="ignore")
-                    append_text = payload.decode(encoding, errors="ignore")
-                    if previous_text and append_text and not previous_text.endswith(line_break):
-                        append_text = f"{line_break}{append_text}"
-                    payload = append_text.encode(encoding)
-                    with sftp.open(remote_file, "ab") as remote_writer:
-                        remote_writer.write(payload)
+            try:
+                if write_mode == "append":
+                    if exists_before and target_name == file_name:
+                        with sftp.open(remote_file, "rb") as remote_reader:
+                            previous = remote_reader.read()
+                        previous_text = previous.decode(encoding, errors="ignore")
+                        append_text = payload.decode(encoding, errors="ignore")
+                        if previous_text and append_text and not previous_text.endswith(line_break):
+                            append_text = f"{line_break}{append_text}"
+                        payload = append_text.encode(encoding)
+                        with sftp.open(remote_file, "ab") as remote_writer:
+                            remote_writer.write(payload)
+                    else:
+                        with sftp.open(remote_file, "wb") as remote_writer:
+                            remote_writer.write(payload)
                 else:
                     with sftp.open(remote_file, "wb") as remote_writer:
                         remote_writer.write(payload)
-            else:
-                with sftp.open(remote_file, "wb") as remote_writer:
-                    remote_writer.write(payload)
+            except Exception as exc:
+                if write_mode not in {"overwrite", "append"} or not _permission_like_error(exc):
+                    raise
+
+                refreshed_names = set(existing_names)
+                for sequence in range(1, 10_000):
+                    candidate_name = _suffix_name(file_name, sequence)
+                    if candidate_name in refreshed_names:
+                        continue
+                    candidate_remote_file = f"{base}/{candidate_name}" if base else f"/{candidate_name}"
+                    try:
+                        with sftp.open(candidate_remote_file, "wb") as remote_writer:
+                            remote_writer.write(payload)
+                        target_name = candidate_name
+                        remote_file = candidate_remote_file
+                        break
+                    except Exception as retry_exc:
+                        if _permission_like_error(retry_exc):
+                            continue
+                        raise
+                else:
+                    raise WorkflowExecutionError(
+                        "generate_file_permission_denied",
+                        "Sem permissão para gravar arquivo no destino.",
+                    ) from exc
 
             return {
                 "file_name": target_name,
@@ -2174,9 +2194,6 @@ async def _run_generate_file(
         if _render_value(params.get("destination_path") or "", resolution_scope) is None
         else str(_render_value(params.get("destination_path") or "", resolution_scope))
     )
-    if_exists_policy = str(_unwrap_option(params.get("if_exists_policy") or "replace")).strip().lower()
-    if if_exists_policy not in {"replace", "fail", "rename"}:
-        if_exists_policy = "replace"
 
     row: dict[str, Any] = {}
     for field in mapping_fields:
@@ -2205,7 +2222,6 @@ async def _run_generate_file(
         "destination_type": destination_type,
         "destination_path": destination_path,
         "file_name": output_name,
-        "if_exists_policy": if_exists_policy,
         "sftp_host": host,
         "sftp_port": port,
         "sftp_user": username,

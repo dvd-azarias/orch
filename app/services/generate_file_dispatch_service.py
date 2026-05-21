@@ -108,6 +108,24 @@ def _append_session_suffix(file_name: str, session_id: int) -> str:
     return f"{stem}-{token}.{suffix}"
 
 
+def _append_internal_suffix(file_name: str, sequence: int) -> str:
+    suffix_token = f"_{int(sequence):04d}"
+    if "." not in file_name:
+        return f"{file_name}{suffix_token}"
+    stem, ext = file_name.rsplit(".", 1)
+    return f"{stem}{suffix_token}.{ext}"
+
+
+def _is_permission_like_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        "permission denied" in message
+        or "permissionerror" in message
+        or "errno 13" in message
+        or "access denied" in message
+    )
+
+
 async def upsert_job_and_buffer_row(
     db_session: AsyncSession,
     *,
@@ -126,7 +144,6 @@ async def upsert_job_and_buffer_row(
     destination_config = {
         "path": config.get("destination_path"),
         "file_name": config.get("file_name"),
-        "if_exists_policy": config.get("if_exists_policy"),
         "sftp_host": config.get("sftp_host"),
         "sftp_port": config.get("sftp_port"),
         "sftp_user": config.get("sftp_user"),
@@ -480,21 +497,6 @@ def _serialize_rows(
     raise ValueError("Formato de arquivo não suportado.")
 
 
-def _ensure_renamed_file_name(existing_names: set[str], original_name: str) -> str:
-    if original_name not in existing_names:
-        return original_name
-    stem = original_name
-    suffix = ""
-    if "." in original_name:
-        stem, ext = original_name.rsplit(".", 1)
-        suffix = f".{ext}"
-    for idx in range(2, 10000):
-        candidate = f"{stem}_{idx}{suffix}"
-        if candidate not in existing_names:
-            return candidate
-    raise RuntimeError("Falha ao gerar nome alternativo para arquivo.")
-
-
 def _sftp_write(
     *,
     destination_config: dict[str, Any],
@@ -509,7 +511,6 @@ def _sftp_write(
     write_mode = str(format_config.get("write_mode") or "create").strip().lower()
     if write_mode == "create_per_session":
         file_name = _append_session_suffix(file_name, session_id)
-    if_exists_policy = str(destination_config.get("if_exists_policy") or "replace").strip().lower()
     encoding = str(format_config.get("encoding") or "utf-8").strip().lower()
     line_break = str(format_config.get("line_break") or "\n")
 
@@ -539,29 +540,46 @@ def _sftp_write(
         target_name = file_name
         file_exists = target_name in existing
 
-        if file_exists and if_exists_policy == "fail" and write_mode != "append":
-            raise RuntimeError("Arquivo já existe no destino.")
-        if file_exists and if_exists_policy == "rename" and write_mode != "append":
-            target_name = _ensure_renamed_file_name(existing, target_name)
-            file_exists = False
-
         remote_file = f"{remote_dir}/{target_name}" if remote_dir != "." else target_name
         payload = payload_text.encode(encoding)
 
-        if write_mode in {"create", "create_per_session"} and file_exists:
-            raise RuntimeError("Arquivo já existe para write_mode=create.")
-        if write_mode == "append" and file_exists:
-            with sftp.open(remote_file, "rb") as existing_file:
-                previous = existing_file.read().decode(encoding, errors="ignore")
-            append_text = payload_text
-            if previous and append_text and not previous.endswith(line_break):
-                append_text = f"{line_break}{append_text}"
-            with sftp.open(remote_file, "ab") as file_handle:
-                file_handle.write(append_text.encode(encoding))
-            payload = append_text.encode(encoding)
-        else:
-            with sftp.open(remote_file, "wb") as file_handle:
-                file_handle.write(payload)
+        try:
+            if write_mode in {"create", "create_per_session"} and file_exists:
+                raise RuntimeError("Arquivo já existe para write_mode=create.")
+            if write_mode == "append" and file_exists:
+                with sftp.open(remote_file, "rb") as existing_file:
+                    previous = existing_file.read().decode(encoding, errors="ignore")
+                append_text = payload_text
+                if previous and append_text and not previous.endswith(line_break):
+                    append_text = f"{line_break}{append_text}"
+                payload = append_text.encode(encoding)
+                with sftp.open(remote_file, "ab") as file_handle:
+                    file_handle.write(payload)
+            else:
+                with sftp.open(remote_file, "wb") as file_handle:
+                    file_handle.write(payload)
+        except Exception as exc:
+            if write_mode not in {"overwrite", "append"} or not _is_permission_like_error(exc):
+                raise
+
+            refreshed_names = set(sftp.listdir(remote_dir))
+            for sequence in range(1, 10_000):
+                candidate_name = _append_internal_suffix(file_name, sequence)
+                if candidate_name in refreshed_names:
+                    continue
+                candidate_remote_file = f"{remote_dir}/{candidate_name}" if remote_dir != "." else candidate_name
+                try:
+                    with sftp.open(candidate_remote_file, "wb") as file_handle:
+                        file_handle.write(payload)
+                    target_name = candidate_name
+                    remote_file = candidate_remote_file
+                    break
+                except Exception as retry_exc:
+                    if _is_permission_like_error(retry_exc):
+                        continue
+                    raise
+            else:
+                raise RuntimeError("Sem permissão para gravar arquivo no destino.") from exc
 
         return {
             "file_name": target_name,
