@@ -15,6 +15,7 @@ from app.repositories.orch_sessions_repository import (
     WHATSAPP_STATUS_COLUMNS,
     fetch_latest_session_by_flow_entity_address,
     persist_callback_event_for_active_entity,
+    persist_run_flow_event_for_active_entity_address,
 )
 from app.schemas.orch import OrchTriggerAccepted
 from app.services.alarm_service import persist_alarm
@@ -28,6 +29,11 @@ from app.tasks.workflow_tasks import advance_session_task
 
 logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
+
+
+def _is_dialer_hangup_event(payload: dict[str, Any]) -> bool:
+    hangup = payload.get("hangup")
+    return isinstance(hangup, dict) and str(hangup.get("Event", "")).strip().lower() == "hangup"
 
 
 def _extract_whatsapp_status_name(payload: dict[str, Any]) -> str | None:
@@ -155,7 +161,60 @@ async def process_single_payload(
             app_name == "GenericApp"
             and str(payload.get("event_name", "")).strip().lower() == "callback"
         )
-        if is_callback_event:
+        is_run_flow_hangup_event = app_name == "DialerApp" and _is_dialer_hangup_event(payload)
+
+        if is_run_flow_hangup_event:
+            hangup_persisted = await persist_run_flow_event_for_active_entity_address(
+                db_session,
+                flow_uuid=flow_uuid,
+                app_name=app_name,
+                entity_address=extracted.entity_address,
+                payload=payload,
+                extracted=extracted.model_dump(),
+                event_name="hangup",
+                event_result="hangup",
+                event_data={
+                    "uniqueid": payload.get("uniqueid"),
+                    "hangup": payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {},
+                    "makecall": payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {},
+                },
+            )
+            if hangup_persisted is None:
+                await persist_discarded_event(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                    app_name=app_name,
+                    entity=extracted.entity,
+                    entity_type=extracted.entity_type,
+                    entity_address=extracted.entity_address,
+                    entity_session_id=extracted.entity_session_id,
+                    discard_reason="run_flow_hangup_session_not_found_by_address",
+                    payload=payload,
+                )
+                return OrchTriggerAccepted(
+                    status="ignored",
+                    accepted=False,
+                    flow_uuid=flow_uuid,
+                    app=app_name,
+                    persistence="ignored",
+                    extracted=extracted,
+                    session_id=0,
+                    session_uuid="",
+                    session_state=0,
+                    session_created=False,
+                    workflow_execution={
+                        "mode": "async",
+                        "enqueued": False,
+                        "reason": "run_flow_hangup_session_not_found_by_address",
+                    },
+                )
+            persisted = SessionPersistResponse(
+                session_id=hangup_persisted.id,
+                session_uuid=hangup_persisted.uuid,
+                session_state=hangup_persisted.state,
+                session_created=False,
+            )
+        elif is_callback_event:
             callback_persisted = await persist_callback_event_for_active_entity(
                 db_session,
                 flow_uuid=flow_uuid,

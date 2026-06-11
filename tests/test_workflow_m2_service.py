@@ -446,6 +446,21 @@ def test_run_run_flow_maps_callback_result_to_branch() -> None:
     assert runtime_variables["run_flow_last_callback"]["result"] == "unsuccess"
 
 
+def test_run_run_flow_maps_hangup_result_to_branch() -> None:
+    runtime_variables = {
+        "callback": {
+            "event_name": "hangup",
+            "entity": "5511975620806",
+            "result": "hangup",
+            "data": {"disposition": "ANSWERED"},
+            "received_at": "2026-06-11T22:58:01+00:00",
+        }
+    }
+    branch = _run_run_flow(component={"ref_id": "run-flow-1"}, runtime_variables=runtime_variables)
+    assert branch == "hangup"
+    assert runtime_variables["run_flow_last_callback"]["event_name"] == "hangup"
+
+
 def test_should_resume_run_flow_blocking_execution_only_with_new_callback() -> None:
     runtime_variables = {
         "workflow_v2": {

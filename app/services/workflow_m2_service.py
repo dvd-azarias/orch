@@ -319,9 +319,9 @@ def _extract_callback_payload_from_runtime(runtime_variables: dict[str, Any]) ->
     callback = runtime_variables.get("callback")
     if not isinstance(callback, dict):
         return None
-    event_name = str(callback.get("event_name", "")).strip().lower()
     entity = str(callback.get("entity", "")).strip()
-    if event_name != "callback" or not entity:
+    result = str(callback.get("result", "")).strip().lower()
+    if not entity or not result:
         return None
     return callback
 
