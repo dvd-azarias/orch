@@ -111,6 +111,32 @@ def _build_callback_runtime_patch(
     return json.dumps(runtime_patch, ensure_ascii=False)
 
 
+def _build_run_flow_event_runtime_patch(
+    *,
+    app_name: str,
+    payload: dict[str, Any],
+    extracted: dict[str, Any],
+    event_name: str,
+    event_result: str,
+    event_data: dict[str, Any] | None = None,
+) -> str:
+    callback_payload = {
+        "event_name": str(event_name or "").strip().lower(),
+        "entity": str(extracted.get("entity", "")).strip(),
+        "result": str(event_result or "").strip().lower(),
+        "data": event_data if isinstance(event_data, dict) else {},
+        "received_at": _now_utc_iso(),
+    }
+    runtime_patch = {
+        "source_app": app_name,
+        "last_event_received_at": _now_utc_iso(),
+        "last_payload": payload,
+        "last_extracted": extracted,
+        "callback": callback_payload,
+    }
+    return json.dumps(runtime_patch, ensure_ascii=False)
+
+
 def _parse_unix_timestamp(raw_value: Any) -> datetime | None:
     if raw_value is None:
         return None
@@ -866,6 +892,76 @@ async def persist_callback_event_for_active_entity(
         {
             "flow_uuid": flow_uuid,
             "entity": entity,
+            "runtime_patch": runtime_patch_json,
+        },
+    )
+    row = update_result.mappings().first()
+    if row is None:
+        return None
+    return PersistResult(
+        id=int(row["id"]),
+        uuid=str(row["uuid"]),
+        state=int(row["state"]),
+        created=False,
+    )
+
+
+async def persist_run_flow_event_for_active_entity_address(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    app_name: str,
+    entity_address: str,
+    payload: dict[str, Any],
+    extracted: dict[str, Any],
+    event_name: str,
+    event_result: str,
+    event_data: dict[str, Any] | None = None,
+) -> PersistResult | None:
+    lock_key = f"run_flow_event|{flow_uuid}|{entity_address}|{event_name}|{event_result}"
+    runtime_patch_json = _build_run_flow_event_runtime_patch(
+        app_name=app_name,
+        payload=payload,
+        extracted=extracted,
+        event_name=event_name,
+        event_result=event_result,
+        event_data=event_data,
+    )
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": lock_key},
+    )
+
+    update_result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                callback_at = NOW(),
+                updated_at = NOW()
+            WHERE id = (
+                SELECT id
+                FROM orch_sessions
+                WHERE
+                    flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND entity_type = 'person'
+                    AND entity_address = :entity_address
+                    AND unassigned_at IS NULL
+                    AND ended_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING id, uuid::text AS uuid, state
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity_address": entity_address,
             "runtime_patch": runtime_patch_json,
         },
     )
