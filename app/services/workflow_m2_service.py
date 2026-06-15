@@ -845,27 +845,6 @@ def _extract_send_whatsapp_interactive_number_policies(component: dict[str, Any]
     return numbers, percentual_by_phone
 
 
-def _extract_send_whatsapp_interactive_number_payloads(component: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
-    config = params.get("whatsapp_interactive_config") if isinstance(params.get("whatsapp_interactive_config"), dict) else {}
-    rows = config.get("numbers") if isinstance(config.get("numbers"), list) else []
-    payload_by_phone: dict[str, dict[str, Any]] = {}
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        number = str(normalize_phone_to_canonical_ani(item.get("number")) or "").strip()
-        if not number:
-            continue
-        value = item.get("value")
-        if not isinstance(value, dict):
-            continue
-        meta_payload = value.get("meta_payload")
-        if not isinstance(meta_payload, dict):
-            continue
-        payload_by_phone[number] = meta_payload
-    return payload_by_phone
-
-
 def _read_send_whatsapp_interactive_selected_number(component: dict[str, Any]) -> str | None:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     config = params.get("whatsapp_interactive_config") if isinstance(params.get("whatsapp_interactive_config"), dict) else {}
@@ -2889,102 +2868,6 @@ def _run_api_call(
     return "success" if 200 <= status_code < 300 else "error"
 
 
-def _resolve_whatsapp_interactive_recipient_phone(runtime_variables: dict[str, Any]) -> str | None:
-    variables = _ensure_variables(runtime_variables)
-    system = variables.get("system") if isinstance(variables.get("system"), dict) else {}
-    contact = system.get("contact") if isinstance(system.get("contact"), dict) else {}
-    channel = contact.get("channel") if isinstance(contact.get("channel"), dict) else {}
-    for raw in (
-        contact.get("channel_address"),
-        channel.get("address"),
-        contact.get("identifier"),
-        system.get("external_session_id"),
-        system.get("session_external_id"),
-        system.get("chat_id"),
-    ):
-        candidate = str(normalize_phone_to_canonical_ani(raw) or "").strip()
-        if candidate:
-            return candidate
-    return None
-
-
-def _run_send_whatsapp_interactive(
-    *,
-    component: dict[str, Any],
-    runtime_variables: dict[str, Any],
-    provider_number: str,
-) -> tuple[bool, str | None]:
-    settings = get_settings()
-    base_url = str(settings.sync_webhook_base_url or "").strip()
-    if not base_url:
-        return False, "send_whatsapp_interactive_missing_sync_webhook_base_url"
-    if not settings.sync_ws_client_id or not settings.sync_ws_client_secret:
-        return False, "send_whatsapp_interactive_missing_sync_ws_credentials"
-
-    provider_number = str(normalize_phone_to_canonical_ani(provider_number) or "").strip()
-    if not provider_number:
-        return False, "send_whatsapp_interactive_missing_provider_number"
-
-    payload_by_phone = _extract_send_whatsapp_interactive_number_payloads(component)
-    meta_payload = payload_by_phone.get(provider_number)
-    if not isinstance(meta_payload, dict):
-        return False, "send_whatsapp_interactive_missing_meta_payload_for_provider"
-
-    recipient_phone_number = _resolve_whatsapp_interactive_recipient_phone(runtime_variables)
-    if not recipient_phone_number:
-        return False, "send_whatsapp_interactive_missing_recipient_phone"
-
-    variables = _ensure_variables(runtime_variables)
-    variables["recipient_phone_number"] = recipient_phone_number
-    outbound_payload = _render_value(copy.deepcopy(meta_payload), variables)
-    if not isinstance(outbound_payload, dict) or not outbound_payload:
-        return False, "send_whatsapp_interactive_empty_payload_after_render"
-
-    workspace_uuid = (
-        get_current_workspace_uuid()
-        or (
-            str((variables.get("system") or {}).get("workspace_uuid")).strip()
-            if isinstance(variables.get("system"), dict)
-            else ""
-        )
-        or None
-    )
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "X-APPLICATION-CLIENT-ID": str(settings.sync_ws_client_id),
-        "X-APPLICATION-CLIENT-SECRET": str(settings.sync_ws_client_secret),
-    }
-    if workspace_uuid:
-        headers["X-WORKSPACE-UUID"] = str(workspace_uuid)
-    if settings.target_core_api_bearer_token:
-        headers["Authorization"] = f"Bearer {settings.target_core_api_bearer_token}"
-
-    url = f"{base_url.rstrip('/')}/whatsapp/provider/{provider_number}/send-message"
-    req = request.Request(
-        url=url,
-        method="POST",
-        data=json.dumps(outbound_payload, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-    )
-    status_code, resp_headers, resp_body, error_msg = _http_execute(
-        req,
-        timeout_seconds=max(0.1, float(settings.sync_ws_timeout_seconds)),
-    )
-
-    runtime_variables["send_whatsapp_interactive_last_result"] = {
-        "status_code": status_code,
-        "provider_number": provider_number,
-        "recipient_phone_number": recipient_phone_number,
-        "url": url,
-        "error": error_msg,
-        "body": resp_body,
-        "headers": resp_headers,
-    }
-
-    return (200 <= status_code < 300), error_msg
-
-
 def _resolve_send_whatsapp_interactive_branch_label(
     *,
     component: dict[str, Any],
@@ -2997,10 +2880,6 @@ def _resolve_send_whatsapp_interactive_branch_label(
         return None
 
     provider_number = _extract_whatsapp_provider_number_from_payload(runtime_variables.get("last_payload"))
-    if provider_number is None:
-        send_meta = runtime_variables.get("send_whatsapp_interactive_last_result")
-        if isinstance(send_meta, dict):
-            provider_number = str(normalize_phone_to_canonical_ani(send_meta.get("provider_number")) or "").strip() or None
     if provider_number is None:
         routing_meta = runtime_variables.get("send_whatsapp_interactive_routing")
         if isinstance(routing_meta, dict):
@@ -3699,34 +3578,7 @@ async def execute_workflow_m2_for_session(
                                 runtime_variables=runtime_variables,
                             )
                         else:
-                            provider_number = str(normalize_phone_to_canonical_ani((assignment or {}).get("ani")) or "").strip()
-                            if not provider_number:
-                                provider_number = _read_send_whatsapp_interactive_selected_number(component) or ""
-                            send_ok, send_error = _run_send_whatsapp_interactive(
-                                component=component,
-                                runtime_variables=runtime_variables,
-                                provider_number=provider_number,
-                            )
-                            if not send_ok:
-                                exception_branch = _resolve_component_exception_branch_label(
-                                    definition=definition,
-                                    current_card_uuid=next_card_uuid,
-                                )
-                                runtime_variables["send_whatsapp_interactive_last_error"] = {
-                                    "component_ref_id": component.get("ref_id"),
-                                    "code": "send_whatsapp_interactive_send_failed",
-                                    "message": (
-                                        "Falha no envio do send_whatsapp_interactive; "
-                                        "sessão permanece em escuta."
-                                    ),
-                                    "error": send_error,
-                                    "exception_branch": exception_branch,
-                                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                                }
-                                if exception_branch:
-                                    branch_label = exception_branch
-                            else:
-                                runtime_variables.pop("send_whatsapp_interactive_last_error", None)
+                            runtime_variables.pop("send_whatsapp_interactive_last_error", None)
 
                     if branch_label is None:
                         last_card_uuid = next_card_uuid
