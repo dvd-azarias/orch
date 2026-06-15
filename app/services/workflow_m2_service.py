@@ -12,6 +12,7 @@ import re
 import subprocess
 import textwrap
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +58,7 @@ _TEMPLATE_PATTERN = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 logger = get_logger(__name__)
 WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "send_with_whatsapp": "blocked_send_with_whatsapp",
+    "send_whatsapp_interactive": "blocked_send_whatsapp_interactive",
     "process_whatsapp_response": "blocked_process_whatsapp_response",
     "send_with_dialer": "blocked_send_with_dialer",
     "process_dialer_response": "blocked_process_dialer_response",
@@ -77,6 +79,7 @@ SEND_WITH_WHATSAPP_LIMIT_EXHAUSTED_ACTUATORS = {
 
 WHATSAPP_BLOCKING_STOP_REASONS = {
     "blocked_send_with_whatsapp",
+    "blocked_send_whatsapp_interactive",
     "blocked_process_whatsapp_response",
 }
 DIALER_BLOCKING_STOP_REASONS = {
@@ -517,6 +520,114 @@ def _extract_whatsapp_status_from_runtime(runtime_variables: dict[str, Any]) -> 
     return _extract_whatsapp_status_from_payload(variables.get("payload"))
 
 
+def _normalize_whatsapp_message_branch_key(raw_value: Any) -> str | None:
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip().lower()
+    if not text:
+        return None
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return normalized or None
+
+
+def _extract_whatsapp_message_branch_key_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("object") != "whatsapp_business_account":
+        return None
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            messages = value.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                interactive = message.get("interactive")
+                if isinstance(interactive, dict):
+                    button_reply = interactive.get("button_reply")
+                    if isinstance(button_reply, dict):
+                        key = _normalize_whatsapp_message_branch_key(button_reply.get("id"))
+                        if key:
+                            return key
+                    list_reply = interactive.get("list_reply")
+                    if isinstance(list_reply, dict):
+                        key = _normalize_whatsapp_message_branch_key(list_reply.get("id"))
+                        if key:
+                            return key
+                button = message.get("button")
+                if isinstance(button, dict):
+                    key = _normalize_whatsapp_message_branch_key(button.get("payload"))
+                    if key:
+                        return key
+                text_payload = message.get("text")
+                if isinstance(text_payload, dict):
+                    key = _normalize_whatsapp_message_branch_key(text_payload.get("body"))
+                    if key:
+                        return key
+    return None
+
+
+def _extract_whatsapp_message_branch_key_from_runtime(runtime_variables: dict[str, Any]) -> str | None:
+    if not isinstance(runtime_variables, dict):
+        return None
+    key = _extract_whatsapp_message_branch_key_from_payload(runtime_variables.get("last_payload"))
+    if key is not None:
+        return key
+    key = _extract_whatsapp_message_branch_key_from_payload(runtime_variables.get("input_payload"))
+    if key is not None:
+        return key
+    variables = runtime_variables.get("variables")
+    if not isinstance(variables, dict):
+        return None
+    return _extract_whatsapp_message_branch_key_from_payload(variables.get("payload"))
+
+
+def _extract_whatsapp_provider_number_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("object") != "whatsapp_business_account":
+        return None
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            metadata = value.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            number = normalize_phone_to_canonical_ani(metadata.get("display_phone_number"))
+            if number:
+                return str(number).strip()
+    return None
+
+
 def _extract_dialer_status_from_payload(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -696,6 +807,78 @@ def _extract_send_with_whatsapp_numbers(component: dict[str, Any]) -> list[str]:
     return numbers
 
 
+def _extract_send_whatsapp_interactive_number_policies(component: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    config = params.get("whatsapp_interactive_config") if isinstance(params.get("whatsapp_interactive_config"), dict) else {}
+    rows = config.get("numbers") if isinstance(config.get("numbers"), list) else []
+
+    numbers: list[str] = []
+    percentual_by_phone: dict[str, int] = {}
+    seen: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        value = str(normalize_phone_to_canonical_ani(item.get("number")) or "").strip()
+        if not value or value in seen:
+            continue
+        max_daily_raw = (
+            item.get("max_daily_rate_limit_consumption")
+            if item.get("max_daily_rate_limit_consumption") is not None
+            else (
+                item.get("value").get("max_daily_rate_limit_consumption")
+                if isinstance(item.get("value"), dict)
+                else None
+            )
+        )
+        percentual_value = 0
+        try:
+            percentual_value = int(float(str(max_daily_raw).strip()))
+        except Exception:
+            percentual_value = 0
+        if percentual_value < 0:
+            percentual_value = 0
+        if percentual_value > 100:
+            percentual_value = 100
+        seen.add(value)
+        numbers.append(value)
+        percentual_by_phone[value] = percentual_value
+    return numbers, percentual_by_phone
+
+
+def _extract_send_whatsapp_interactive_number_payloads(component: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    config = params.get("whatsapp_interactive_config") if isinstance(params.get("whatsapp_interactive_config"), dict) else {}
+    rows = config.get("numbers") if isinstance(config.get("numbers"), list) else []
+    payload_by_phone: dict[str, dict[str, Any]] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        number = str(normalize_phone_to_canonical_ani(item.get("number")) or "").strip()
+        if not number:
+            continue
+        value = item.get("value")
+        if not isinstance(value, dict):
+            continue
+        meta_payload = value.get("meta_payload")
+        if not isinstance(meta_payload, dict):
+            continue
+        payload_by_phone[number] = meta_payload
+    return payload_by_phone
+
+
+def _read_send_whatsapp_interactive_selected_number(component: dict[str, Any]) -> str | None:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    config = params.get("whatsapp_interactive_config") if isinstance(params.get("whatsapp_interactive_config"), dict) else {}
+    for raw in (
+        config.get("selected_number"),
+        config.get("active_number"),
+    ):
+        value = str(normalize_phone_to_canonical_ani(raw) or "").strip()
+        if value:
+            return value
+    return None
+
+
 async def _prepare_send_with_whatsapp_contact_member(
     *,
     db_session: AsyncSession,
@@ -713,6 +896,31 @@ async def _prepare_send_with_whatsapp_contact_member(
         percentual_by_phone=percentual_by_phone,
     )
     runtime_variables["send_with_whatsapp_routing"] = {
+        "numbers": numbers,
+        "percentual_by_phone": percentual_by_phone,
+        "assignment": assignment,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return assignment
+
+
+async def _prepare_send_whatsapp_interactive_contact_member(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    numbers, percentual_by_phone = _extract_send_whatsapp_interactive_number_policies(component)
+    assignment = await assign_whatsapp_routing_for_session(
+        db_session,
+        flow_uuid=flow_uuid,
+        session_id=session_id,
+        numbers=numbers,
+        percentual_by_phone=percentual_by_phone,
+    )
+    runtime_variables["send_whatsapp_interactive_routing"] = {
         "numbers": numbers,
         "percentual_by_phone": percentual_by_phone,
         "assignment": assignment,
@@ -818,11 +1026,19 @@ def _compute_whatsapp_status_order_delay(
     return now_utc + timedelta(seconds=WHATSAPP_STATUS_ORDER_RETRY_SECONDS)
 
 
-def _should_resume_whatsapp_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
+def _should_resume_whatsapp_blocking_execution(
+    runtime_variables: dict[str, Any],
+    *,
+    has_pending_whatsapp_events: bool = False,
+) -> bool:
     blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
     if blocking_stop_reason not in WHATSAPP_BLOCKING_STOP_REASONS:
         return False
-    return _extract_whatsapp_status_from_runtime(runtime_variables) is not None
+    if has_pending_whatsapp_events:
+        return True
+    if _extract_whatsapp_status_from_runtime(runtime_variables) is not None:
+        return True
+    return _extract_whatsapp_message_branch_key_from_runtime(runtime_variables) is not None
 
 
 def _should_resume_dialer_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
@@ -2673,6 +2889,131 @@ def _run_api_call(
     return "success" if 200 <= status_code < 300 else "error"
 
 
+def _resolve_whatsapp_interactive_recipient_phone(runtime_variables: dict[str, Any]) -> str | None:
+    variables = _ensure_variables(runtime_variables)
+    system = variables.get("system") if isinstance(variables.get("system"), dict) else {}
+    contact = system.get("contact") if isinstance(system.get("contact"), dict) else {}
+    channel = contact.get("channel") if isinstance(contact.get("channel"), dict) else {}
+    for raw in (
+        contact.get("channel_address"),
+        channel.get("address"),
+        contact.get("identifier"),
+        system.get("external_session_id"),
+        system.get("session_external_id"),
+        system.get("chat_id"),
+    ):
+        candidate = str(normalize_phone_to_canonical_ani(raw) or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
+def _run_send_whatsapp_interactive(
+    *,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    provider_number: str,
+) -> tuple[bool, str | None]:
+    settings = get_settings()
+    base_url = str(settings.sync_webhook_base_url or "").strip()
+    if not base_url:
+        return False, "send_whatsapp_interactive_missing_sync_webhook_base_url"
+    if not settings.sync_ws_client_id or not settings.sync_ws_client_secret:
+        return False, "send_whatsapp_interactive_missing_sync_ws_credentials"
+
+    provider_number = str(normalize_phone_to_canonical_ani(provider_number) or "").strip()
+    if not provider_number:
+        return False, "send_whatsapp_interactive_missing_provider_number"
+
+    payload_by_phone = _extract_send_whatsapp_interactive_number_payloads(component)
+    meta_payload = payload_by_phone.get(provider_number)
+    if not isinstance(meta_payload, dict):
+        return False, "send_whatsapp_interactive_missing_meta_payload_for_provider"
+
+    recipient_phone_number = _resolve_whatsapp_interactive_recipient_phone(runtime_variables)
+    if not recipient_phone_number:
+        return False, "send_whatsapp_interactive_missing_recipient_phone"
+
+    variables = _ensure_variables(runtime_variables)
+    variables["recipient_phone_number"] = recipient_phone_number
+    outbound_payload = _render_value(copy.deepcopy(meta_payload), variables)
+    if not isinstance(outbound_payload, dict) or not outbound_payload:
+        return False, "send_whatsapp_interactive_empty_payload_after_render"
+
+    workspace_uuid = (
+        get_current_workspace_uuid()
+        or (
+            str((variables.get("system") or {}).get("workspace_uuid")).strip()
+            if isinstance(variables.get("system"), dict)
+            else ""
+        )
+        or None
+    )
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-APPLICATION-CLIENT-ID": str(settings.sync_ws_client_id),
+        "X-APPLICATION-CLIENT-SECRET": str(settings.sync_ws_client_secret),
+    }
+    if workspace_uuid:
+        headers["X-WORKSPACE-UUID"] = str(workspace_uuid)
+    if settings.target_core_api_bearer_token:
+        headers["Authorization"] = f"Bearer {settings.target_core_api_bearer_token}"
+
+    url = f"{base_url.rstrip('/')}/whatsapp/provider/{provider_number}/send-message"
+    req = request.Request(
+        url=url,
+        method="POST",
+        data=json.dumps(outbound_payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+    )
+    status_code, resp_headers, resp_body, error_msg = _http_execute(
+        req,
+        timeout_seconds=max(0.1, float(settings.sync_ws_timeout_seconds)),
+    )
+
+    runtime_variables["send_whatsapp_interactive_last_result"] = {
+        "status_code": status_code,
+        "provider_number": provider_number,
+        "recipient_phone_number": recipient_phone_number,
+        "url": url,
+        "error": error_msg,
+        "body": resp_body,
+        "headers": resp_headers,
+    }
+
+    return (200 <= status_code < 300), error_msg
+
+
+def _resolve_send_whatsapp_interactive_branch_label(
+    *,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    key = _extract_whatsapp_message_branch_key_from_runtime(runtime_variables)
+    if key is None:
+        key = _extract_whatsapp_status_from_runtime(runtime_variables)
+    if key is None:
+        return None
+
+    provider_number = _extract_whatsapp_provider_number_from_payload(runtime_variables.get("last_payload"))
+    if provider_number is None:
+        send_meta = runtime_variables.get("send_whatsapp_interactive_last_result")
+        if isinstance(send_meta, dict):
+            provider_number = str(normalize_phone_to_canonical_ani(send_meta.get("provider_number")) or "").strip() or None
+    if provider_number is None:
+        routing_meta = runtime_variables.get("send_whatsapp_interactive_routing")
+        if isinstance(routing_meta, dict):
+            assignment = routing_meta.get("assignment")
+            if isinstance(assignment, dict):
+                provider_number = str(normalize_phone_to_canonical_ani(assignment.get("ani")) or "").strip() or None
+    if provider_number is None:
+        provider_number = _read_send_whatsapp_interactive_selected_number(component)
+    if provider_number is None:
+        return None
+    return f"wic:{provider_number}:{key}"
+
+
 def _unwrap_option(value: Any) -> str | None:
     if isinstance(value, dict):
         for key in ("id", "value", "name", "label"):
@@ -2905,12 +3246,13 @@ async def execute_workflow_m2_for_session(
         total_latency_ms = (time.perf_counter() - execution_started_perf) * 1000
         success_stop_reasons = {
             "finished_by_component",
-            "scheduled_wait",
-            "end_of_branch",
-            "blocked_send_with_whatsapp",
-            "blocked_process_whatsapp_response",
-            "blocked_send_with_dialer",
-            "blocked_process_dialer_response",
+                "scheduled_wait",
+                "end_of_branch",
+                "blocked_send_with_whatsapp",
+                "blocked_send_whatsapp_interactive",
+                "blocked_process_whatsapp_response",
+                "blocked_send_with_dialer",
+                "blocked_process_dialer_response",
         }
         workflow_status = "success"
         if result.stopped_reason == "session_execution_locked":
@@ -3074,7 +3416,10 @@ async def execute_workflow_m2_for_session(
             if current_card_uuid is None and _extract_dialer_status_from_runtime(runtime_variables) is not None:
                 current_card_uuid = _read_dialer_resume_cursor(runtime_variables)
         if blocking_stop_reason is not None:
-            if _should_resume_whatsapp_blocking_execution(runtime_variables):
+            if _should_resume_whatsapp_blocking_execution(
+                runtime_variables,
+                has_pending_whatsapp_events=has_pending_whatsapp_events,
+            ):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -3215,6 +3560,225 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
+                elif kind == "send_whatsapp_interactive":
+                    _set_whatsapp_resume_cursor(
+                        runtime_variables,
+                        process_card_cursor=next_card_uuid,
+                    )
+                    pending_whatsapp_event = await claim_next_pending_channel_event(
+                        db_session,
+                        session_id=session_id,
+                        channel="whatsapp",
+                    )
+                    if isinstance(pending_whatsapp_event, dict):
+                        payload = pending_whatsapp_event.get("payload")
+                        if isinstance(payload, dict):
+                            runtime_variables["last_payload"] = payload
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
+                            )
+
+                    branch_label = _resolve_send_whatsapp_interactive_branch_label(
+                        component=component,
+                        runtime_variables=runtime_variables,
+                    )
+                    if branch_label is not None:
+                        available_labels = outgoing_branch_labels(
+                            definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        normalized_branch = str(branch_label).strip().lower()
+                        if normalized_branch not in available_labels:
+                            runtime_variables["send_whatsapp_interactive_last_error"] = {
+                                "component_ref_id": component.get("ref_id"),
+                                "code": "send_whatsapp_interactive_branch_not_found",
+                                "message": (
+                                    f"Branch '{branch_label}' não encontrado para componente "
+                                    f"send_whatsapp_interactive. Sessão permanece em escuta."
+                                ),
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            last_card_uuid = next_card_uuid
+                            executed_steps += 1
+                            _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                            _mark_blocking_execution(runtime_variables, stopped_reason="blocked_send_whatsapp_interactive")
+                            _reset_loop_guard_counter(runtime_variables)
+                            await replace_session_workflow_state(
+                                db_session,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                                next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                            )
+                            step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                            step_finished_at = datetime.now(timezone.utc)
+                            _append_metric(
+                                metric_type="card",
+                                status="success",
+                                started_at=step_started_at,
+                                finished_at=step_finished_at,
+                                latency_ms=step_latency_ms,
+                                stopped_reason="blocked_send_whatsapp_interactive",
+                                step_index=executed_steps,
+                                card_cursor=last_card_uuid,
+                                component_kind_value=kind,
+                                details={"branch_label": branch_label, "next_card_uuid": next_card_uuid},
+                            )
+                            return await _finalize(
+                                WorkflowExecutionResult(
+                                    True,
+                                    executed_steps,
+                                    "blocked_send_whatsapp_interactive",
+                                    last_card_uuid,
+                                    next_card_uuid,
+                                )
+                            )
+                        if (defer_until := _compute_whatsapp_status_order_delay(
+                            runtime_variables=runtime_variables,
+                            session_state=session_state,
+                        )) is not None:
+                            await replace_session_workflow_state(
+                                db_session,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                                next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                                frozen_until=defer_until,
+                            )
+                            step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                            step_finished_at = datetime.now(timezone.utc)
+                            _append_metric(
+                                metric_type="card",
+                                status="success",
+                                started_at=step_started_at,
+                                finished_at=step_finished_at,
+                                latency_ms=step_latency_ms,
+                                stopped_reason="frozen_wait_active",
+                                step_index=executed_steps,
+                                card_cursor=next_card_uuid,
+                                component_kind_value=kind,
+                                details={
+                                    "defer_until": defer_until.isoformat(),
+                                    "reason": "waiting_previous_whatsapp_status",
+                                },
+                            )
+                            return await _finalize(
+                                WorkflowExecutionResult(
+                                    True,
+                                    executed_steps,
+                                    "frozen_wait_active",
+                                    last_card_uuid,
+                                    next_card_uuid,
+                                )
+                            )
+
+                        runtime_variables.pop("send_whatsapp_interactive_last_error", None)
+                    else:
+                        assignment = await _prepare_send_whatsapp_interactive_contact_member(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                        if _is_send_with_whatsapp_limit_exhausted(assignment):
+                            _set_synthetic_whatsapp_status_payload(
+                                runtime_variables,
+                                status="limit_reached",
+                                reason="send_whatsapp_interactive_limit_exhausted",
+                            )
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
+                            )
+                            branch_label = _resolve_send_whatsapp_interactive_branch_label(
+                                component=component,
+                                runtime_variables=runtime_variables,
+                            )
+                        else:
+                            provider_number = str(normalize_phone_to_canonical_ani((assignment or {}).get("ani")) or "").strip()
+                            if not provider_number:
+                                provider_number = _read_send_whatsapp_interactive_selected_number(component) or ""
+                            send_ok, send_error = _run_send_whatsapp_interactive(
+                                component=component,
+                                runtime_variables=runtime_variables,
+                                provider_number=provider_number,
+                            )
+                            if not send_ok:
+                                exception_branch = _resolve_component_exception_branch_label(
+                                    definition=definition,
+                                    current_card_uuid=next_card_uuid,
+                                )
+                                runtime_variables["send_whatsapp_interactive_last_error"] = {
+                                    "component_ref_id": component.get("ref_id"),
+                                    "code": "send_whatsapp_interactive_send_failed",
+                                    "message": (
+                                        "Falha no envio do send_whatsapp_interactive; "
+                                        "sessão permanece em escuta."
+                                    ),
+                                    "error": send_error,
+                                    "exception_branch": exception_branch,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                }
+                                if exception_branch:
+                                    branch_label = exception_branch
+                            else:
+                                runtime_variables.pop("send_whatsapp_interactive_last_error", None)
+
+                    if branch_label is None:
+                        last_card_uuid = next_card_uuid
+                        executed_steps += 1
+                        _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
+                        _mark_blocking_execution(runtime_variables, stopped_reason="blocked_send_whatsapp_interactive")
+                        _reset_loop_guard_counter(runtime_variables)
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                        )
+                        step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="success",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=step_latency_ms,
+                            stopped_reason="blocked_send_whatsapp_interactive",
+                            step_index=executed_steps,
+                            card_cursor=last_card_uuid,
+                            component_kind_value=kind,
+                            details={"next_card_uuid": next_card_uuid},
+                        )
+                        logger.info(
+                            "workflow m2 card blocking",
+                            extra={
+                                "event": "orch.workflow.m2.card.blocking",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
+                                "component_kind": kind,
+                                "step_index": executed_steps,
+                                "latency_ms": round(step_latency_ms, 2),
+                                "stopped_reason": "blocked_send_whatsapp_interactive",
+                                "metric_type": "card",
+                            },
+                        )
+                        return await _finalize(
+                            WorkflowExecutionResult(
+                                True,
+                                executed_steps,
+                                "blocked_send_whatsapp_interactive",
+                                last_card_uuid,
+                                next_card_uuid,
+                            )
+                        )
                 elif kind == "process_whatsapp_response":
                     _set_whatsapp_resume_cursor(
                         runtime_variables,

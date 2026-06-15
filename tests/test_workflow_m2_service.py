@@ -12,9 +12,12 @@ from app.services.workflow_m2_service import (
     _compute_whatsapp_status_order_delay,
     _compute_frozen_until,
     _extract_send_with_whatsapp_number_policies,
+    _extract_send_whatsapp_interactive_number_policies,
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
+    _extract_whatsapp_message_branch_key_from_runtime,
     _extract_send_with_whatsapp_numbers,
+    _resolve_send_whatsapp_interactive_branch_label,
     _inject_contact_runtime_scope,
     _inject_callback_runtime_scope,
     _inject_system_runtime_scope,
@@ -55,6 +58,7 @@ from app.services.workflow_m2_service import (
 
 def test_blocking_stop_reason_for_whatsapp_components() -> None:
     assert _blocking_stop_reason_for_component("send_with_whatsapp") == "blocked_send_with_whatsapp"
+    assert _blocking_stop_reason_for_component("send_whatsapp_interactive") == "blocked_send_whatsapp_interactive"
     assert _blocking_stop_reason_for_component("process_whatsapp_response") == "blocked_process_whatsapp_response"
     assert _blocking_stop_reason_for_component("send_with_dialer") == "blocked_send_with_dialer"
     assert _blocking_stop_reason_for_component("process_dialer_response") == "blocked_process_dialer_response"
@@ -232,6 +236,89 @@ def test_run_process_whatsapp_response_maps_status_to_branch() -> None:
     assert runtime_variables["whatsapp_last_response"]["branch"] == "read"
 
 
+def test_extract_whatsapp_message_branch_key_from_runtime_interactive_id() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "id": "wamid.1",
+                                        "interactive": {"button_reply": {"id": "OTIMO"}},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    assert _extract_whatsapp_message_branch_key_from_runtime(runtime_variables) == "otimo"
+
+
+def test_extract_whatsapp_message_branch_key_from_runtime_text_fallback() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "id": "wamid.2",
+                                        "text": {"body": "olá. bom dia!"},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    assert _extract_whatsapp_message_branch_key_from_runtime(runtime_variables) == "ola_bom_dia"
+
+
+def test_resolve_send_whatsapp_interactive_branch_label_uses_provider_and_key() -> None:
+    component = {"parameters": {"whatsapp_interactive_config": {"selected_number": "1147371486"}}}
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "metadata": {"display_phone_number": "551147371486"},
+                                "messages": [
+                                    {
+                                        "id": "wamid.3",
+                                        "interactive": {"button_reply": {"id": "simular_emprestimo"}},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    assert (
+        _resolve_send_whatsapp_interactive_branch_label(
+            component=component,
+            runtime_variables=runtime_variables,
+        )
+        == "wic:1147371486:simular_emprestimo"
+    )
+
+
 def test_run_process_dialer_response_maps_status_to_branch() -> None:
     runtime_variables = {
         "last_payload": {
@@ -283,6 +370,22 @@ def test_extract_send_with_whatsapp_number_policies_normalizes_country_code() ->
     numbers, percentual_by_phone = _extract_send_with_whatsapp_number_policies(component)
     assert numbers == ["1147371485", "1147371486"]
     assert percentual_by_phone == {"1147371485": 50, "1147371486": 30}
+
+
+def test_extract_send_whatsapp_interactive_number_policies_reads_percentual() -> None:
+    component = {
+        "parameters": {
+            "whatsapp_interactive_config": {
+                "numbers": [
+                    {"number": "551147371485", "value": {"max_daily_rate_limit_consumption": 100}},
+                    {"number": "1147371486", "value": {"max_daily_rate_limit_consumption": 35}},
+                ]
+            }
+        }
+    }
+    numbers, percentual_by_phone = _extract_send_whatsapp_interactive_number_policies(component)
+    assert numbers == ["1147371485", "1147371486"]
+    assert percentual_by_phone == {"1147371485": 100, "1147371486": 35}
 
 
 def test_is_send_with_whatsapp_limit_exhausted() -> None:
@@ -533,7 +636,7 @@ async def test_prepare_send_with_whatsapp_contact_member_updates_runtime(monkeyp
     assert route_data["assignment"]["ani"] == "1147371485"
 
 
-def test_should_resume_whatsapp_blocking_execution_only_when_status_available() -> None:
+def test_should_resume_whatsapp_blocking_execution_when_status_or_message_or_pending() -> None:
     runtime_variables = {
         "workflow_v2": {
             "blocking_execution": True,
@@ -556,7 +659,30 @@ def test_should_resume_whatsapp_blocking_execution_only_when_status_available() 
     }
     assert _should_resume_whatsapp_blocking_execution(runtime_variables) is True
 
+    runtime_variables["last_payload"] = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [{"text": {"body": "OTIMO"}}],
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    assert _should_resume_whatsapp_blocking_execution(runtime_variables) is True
+
     runtime_variables["last_payload"] = {"external_id": "generic-event"}
+    assert _should_resume_whatsapp_blocking_execution(runtime_variables) is False
+    assert _should_resume_whatsapp_blocking_execution(
+        runtime_variables,
+        has_pending_whatsapp_events=True,
+    ) is True
+
+    runtime_variables["workflow_v2"]["blocking_stop_reason"] = "blocked_send_with_dialer"
     assert _should_resume_whatsapp_blocking_execution(runtime_variables) is False
 
 
