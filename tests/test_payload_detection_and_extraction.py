@@ -148,6 +148,64 @@ def test_extract_session_fields_normalizes_whatsapp_12_digits_missing_ninth() ->
     assert extracted.entity_session_id == "5543999056041"
 
 
+def test_detect_app_whatsapp_message_event() -> None:
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "contacts": [{"wa_id": "5511975620806"}],
+                            "messages": [
+                                {
+                                    "id": "wamid.1",
+                                    "from": "5511975620806",
+                                    "timestamp": "1781526585",
+                                    "type": "text",
+                                    "text": {"body": "ola. bom dia!"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    assert detect_app(payload) == "WhatsApp"
+
+
+def test_extract_session_fields_from_whatsapp_message_event() -> None:
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "messages": [
+                                {
+                                    "id": "wamid.2",
+                                    "from": "554399056041",
+                                    "timestamp": "1781526585",
+                                    "type": "text",
+                                    "text": {"body": "oi"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    extracted = extract_session_fields("WhatsApp", payload)
+    assert extracted.entity == "5543999056041"
+    assert extracted.entity_address == "5543999056041"
+    assert extracted.entity_session_id == "5543999056041"
+
+
 def test_extract_session_fields_normalizes_dialer_12_digits_missing_ninth() -> None:
     payload = {
         "uniqueid": "test-uid",

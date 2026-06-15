@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -33,6 +35,47 @@ def _parse_unix_timestamp(raw_value: Any) -> datetime | None:
     return datetime.fromtimestamp(parsed, tz=timezone.utc)
 
 
+def _normalize_message_branch_key(raw_value: Any) -> str | None:
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip().lower()
+    if not text:
+        return None
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return normalized or None
+
+
+def _extract_whatsapp_message_key(message: dict[str, Any]) -> str | None:
+    interactive = message.get("interactive")
+    if isinstance(interactive, dict):
+        button_reply = interactive.get("button_reply")
+        if isinstance(button_reply, dict):
+            key = _normalize_message_branch_key(button_reply.get("id"))
+            if key:
+                return key
+        list_reply = interactive.get("list_reply")
+        if isinstance(list_reply, dict):
+            key = _normalize_message_branch_key(list_reply.get("id"))
+            if key:
+                return key
+
+    button = message.get("button")
+    if isinstance(button, dict):
+        key = _normalize_message_branch_key(button.get("payload"))
+        if key:
+            return key
+
+    text_payload = message.get("text")
+    if isinstance(text_payload, dict):
+        key = _normalize_message_branch_key(text_payload.get("body"))
+        if key:
+            return key
+
+    return None
+
+
 def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEventItem]:
     if payload.get("object") != "whatsapp_business_account":
         return []
@@ -54,8 +97,9 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
             if not isinstance(value, dict):
                 continue
             statuses = value.get("statuses")
+            messages = value.get("messages")
             if not isinstance(statuses, list):
-                continue
+                statuses = []
             for status_item in statuses:
                 if not isinstance(status_item, dict):
                     continue
@@ -72,6 +116,27 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
                         event_type=event_type,
                         event_id=event_id,
                         event_ts=_parse_unix_timestamp(status_item.get("timestamp")),
+                        payload=payload,
+                    )
+                )
+
+            if not isinstance(messages, list):
+                messages = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                event_id_raw = message.get("id")
+                event_id = str(event_id_raw).strip() if event_id_raw is not None else None
+                if event_id == "":
+                    event_id = None
+                message_key = _extract_whatsapp_message_key(message)
+                event_type = f"message:{message_key}" if message_key else "message"
+                items.append(
+                    ChannelEventItem(
+                        channel="whatsapp",
+                        event_type=event_type,
+                        event_id=event_id,
+                        event_ts=_parse_unix_timestamp(message.get("timestamp")),
                         payload=payload,
                     )
                 )
