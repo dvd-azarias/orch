@@ -250,13 +250,7 @@ async def test_send_whatsapp_interactive_blocks_waiting_for_events(monkeypatch: 
         }
         return {"ani": "1147371486", "linked_actuator": "whatsapp"}
 
-    def _fake_send(**kwargs):  # noqa: ANN001
-        runtime_variables = kwargs["runtime_variables"]
-        runtime_variables["send_whatsapp_interactive_last_result"] = {"status_code": 200, "provider_number": "1147371486"}
-        return True, None
-
     monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_interactive_contact_member", _fake_prepare)
-    monkeypatch.setattr(workflow_m2_service, "_run_send_whatsapp_interactive", _fake_send)
 
     try:
         session_factory = get_session_factory()
@@ -339,13 +333,7 @@ async def test_send_whatsapp_interactive_resumes_on_message_and_routes_wic_branc
         }
         return {"ani": "1147371486", "linked_actuator": "whatsapp"}
 
-    def _fake_send(**kwargs):  # noqa: ANN001
-        runtime_variables = kwargs["runtime_variables"]
-        runtime_variables["send_whatsapp_interactive_last_result"] = {"status_code": 200, "provider_number": "1147371486"}
-        return True, None
-
     monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_interactive_contact_member", _fake_prepare)
-    monkeypatch.setattr(workflow_m2_service, "_run_send_whatsapp_interactive", _fake_send)
 
     try:
         session_factory = get_session_factory()
