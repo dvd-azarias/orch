@@ -173,31 +173,8 @@ async def move_processed_file_to_processados(
         ) from exc
 
     metadata_url = f"{base_url}/files/metadata/{file_id}"
-    try:
-        await _request_json_with_retry(
-            method="PATCH",
-            url=metadata_url,
-            headers=headers,
-            payload={"folder_path": target_folder},
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppProcessedFileError(
-            code="move_file_to_processados_failed",
-                message=f"Falha ao mover arquivo para processados (HTTP {int(exc.code)}).",
-                details={"status_code": int(exc.code), "response_body": detail},
-            ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise FileAppProcessedFileError(
-            code="move_file_to_processados_failed",
-            message="Falha ao mover arquivo para processados após retries.",
-            details={"error_type": type(exc).__name__, "error_message": str(exc)},
-        ) from exc
-
     suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    candidate_name = _build_timestamped_name(original_name, suffix=suffix)
-    renamed_to = candidate_name
+    renamed_to = ""
     for index in range(0, 1000):
         if index == 0:
             candidate_name = _build_timestamped_name(original_name, suffix=suffix)
@@ -211,8 +188,6 @@ async def move_processed_file_to_processados(
                 payload={"original_name": candidate_name},
                 timeout_seconds=settings.sync_ws_timeout_seconds,
             )
-            renamed_to = candidate_name
-            break
         except HTTPError as exc:
             if _is_name_conflict(int(exc.code)) and index < 999:
                 continue
@@ -236,6 +211,47 @@ async def move_processed_file_to_processados(
                     "last_candidate": candidate_name,
                 },
             ) from exc
+
+        try:
+            await _request_json_with_retry(
+                method="PATCH",
+                url=metadata_url,
+                headers=headers,
+                payload={"folder_path": target_folder},
+                timeout_seconds=settings.sync_ws_timeout_seconds,
+            )
+            renamed_to = candidate_name
+            break
+        except HTTPError as exc:
+            if _is_name_conflict(int(exc.code)) and index < 999:
+                continue
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise FileAppProcessedFileError(
+                code="move_file_to_processados_failed",
+                message=f"Falha ao mover arquivo para processados (HTTP {int(exc.code)}).",
+                details={
+                    "status_code": int(exc.code),
+                    "response_body": detail,
+                    "last_candidate": candidate_name,
+                },
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise FileAppProcessedFileError(
+                code="move_file_to_processados_failed",
+                message="Falha ao mover arquivo para processados após retries.",
+                details={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "last_candidate": candidate_name,
+                },
+            ) from exc
+
+    if not renamed_to:
+        raise FileAppProcessedFileError(
+            code="rename_processed_file_failed",
+            message="Não foi possível gerar nome único para arquivo processado.",
+            details={"base_name": original_name, "suffix": suffix},
+        )
 
     return {
         "status": "done",
