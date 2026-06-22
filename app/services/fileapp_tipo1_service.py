@@ -183,6 +183,36 @@ async def resolve_mapping_template_uuid(
     return None
 
 
+async def resolve_detach_all_files(
+    db_session: AsyncSession,
+    *,
+    workspace_schema: str,
+    flow_uuid: str,
+) -> bool:
+    safe_schema = workspace_schema.replace('"', '""')
+    row = await db_session.execute(
+        text(
+            f"""
+            SELECT COALESCE(
+                (cr.definition -> 'canvas_properties' -> 'orchestration_trigger' ->> 'detach_all_files')::boolean,
+                (dr.definition -> 'canvas_properties' -> 'orchestration_trigger' ->> 'detach_all_files')::boolean,
+                FALSE
+            ) AS detach_all_files
+            FROM "{safe_schema}".flow_v2 f
+            LEFT JOIN "{safe_schema}".flow_v2_revision cr ON cr.id = f.current_revision_id
+            LEFT JOIN "{safe_schema}".flow_v2_revision dr ON dr.id = f.draft_revision_id
+            WHERE f.id::text = :flow_uuid
+            LIMIT 1
+            """
+        ),
+        {"flow_uuid": flow_uuid},
+    )
+    found = row.first()
+    if found is None:
+        return False
+    return bool(found[0])
+
+
 async def resolve_mapping_template_id(
     db_session: AsyncSession,
     *,

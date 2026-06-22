@@ -17,6 +17,7 @@ from app.services.fileapp_tipo1_manual_pipeline_service import (
     build_file_event_mailing_identity,
     run_tipo1_manual_pipeline,
 )
+from app.services.fileapp_tipo1_service import resolve_detach_all_files
 from app.services.fileapp_processed_file_service import (
     FileAppProcessedFileError,
     move_processed_file_to_processados,
@@ -470,10 +471,17 @@ async def _associate_fileapp_mailing_task(
 ) -> dict[str, Any]:
     settings = get_settings()
     session_factory = get_session_factory()
+    detach_all_files = False
     async with session_factory() as db_session:
+        safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
         workspace_api_key = await fetch_workspace_otima_billing_api_key(
             db_session,
-            workspace_uuid=workspace_uuid,
+            workspace_uuid=safe_workspace_uuid,
+        )
+        detach_all_files = await resolve_detach_all_files(
+            db_session,
+            workspace_schema=workspace_schema,
+            flow_uuid=flow_uuid,
         )
     result = await associate_mailing_to_flow_from_file_event(
         settings=settings,
@@ -482,6 +490,7 @@ async def _associate_fileapp_mailing_task(
         mailing_uuid=mailing_uuid,
         linked_by=linked_by,
         workspace_api_key=workspace_api_key,
+        detach_all_files=detach_all_files,
     )
     if result.get("status") in {"error", "pending"}:
         retries = int(task.request.retries or 0)
