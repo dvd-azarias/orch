@@ -367,7 +367,7 @@ async def _process_fileapp_tipo1_event_task(
                 "workspace_uuid": safe_workspace_uuid,
                 "flow_uuid": flow_uuid,
                 "code": exc.code,
-                "message": exc.message,
+                "error_message": exc.message,
                 "details": exc.details,
             },
         )

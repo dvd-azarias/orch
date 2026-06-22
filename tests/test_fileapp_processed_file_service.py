@@ -68,6 +68,58 @@ async def test_move_processed_file_to_processados_with_rename_fallback(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_move_processed_file_to_processados_retries_transient_500_on_move(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict]] = []
+    sleep_calls: list[float] = []
+    now_stub = "20260622T204500Z"
+
+    def _fake_request_json(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        calls.append((method, url, payload))
+        if method == "POST" and url.endswith("/files/folders"):
+            return 201, "{}"
+        if method == "PATCH" and payload == {"folder_path": "mailings/AeC/tim-portabilidade/processados"}:
+            if len([item for item in calls if item[0] == "PATCH" and item[2] == {"folder_path": "mailings/AeC/tim-portabilidade/processados"}]) == 1:
+                raise _http_error(500)
+            return 200, "{}"
+        if method == "PATCH" and payload == {"original_name": f"contato_deivid_tim_silver_{now_stub}.csv"}:
+            return 200, "{}"
+        raise AssertionError(f"Unexpected call: {method} {url} payload={payload}")
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    class _Now:
+        @staticmethod
+        def now(tz=None):  # type: ignore[no-untyped-def]
+            class _DT:
+                @staticmethod
+                def strftime(fmt: str) -> str:
+                    assert fmt == "%Y%m%dT%H%M%SZ"
+                    return now_stub
+
+            return _DT()
+
+    monkeypatch.setattr(service, "_request_json", _fake_request_json)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(service, "datetime", _Now)
+
+    result = await service.move_processed_file_to_processados(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        payload={
+            "file": {
+                "id": "db1af3c8-fb8c-42dc-8e0b-68c274d5cf59",
+                "folder_path": "mailings/AeC/tim-portabilidade",
+                "original_name": "contato_deivid_tim_silver.csv",
+            }
+        },
+    )
+
+    assert result["status"] == "done"
+    assert sleep_calls == [15.0]
+
+
+@pytest.mark.asyncio
 async def test_move_processed_file_to_processados_skips_when_already_processed(monkeypatch) -> None:
     called = {"count": 0}
 
@@ -96,6 +148,8 @@ async def test_move_processed_file_to_processados_skips_when_already_processed(m
 
 @pytest.mark.asyncio
 async def test_move_processed_file_to_processados_raises_when_move_fails(monkeypatch) -> None:
+    sleep_calls: list[float] = []
+
     def _fake_request_json(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
         if method == "POST":
             return 201, "{}"
@@ -103,7 +157,11 @@ async def test_move_processed_file_to_processados_raises_when_move_fails(monkeyp
             raise _http_error(500)
         return 200, "{}"
 
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
     monkeypatch.setattr(service, "_request_json", _fake_request_json)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
 
     with pytest.raises(service.FileAppProcessedFileError) as exc_info:
         await service.move_processed_file_to_processados(
@@ -119,3 +177,4 @@ async def test_move_processed_file_to_processados_raises_when_move_fails(monkeyp
         )
 
     assert exc_info.value.code == "move_file_to_processados_failed"
+    assert len(sleep_calls) == 4
