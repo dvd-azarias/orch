@@ -63,6 +63,9 @@ class Settings:
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
     sync_ws_client_secret: str | None
+    arquivos_client_id: str | None
+    arquivos_client_secret: str | None
+    arquivos_base_url: str | None
     sync_webhook_base_url: str | None
     sync_ws_timeout_seconds: float
     target_core_api_bearer_token: str | None
@@ -318,6 +321,9 @@ def get_settings() -> Settings:
         ),
         sync_ws_client_id=_read_env_optional("SYNC_WS_CLIENT_ID"),
         sync_ws_client_secret=_read_env_optional("SYNC_WS_CLIENT_SECRET"),
+        arquivos_client_id=_read_env_optional("ARQUIVOS_CLIENT_ID", _read_env_optional("SYNC_WS_CLIENT_ID")),
+        arquivos_client_secret=_read_env_optional("ARQUIVOS_CLIENT_SECRET", _read_env_optional("SYNC_WS_CLIENT_SECRET")),
+        arquivos_base_url=_read_env_optional("ARQUIVOS_BASE_URL"),
         sync_webhook_base_url=_read_env_optional("SYNC_WEBHOOK_BASE_URL"),
         sync_ws_timeout_seconds=float(_read_env_optional("SYNC_WS_TIMEOUT_SECONDS", "5") or "5"),
         target_core_api_bearer_token=(
