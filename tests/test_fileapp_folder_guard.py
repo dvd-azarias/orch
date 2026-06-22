@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.services.fileapp_tipo1_service import (
     extract_monitored_folders_from_orchestration_trigger,
     is_file_event_in_monitored_folder,
+    is_file_event_in_processados_folder,
 )
 
 
@@ -42,3 +43,13 @@ def test_is_file_event_in_monitored_folder_rejects_unmonitored_folder() -> None:
         monitored_folders={"dev-orch/mailing/demo06"},
     )
 
+
+def test_is_file_event_in_processados_folder_detects_segment() -> None:
+    payload = {
+        "file": {
+            "id": "f-3",
+            "original_name": "x.csv",
+            "folder_path": "mailings/AeC/tim-portabilidade/processados",
+        }
+    }
+    assert is_file_event_in_processados_folder(payload=payload)
