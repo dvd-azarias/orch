@@ -17,9 +17,14 @@ from app.services.fileapp_tipo1_manual_pipeline_service import (
     build_file_event_mailing_identity,
     run_tipo1_manual_pipeline,
 )
+from app.services.fileapp_processed_file_service import (
+    FileAppProcessedFileError,
+    move_processed_file_to_processados,
+)
 from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
 from app.services.orch_trigger_service import process_single_payload
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
+from app.services.alarm_service import persist_alarm
 from app.services.workspace_service import bind_workspace_context
 
 logger = get_logger(__name__)
@@ -338,6 +343,84 @@ async def _process_fileapp_tipo1_event_task(
             "manual_pipeline": pipeline_result,
         },
     )
+    try:
+        post_process_result = await move_processed_file_to_processados(
+            settings=settings,
+            workspace_uuid=safe_workspace_uuid,
+            payload=payload,
+        )
+        logger.info(
+            "fileapp.tipo1.post_process_file.done",
+            extra={
+                "event": "orch.fileapp.tipo1.post_process_file.done",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "result": post_process_result,
+            },
+        )
+    except FileAppProcessedFileError as exc:
+        payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+        logger.warning(
+            "fileapp.tipo1.post_process_file.failed",
+            extra={
+                "event": "orch.fileapp.tipo1.post_process_file.failed",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+        )
+        async with session_factory() as alarm_session:
+            bind_workspace_context(safe_workspace_uuid)
+            await persist_alarm(
+                alarm_session,
+                level="warning",
+                code="fileapp_tipo1_post_process_file_failed",
+                message="Falha ao mover/renomear arquivo para processados após ingestão tipo1.",
+                details={
+                    "flow_uuid": flow_uuid,
+                    "workspace_uuid": safe_workspace_uuid,
+                    "error_code": exc.code,
+                    "error_message": exc.message,
+                    "error_details": exc.details,
+                },
+                flow_uuid=flow_uuid,
+                app_name="ArquivosApp",
+                entity=str(payload_file.get("id") or ""),
+                entity_type="file",
+                entity_address=str(payload_file.get("folder_path") or ""),
+            )
+    except Exception as exc:
+        payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+        logger.exception(
+            "fileapp.tipo1.post_process_file.unexpected_error",
+            extra={
+                "event": "orch.fileapp.tipo1.post_process_file.unexpected_error",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+            },
+        )
+        async with session_factory() as alarm_session:
+            bind_workspace_context(safe_workspace_uuid)
+            await persist_alarm(
+                alarm_session,
+                level="warning",
+                code="fileapp_tipo1_post_process_file_unexpected_error",
+                message="Erro inesperado no pós-processamento de arquivo tipo1 (move/rename).",
+                details={
+                    "flow_uuid": flow_uuid,
+                    "workspace_uuid": safe_workspace_uuid,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+                flow_uuid=flow_uuid,
+                app_name="ArquivosApp",
+                entity=str(payload_file.get("id") or ""),
+                entity_type="file",
+                entity_address=str(payload_file.get("folder_path") or ""),
+            )
+
     payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
     association_task = associate_fileapp_mailing_task.apply_async(
         kwargs={
