@@ -231,6 +231,44 @@ async def _download_file_bytes_with_retry(
     )
 
 
+async def download_file_bytes_for_file_event(
+    *,
+    settings: Settings,
+    payload: dict[str, Any],
+    default_workspace_uuid: str,
+) -> bytes:
+    file_data = payload.get("file")
+    if not isinstance(file_data, dict):
+        raise FileAppTipo1ManualPipelineError(
+            step="step1_upload",
+            message="Payload de FileApp inválido: campo file ausente.",
+        )
+
+    file_url = str(file_data.get("url") or "").strip()
+    if not file_url:
+        raise FileAppTipo1ManualPipelineError(
+            step="step1_upload",
+            message="file.url ausente no evento FileApp.",
+        )
+    if not settings.sync_ws_client_id or not settings.sync_ws_client_secret:
+        raise FileAppTipo1ManualPipelineError(
+            step="step1_upload",
+            message="Credenciais SYNC_WS_* não configuradas para baixar arquivo.",
+        )
+
+    event_workspace_uuid = str(file_data.get("workspace_uuid") or "").strip() or default_workspace_uuid
+    download_headers = {
+        "x-workspace-uuid": event_workspace_uuid,
+        "x-client-id": settings.sync_ws_client_id,
+        "x-client-secret": settings.sync_ws_client_secret,
+    }
+    return await _download_file_bytes_with_retry(
+        url=file_url,
+        headers=download_headers,
+        timeout_seconds=settings.sync_ws_timeout_seconds,
+    )
+
+
 def _normalize_uuid(value: str | None) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -284,6 +322,8 @@ async def run_tipo1_manual_pipeline(
     mailing_name: str | None = None,
     mailing_description: str | None = None,
     defer_step7_link_flow: bool = False,
+    predownloaded_file_bytes: bytes | None = None,
+    upload_file_name_override: str | None = None,
 ) -> dict[str, Any]:
     file_data = payload.get("file")
     if not isinstance(file_data, dict):
@@ -292,31 +332,20 @@ async def run_tipo1_manual_pipeline(
             message="Payload de FileApp inválido: campo file ausente.",
         )
 
-    file_url = str(file_data.get("url") or "").strip()
     file_name = str(file_data.get("original_name") or "").strip()
+    upload_file_name = str(upload_file_name_override or file_name).strip()
     linked_by = _resolve_linked_by_uuid(payload=payload, file_data=file_data)
-    event_workspace_uuid = str(file_data.get("workspace_uuid") or "").strip() or workspace_uuid
     legal_basis = str(file_data.get("legal_basis") or payload.get("legal_basis") or "consent")
     mime_type = str(file_data.get("mime_type") or "").strip()
 
-    if not file_url:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message="file.url ausente no evento FileApp.",
-        )
-    if not file_name:
+    if not upload_file_name:
         raise FileAppTipo1ManualPipelineError(
             step="step1_upload",
             message="file.original_name ausente no evento FileApp.",
         )
-    identity = build_file_event_mailing_identity(file_name=file_name)
+    identity = build_file_event_mailing_identity(file_name=upload_file_name)
     resolved_mailing_name = str(mailing_name or identity.name).strip() or identity.name
     resolved_description = str(mailing_description or identity.description).strip() or identity.description
-    if not settings.sync_ws_client_id or not settings.sync_ws_client_secret:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message="Credenciais SYNC_WS_* não configuradas para baixar arquivo.",
-        )
     if not linked_by:
         raise FileAppTipo1ManualPipelineError(
             step="step7_link_flow",
@@ -338,19 +367,17 @@ async def run_tipo1_manual_pipeline(
             message="Token Bearer e API key de workspace indisponíveis.",
         )
 
-    download_headers = {
-        "x-workspace-uuid": event_workspace_uuid,
-        "x-client-id": settings.sync_ws_client_id,
-        "x-client-secret": settings.sync_ws_client_secret,
-    }
-
-    file_bytes = await _download_file_bytes_with_retry(
-        url=file_url,
-        headers=download_headers,
-        timeout_seconds=settings.sync_ws_timeout_seconds,
+    file_bytes = (
+        bytes(predownloaded_file_bytes)
+        if predownloaded_file_bytes is not None
+        else await download_file_bytes_for_file_event(
+            settings=settings,
+            payload=payload,
+            default_workspace_uuid=workspace_uuid,
+        )
     )
 
-    upload_content_type = mime_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    upload_content_type = mime_type or mimetypes.guess_type(upload_file_name)[0] or "application/octet-stream"
     step_results: list[dict[str, Any]] = []
 
     # Step 1
@@ -362,7 +389,7 @@ async def run_tipo1_manual_pipeline(
             content_type=None,
         )
         upload_payload = FileUploadPayload(
-            file_name=file_name,
+            file_name=upload_file_name,
             content_type=upload_content_type,
             file_bytes=file_bytes,
             description=resolved_description,

@@ -15,6 +15,7 @@ from app.services.file_event_ingest_service import expand_arquivos_payload_into_
 from app.services.fileapp_tipo1_manual_pipeline_service import (
     FileAppTipo1ManualPipelineError,
     build_file_event_mailing_identity,
+    download_file_bytes_for_file_event,
     run_tipo1_manual_pipeline,
 )
 from app.services.fileapp_tipo1_service import resolve_detach_all_files
@@ -282,16 +283,10 @@ async def _process_fileapp_tipo1_event_task(
             mailing_description = identity.description
 
     try:
-        pipeline_result = await run_tipo1_manual_pipeline(
+        downloaded_file_bytes = await download_file_bytes_for_file_event(
             settings=settings,
-            workspace_uuid=safe_workspace_uuid,
-            flow_uuid=flow_uuid,
             payload=payload,
-            mapping_template_uuid=mapping_template_uuid,
-            workspace_api_key=workspace_api_key,
-            mailing_name=mailing_name,
-            mailing_description=mailing_description,
-            defer_step7_link_flow=True,
+            default_workspace_uuid=safe_workspace_uuid,
         )
     except FileAppTipo1ManualPipelineError as exc:
         logger.warning(
@@ -334,22 +329,14 @@ async def _process_fileapp_tipo1_event_task(
             "mapping_template_uuid": mapping_template_uuid,
         }
 
-    logger.info(
-        "fileapp.tipo1.process_event.finished",
-        extra={
-            "event": "orch.fileapp.tipo1.process_event.finished",
-            "workspace_uuid": workspace_uuid,
-            "flow_uuid": flow_uuid,
-            "mapping_template_uuid": mapping_template_uuid,
-            "manual_pipeline": pipeline_result,
-        },
-    )
+    upload_file_name = original_name
     try:
         post_process_result = await move_processed_file_to_processados(
             settings=settings,
             workspace_uuid=safe_workspace_uuid,
             payload=payload,
         )
+        upload_file_name = str(post_process_result.get("target_name") or "").strip() or original_name
         logger.info(
             "fileapp.tipo1.post_process_file.done",
             extra={
@@ -357,6 +344,7 @@ async def _process_fileapp_tipo1_event_task(
                 "workspace_uuid": safe_workspace_uuid,
                 "flow_uuid": flow_uuid,
                 "result": post_process_result,
+                "upload_file_name": upload_file_name,
             },
         )
     except FileAppProcessedFileError as exc:
@@ -423,6 +411,73 @@ async def _process_fileapp_tipo1_event_task(
                 entity_address=str(payload_file.get("folder_path") or ""),
             )
         raise
+
+    try:
+        pipeline_result = await run_tipo1_manual_pipeline(
+            settings=settings,
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=flow_uuid,
+            payload=payload,
+            mapping_template_uuid=mapping_template_uuid,
+            workspace_api_key=workspace_api_key,
+            mailing_name=mailing_name,
+            mailing_description=mailing_description,
+            defer_step7_link_flow=True,
+            predownloaded_file_bytes=downloaded_file_bytes,
+            upload_file_name_override=upload_file_name,
+        )
+    except FileAppTipo1ManualPipelineError as exc:
+        logger.warning(
+            "fileapp.tipo1.manual_pipeline.failed",
+            extra={
+                "event": "orch.fileapp.tipo1.manual_pipeline.failed",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mapping_template_uuid": mapping_template_uuid,
+                "failed_step": exc.step,
+                "error_message": exc.message,
+                "details": exc.details,
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": exc.step,
+            "message": exc.message,
+            "details": exc.details,
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mapping_template_uuid": mapping_template_uuid,
+        }
+    except Exception as exc:
+        logger.exception(
+            "fileapp.tipo1.manual_pipeline.unexpected_error",
+            extra={
+                "event": "orch.fileapp.tipo1.manual_pipeline.unexpected_error",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mapping_template_uuid": mapping_template_uuid,
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": type(exc).__name__,
+            "message": str(exc),
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mapping_template_uuid": mapping_template_uuid,
+        }
+
+    logger.info(
+        "fileapp.tipo1.process_event.finished",
+        extra={
+            "event": "orch.fileapp.tipo1.process_event.finished",
+            "workspace_uuid": workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "mapping_template_uuid": mapping_template_uuid,
+            "manual_pipeline": pipeline_result,
+            "upload_file_name": upload_file_name,
+        },
+    )
 
     payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
     association_task = associate_fileapp_mailing_task.apply_async(
