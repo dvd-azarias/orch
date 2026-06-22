@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
@@ -69,6 +70,37 @@ def _mailing_import_is_ready(response_body: str) -> tuple[bool, dict[str, Any]]:
     }
 
 
+def _safe_uuid(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _extract_flow_linked_mailing_ids(payload: Any, *, parent_key: str | None = None) -> set[str]:
+    values: set[str] = set()
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_name = str(key).strip().lower()
+            if key_name in {"mailing_id", "mailing_uuid", "source_list_id", "source_list_uuid"}:
+                normalized = _safe_uuid(value)
+                if normalized:
+                    values.add(normalized)
+            if parent_key in {"mailings", "source_lists", "linked", "linked_mailings"} and key_name in {"id", "uuid"}:
+                normalized = _safe_uuid(value)
+                if normalized:
+                    values.add(normalized)
+            values.update(_extract_flow_linked_mailing_ids(value, parent_key=key_name))
+        return values
+    if isinstance(payload, list):
+        for item in payload:
+            values.update(_extract_flow_linked_mailing_ids(item, parent_key=parent_key))
+    return values
+
+
 async def associate_mailing_to_flow_from_file_event(
     *,
     settings: Settings,
@@ -77,6 +109,7 @@ async def associate_mailing_to_flow_from_file_event(
     mailing_uuid: str | None,
     linked_by: str | None,
     workspace_api_key: str | None = None,
+    detach_all_files: bool = False,
 ) -> dict[str, Any]:
     if not mailing_uuid:
         return {"status": "ignored", "reason": "mailing_not_resolved"}
@@ -91,12 +124,7 @@ async def associate_mailing_to_flow_from_file_event(
         return {"status": "ignored", "reason": "target_core_api_bearer_token_not_configured"}
 
     target_url = f"{base_url}/v2/flow/{flow_uuid}/mailings"
-    body = {
-        "mailing_ids_added": [mailing_uuid],
-        "mailing_ids_removed": [],
-        "linked_by": linked_by,
-        "call_origin": "file_event",
-    }
+    mailing_ids_removed: list[str] = []
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -140,6 +168,29 @@ async def associate_mailing_to_flow_from_file_event(
                 "reason": "mailing_import_not_ready",
                 "mailing_state": mailing_state,
             }
+        if detach_all_files:
+            flow_mailings_status_code, flow_mailings_body = await asyncio.to_thread(
+                _get_json,
+                url=f"{base_url}/v2/flow/{flow_uuid}/mailings",
+                headers=headers,
+                timeout_seconds=settings.sync_ws_timeout_seconds,
+            )
+            if flow_mailings_status_code >= 400:
+                return {
+                    "status": "error",
+                    "reason": "flow_mailings_http_error",
+                    "status_code": flow_mailings_status_code,
+                    "response_body": flow_mailings_body,
+                }
+            parsed_flow_mailings = _decode_json_dict(flow_mailings_body)
+            linked_ids = _extract_flow_linked_mailing_ids(parsed_flow_mailings)
+            mailing_ids_removed = sorted(item for item in linked_ids if item != str(mailing_uuid))
+        body = {
+            "mailing_ids_added": [mailing_uuid],
+            "mailing_ids_removed": mailing_ids_removed,
+            "linked_by": linked_by,
+            "call_origin": "file_event",
+        }
         status_code, response_body = await asyncio.to_thread(
             _post_json,
             url=target_url,
@@ -206,6 +257,8 @@ async def associate_mailing_to_flow_from_file_event(
             "flow_uuid": flow_uuid,
             "mailing_uuid": mailing_uuid,
             "status_code": status_code,
+            "detach_all_files": detach_all_files,
+            "mailing_ids_removed_count": len(mailing_ids_removed),
         },
     )
     return {
