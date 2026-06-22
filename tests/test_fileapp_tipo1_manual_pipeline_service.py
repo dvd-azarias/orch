@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.error import URLError
+
 import pytest
 
 import app.services.fileapp_tipo1_manual_pipeline_service as service
@@ -294,3 +296,101 @@ def test_build_file_event_mailing_identity_uses_slug_and_suffix() -> None:
         ],
     )
     assert second.name == "mailing_7_cpfs_com_telefones_024_002"
+
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_retries_download_before_success(monkeypatch) -> None:
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise URLError("scan pending")
+        return b"CPF,telefone\n20000000000,5521975670000\n"
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":99,"contact_system_field_id":"94949070-f4b5-48a7-a0a0-5179aa04451a","is_ignored":false,"dialer_label":null,"field_type":"text"}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            return 200, '{"data":{"task_id":"import-task-1"}}'
+        if method == "POST" and url.endswith("/v2/flow/flow-uuid-1/mailings"):
+            return 200, '{"data":[{"results":{"linked":["mailing-uuid-1"],"unassigned":[],"errors":{}}}]}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                "original_name": "mailing.csv",
+                "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        workspace_api_key=None,
+    )
+
+    assert result["status"] == "done"
+    assert attempts["count"] == 3
+    assert sleep_calls == [15.0, 15.0]
+
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_fails_after_download_retry_exhaustion(monkeypatch) -> None:
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        attempts["count"] += 1
+        raise URLError("scan pending")
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                    "original_name": "mailing.csv",
+                    "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            workspace_api_key=None,
+        )
+
+    assert exc_info.value.step == "step1_upload"
+    assert exc_info.value.details["attempts"] == 5
+    assert exc_info.value.details["retry_interval_seconds"] == 15.0
+    assert exc_info.value.details["error_type"] == "URLError"
+    assert attempts["count"] == 5
+    assert len(sleep_calls) == 4
