@@ -5,11 +5,13 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 from urllib import request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from app.core.config import Settings
 
 _PROCESSADOS_FOLDER_NAME = "processados"
+_POST_PROCESS_RETRY_ATTEMPTS = 5
+_POST_PROCESS_RETRY_INTERVAL_SECONDS = 15.0
 
 
 class FileAppProcessedFileError(Exception):
@@ -71,6 +73,40 @@ def _is_name_conflict(status_code: int) -> bool:
     return int(status_code) in {409, 422}
 
 
+async def _request_json_with_retry(
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[int, str]:
+    attempts = max(1, int(_POST_PROCESS_RETRY_ATTEMPTS))
+    interval_seconds = max(0.0, float(_POST_PROCESS_RETRY_INTERVAL_SECONDS))
+    for attempt in range(1, attempts + 1):
+        try:
+            return await asyncio.to_thread(
+                _request_json,
+                method=method,
+                url=url,
+                headers=headers,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+            )
+        except HTTPError as exc:
+            code = int(exc.code)
+            if 500 <= code <= 599 and attempt < attempts:
+                await asyncio.sleep(interval_seconds)
+                continue
+            raise
+        except (URLError, TimeoutError, OSError):
+            if attempt < attempts:
+                await asyncio.sleep(interval_seconds)
+                continue
+            raise
+    raise RuntimeError("retry_unreachable")
+
+
 async def move_processed_file_to_processados(
     *,
     settings: Settings,
@@ -114,8 +150,7 @@ async def move_processed_file_to_processados(
     headers = _build_headers(settings=settings, workspace_uuid=workspace_uuid)
 
     try:
-        await asyncio.to_thread(
-            _request_json,
+        await _request_json_with_retry(
             method="POST",
             url=f"{base_url}/files/folders",
             headers=headers,
@@ -130,11 +165,16 @@ async def move_processed_file_to_processados(
                 message=f"Falha ao criar pasta processados (HTTP {int(exc.code)}).",
                 details={"status_code": int(exc.code), "response_body": detail},
             ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise FileAppProcessedFileError(
+            code="create_processados_folder_failed",
+            message="Falha ao criar pasta processados após retries.",
+            details={"error_type": type(exc).__name__, "error_message": str(exc)},
+        ) from exc
 
     metadata_url = f"{base_url}/files/metadata/{file_id}"
     try:
-        await asyncio.to_thread(
-            _request_json,
+        await _request_json_with_retry(
             method="PATCH",
             url=metadata_url,
             headers=headers,
@@ -145,8 +185,14 @@ async def move_processed_file_to_processados(
         detail = exc.read().decode("utf-8", errors="replace")
         raise FileAppProcessedFileError(
             code="move_file_to_processados_failed",
-            message=f"Falha ao mover arquivo para processados (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
+                message=f"Falha ao mover arquivo para processados (HTTP {int(exc.code)}).",
+                details={"status_code": int(exc.code), "response_body": detail},
+            ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise FileAppProcessedFileError(
+            code="move_file_to_processados_failed",
+            message="Falha ao mover arquivo para processados após retries.",
+            details={"error_type": type(exc).__name__, "error_message": str(exc)},
         ) from exc
 
     suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -158,8 +204,7 @@ async def move_processed_file_to_processados(
         else:
             candidate_name = _build_timestamped_name(original_name, suffix=f"{suffix}_{index:03d}")
         try:
-            await asyncio.to_thread(
-                _request_json,
+            await _request_json_with_retry(
                 method="PATCH",
                 url=metadata_url,
                 headers=headers,
@@ -178,6 +223,16 @@ async def move_processed_file_to_processados(
                 details={
                     "status_code": int(exc.code),
                     "response_body": detail,
+                    "last_candidate": candidate_name,
+                },
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise FileAppProcessedFileError(
+                code="rename_processed_file_failed",
+                message="Falha ao renomear arquivo processado após retries.",
+                details={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
                     "last_candidate": candidate_name,
                 },
             ) from exc
