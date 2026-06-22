@@ -203,39 +203,10 @@ async def move_processed_file_to_processados(
                 method="PATCH",
                 url=metadata_url,
                 headers=headers,
-                payload={"original_name": candidate_name},
-                timeout_seconds=settings.sync_ws_timeout_seconds,
-            )
-        except HTTPError as exc:
-            if _is_name_conflict(int(exc.code)) and index < 999:
-                continue
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise FileAppProcessedFileError(
-                code="rename_processed_file_failed",
-                message=f"Falha ao renomear arquivo processado (HTTP {int(exc.code)}).",
-                details={
-                    "status_code": int(exc.code),
-                    "response_body": detail,
-                    "last_candidate": candidate_name,
+                payload={
+                    "original_name": candidate_name,
+                    "folder_path": target_folder,
                 },
-            ) from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise FileAppProcessedFileError(
-                code="rename_processed_file_failed",
-                message="Falha ao renomear arquivo processado após retries.",
-                details={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "last_candidate": candidate_name,
-                },
-            ) from exc
-
-        try:
-            await _request_json_with_retry(
-                method="PATCH",
-                url=metadata_url,
-                headers=headers,
-                payload={"folder_path": target_folder},
                 timeout_seconds=settings.sync_ws_timeout_seconds,
             )
             renamed_to = candidate_name
@@ -246,7 +217,7 @@ async def move_processed_file_to_processados(
             detail = exc.read().decode("utf-8", errors="replace")
             raise FileAppProcessedFileError(
                 code="move_file_to_processados_failed",
-                message=f"Falha ao mover arquivo para processados (HTTP {int(exc.code)}).",
+                message=f"Falha ao mover/renomear arquivo para processados (HTTP {int(exc.code)}).",
                 details={
                     "status_code": int(exc.code),
                     "response_body": detail,
