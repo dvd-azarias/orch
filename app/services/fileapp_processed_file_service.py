@@ -101,6 +101,7 @@ async def _request_json_with_retry(
     headers: dict[str, str],
     payload: dict[str, Any],
     timeout_seconds: float,
+    retry_not_found: bool = False,
 ) -> tuple[int, str]:
     attempts = max(1, int(_POST_PROCESS_RETRY_ATTEMPTS))
     interval_seconds = max(0.0, float(_POST_PROCESS_RETRY_INTERVAL_SECONDS))
@@ -116,6 +117,9 @@ async def _request_json_with_retry(
             )
         except HTTPError as exc:
             code = int(exc.code)
+            if retry_not_found and code == 404 and attempt < attempts:
+                await asyncio.sleep(interval_seconds)
+                continue
             if 500 <= code <= 599 and attempt < attempts:
                 await asyncio.sleep(interval_seconds)
                 continue
@@ -208,6 +212,7 @@ async def move_processed_file_to_processados(
                     "folder_path": target_folder,
                 },
                 timeout_seconds=settings.sync_ws_timeout_seconds,
+                retry_not_found=True,
             )
             renamed_to = candidate_name
             break
