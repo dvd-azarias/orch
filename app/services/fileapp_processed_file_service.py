@@ -212,14 +212,15 @@ async def move_processed_file_to_processados(
             renamed_to = candidate_name
             break
         except HTTPError as exc:
-            if _is_name_conflict(int(exc.code)) and index < 999:
-                continue
+            status_code = int(exc.code)
             detail = exc.read().decode("utf-8", errors="replace")
+            if _is_name_conflict(status_code) and index < 999:
+                continue
             raise FileAppProcessedFileError(
                 code="move_file_to_processados_failed",
-                message=f"Falha ao mover/renomear arquivo para processados (HTTP {int(exc.code)}).",
+                message=f"Falha ao mover/renomear arquivo para processados (HTTP {status_code}).",
                 details={
-                    "status_code": int(exc.code),
+                    "status_code": status_code,
                     "response_body": detail,
                     "last_candidate": candidate_name,
                 },
