@@ -394,3 +394,57 @@ async def test_run_tipo1_manual_pipeline_fails_after_download_retry_exhaustion(m
     assert exc_info.value.details["error_type"] == "URLError"
     assert attempts["count"] == 5
     assert len(sleep_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_uses_predownloaded_bytes_and_upload_name_override(monkeypatch) -> None:
+    multipart_seen: dict[str, object] = {}
+
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        raise AssertionError("download não deve ser chamado quando bytes são fornecidos")
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        multipart_seen["file_name"] = upload.file_name
+        multipart_seen["file_bytes"] = upload.file_bytes
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"contact_system_field_id":"a26cbb26-2126-46f8-907c-757ab6dc2790","is_ignored":false,"dialer_label":null,"field_type":"text"}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            return 200, '{"data":{"task_id":"import-task-1"}}'
+        if method == "POST" and url.endswith("/v2/flow/flow-uuid-1/mailings"):
+            return 200, '{"data":[{"results":{"linked":["mailing-uuid-1"],"unassigned":[],"errors":{}}}]}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                "original_name": "mailing.csv",
+                "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        workspace_api_key=None,
+        predownloaded_file_bytes=b"cpf,telefone\n1,2\n",
+        upload_file_name_override="mailing_20260622T222200Z.csv",
+    )
+
+    assert result["status"] == "done"
+    assert multipart_seen["file_name"] == "mailing_20260622T222200Z.csv"
+    assert multipart_seen["file_bytes"] == b"cpf,telefone\n1,2\n"
