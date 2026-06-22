@@ -38,6 +38,10 @@ class FileAppTipo1ManualPipelineError(Exception):
         self.details = details or {}
 
 
+_FILE_DOWNLOAD_RETRY_ATTEMPTS = 5
+_FILE_DOWNLOAD_RETRY_INTERVAL_SECONDS = 15.0
+
+
 def _build_target_core_headers(
     *,
     workspace_uuid: str,
@@ -182,6 +186,51 @@ def _download_file_bytes(*, url: str, headers: dict[str, str], timeout_seconds: 
         return response.read()
 
 
+async def _download_file_bytes_with_retry(
+    *,
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+) -> bytes:
+    attempts = max(1, int(_FILE_DOWNLOAD_RETRY_ATTEMPTS))
+    interval_seconds = max(0.0, float(_FILE_DOWNLOAD_RETRY_INTERVAL_SECONDS))
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await asyncio.to_thread(
+                _download_file_bytes,
+                url=url,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+            )
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            await asyncio.sleep(interval_seconds)
+
+    details: dict[str, Any] = {
+        "attempts": attempts,
+        "retry_interval_seconds": interval_seconds,
+    }
+    if isinstance(last_error, HTTPError):
+        details["status_code"] = int(last_error.code)
+    elif isinstance(last_error, URLError):
+        details["reason"] = str(last_error.reason)
+    if last_error is not None:
+        details["error_type"] = type(last_error).__name__
+
+    raise FileAppTipo1ManualPipelineError(
+        step="step1_upload",
+        message=(
+            f"Falha ao baixar arquivo após {attempts} tentativas "
+            f"(intervalo {int(interval_seconds)}s)."
+        ),
+        details=details,
+    )
+
+
 def _normalize_uuid(value: str | None) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -295,29 +344,11 @@ async def run_tipo1_manual_pipeline(
         "x-client-secret": settings.sync_ws_client_secret,
     }
 
-    try:
-        file_bytes = await asyncio.to_thread(
-            _download_file_bytes,
-            url=file_url,
-            headers=download_headers,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message=f"Falha ao baixar arquivo (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code)},
-        ) from exc
-    except URLError as exc:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message=f"Falha ao baixar arquivo: {exc.reason}",
-        ) from exc
-    except Exception as exc:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message=f"Falha inesperada ao baixar arquivo: {type(exc).__name__}",
-        ) from exc
+    file_bytes = await _download_file_bytes_with_retry(
+        url=file_url,
+        headers=download_headers,
+        timeout_seconds=settings.sync_ws_timeout_seconds,
+    )
 
     upload_content_type = mime_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
     step_results: list[dict[str, Any]] = []
