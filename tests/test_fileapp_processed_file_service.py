@@ -178,3 +178,22 @@ async def test_move_processed_file_to_processados_raises_when_move_fails(monkeyp
 
     assert exc_info.value.code == "move_file_to_processados_failed"
     assert len(sleep_calls) == 4
+
+
+def test_build_rename_candidate_avoids_double_timestamp() -> None:
+    assert (
+        service._build_rename_candidate(
+            "contato_deivid_tim_black_20260622T192020Z.csv",
+            timestamp="20260622T192022Z",
+            index=0,
+        )
+        == "contato_deivid_tim_black_20260622T192020Z.csv"
+    )
+    assert (
+        service._build_rename_candidate(
+            "contato_deivid_tim_black_20260622T192020Z.csv",
+            timestamp="20260622T192022Z",
+            index=1,
+        )
+        == "contato_deivid_tim_black_20260622T192020Z_001.csv"
+    )

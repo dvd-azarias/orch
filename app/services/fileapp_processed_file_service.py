@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 from urllib import request
@@ -67,6 +68,26 @@ def _build_timestamped_name(original_name: str, *, suffix: str) -> str:
         return f"{name}_{suffix}"
     stem, ext = name.rsplit(".", 1)
     return f"{stem}_{suffix}.{ext}"
+
+
+def _build_rename_candidate(original_name: str, *, timestamp: str, index: int) -> str:
+    name = str(original_name or "").strip()
+    if "." in name:
+        stem, ext = name.rsplit(".", 1)
+        dot_ext = f".{ext}"
+    else:
+        stem, dot_ext = name, ""
+
+    timestamped_pattern = re.compile(r"^(?P<base>.+?)_(?P<ts>\d{8}T\d{6}Z)(?:_(?P<seq>\d{3}))?$")
+    matched = timestamped_pattern.fullmatch(stem)
+    if matched:
+        base_name = f"{matched.group('base')}_{matched.group('ts')}"
+    else:
+        base_name = _build_timestamped_name(original_name, suffix=timestamp).removesuffix(dot_ext)
+
+    if index == 0:
+        return f"{base_name}{dot_ext}"
+    return f"{base_name}_{index:03d}{dot_ext}"
 
 
 def _is_name_conflict(status_code: int) -> bool:
@@ -176,10 +197,7 @@ async def move_processed_file_to_processados(
     suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     renamed_to = ""
     for index in range(0, 1000):
-        if index == 0:
-            candidate_name = _build_timestamped_name(original_name, suffix=suffix)
-        else:
-            candidate_name = _build_timestamped_name(original_name, suffix=f"{suffix}_{index:03d}")
+        candidate_name = _build_rename_candidate(original_name, timestamp=suffix, index=index)
         try:
             await _request_json_with_retry(
                 method="PATCH",

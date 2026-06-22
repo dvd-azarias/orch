@@ -39,6 +39,7 @@ _FOLDER_KEYS = {
     "watch_folder",
     "watch_folders",
 }
+_PROCESSADOS_FOLDER_NAME = "processados"
 
 
 def _normalize_folder_path(raw: str) -> str:
@@ -90,6 +91,17 @@ def is_file_event_in_monitored_folder(*, payload: dict[str, Any], monitored_fold
         if folder_path == monitored or folder_path.startswith(f"{monitored}/"):
             return True
     return False
+
+
+def is_file_event_in_processados_folder(*, payload: dict[str, Any]) -> bool:
+    file_data = payload.get("file")
+    if not isinstance(file_data, dict):
+        return False
+    folder_path = _normalize_folder_path(str(file_data.get("folder_path", "")))
+    if not folder_path:
+        return False
+    segments = [part.strip().lower() for part in folder_path.split("/") if part.strip()]
+    return _PROCESSADOS_FOLDER_NAME in segments
 
 
 async def resolve_monitored_folders(

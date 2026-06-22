@@ -50,6 +50,7 @@ from app.services.discarded_event_service import persist_discarded_event
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_service import (
     is_file_event_in_monitored_folder,
+    is_file_event_in_processados_folder,
     resolve_mapping_template_uuid,
     resolve_monitored_folders,
 )
@@ -148,6 +149,46 @@ async def _trigger_orch_for_workspace(
     settings = get_settings()
     mapping_template_uuid = None
     if app_name == APP_ARQUIVOS and safe_workspace_uuid is not None:
+        if is_file_event_in_processados_folder(payload=payload):
+            extracted = extract_session_fields(app_name, payload)
+            await persist_discarded_event(
+                db_session,
+                flow_uuid=str(flow_uuid),
+                app_name=app_name,
+                entity=extracted.entity,
+                entity_type=extracted.entity_type,
+                entity_address=extracted.entity_address,
+                entity_session_id=extracted.entity_session_id,
+                discard_reason="processados_folder",
+                payload=payload,
+            )
+            logger.info(
+                "fileapp event ignored due to processados folder",
+                extra={
+                    "event": "orch.fileapp.ingest.ignored.processados_folder",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": str(flow_uuid),
+                    "folder_path": extracted.entity_address.rsplit("/", 1)[0],
+                },
+            )
+            return OrchTriggerAccepted(
+                status="ignored",
+                accepted=False,
+                flow_uuid=str(flow_uuid),
+                app=app_name,
+                persistence="ignored",
+                extracted=extracted,
+                session_id=0,
+                session_uuid="",
+                session_state=0,
+                session_created=False,
+                workflow_execution={
+                    "mode": "async",
+                    "enqueued": False,
+                    "reason": "processados_folder",
+                },
+            )
+
         monitored_folders = await resolve_monitored_folders(
             db_session,
             workspace_schema=workspace_schema,

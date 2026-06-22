@@ -175,3 +175,50 @@ async def test_fileapp_deve_descartar_evento_fora_da_pasta_monitorada() -> None:
         assert before == after == 0
     finally:
         await _cleanup_flow_with_revision(schema=schema, flow_uuid=flow_uuid, revision_uuid=revision_uuid)
+
+
+@pytest.mark.asyncio
+async def test_fileapp_deve_ignorar_evento_da_pasta_processados() -> None:
+    schema = workspace_schema_from_uuid(WORKSPACE_UUID)
+    await _ensure_flow_tables(schema)
+
+    flow_uuid = str(uuid4())
+    definition = {
+        "canvas_properties": {
+            "orchestration_trigger": {
+                "folder_paths": ["mailings/AeC/tim-portabilidade"],
+            }
+        }
+    }
+    revision_uuid = await _insert_flow_with_revision(schema=schema, flow_uuid=flow_uuid, definition=definition)
+
+    payload = {
+        "EventName": "s3:ObjectCreated:Put",
+        "file": {
+            "id": "file-guard-02",
+            "folder_path": "mailings/AeC/tim-portabilidade/processados",
+            "original_name": "mailing.csv",
+        },
+    }
+
+    try:
+        before = await _count_sessions_for_flow(schema=schema, flow_uuid=flow_uuid)
+        session_factory = get_session_factory()
+        async with session_factory() as db_session:
+            response = await _trigger_orch_for_workspace(
+                workspace_uuid=WORKSPACE_UUID,
+                flow_uuid=UUID(flow_uuid),
+                payload=payload,
+                db_session=db_session,
+                validate_workspace=False,
+            )
+        after = await _count_sessions_for_flow(schema=schema, flow_uuid=flow_uuid)
+
+        assert response.accepted is False
+        assert response.status == "ignored"
+        assert response.persistence == "ignored"
+        assert response.workflow_execution is not None
+        assert response.workflow_execution["reason"] == "processados_folder"
+        assert before == after == 0
+    finally:
+        await _cleanup_flow_with_revision(schema=schema, flow_uuid=flow_uuid, revision_uuid=revision_uuid)
