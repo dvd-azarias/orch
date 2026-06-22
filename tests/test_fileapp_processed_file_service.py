@@ -27,11 +27,15 @@ async def test_move_processed_file_to_processados_with_rename_fallback(monkeypat
         calls.append((method, url, payload))
         if method == "POST" and url.endswith("/files/folders"):
             raise _http_error(409)
-        if method == "PATCH" and payload == {"folder_path": "mailings/AeC/tim-portabilidade/processados"}:
-            return 200, "{}"
-        if method == "PATCH" and payload == {"original_name": f"contato_deivid_tim_silver_{now_stub}.csv"}:
+        if method == "PATCH" and payload == {
+            "original_name": f"contato_deivid_tim_silver_{now_stub}.csv",
+            "folder_path": "mailings/AeC/tim-portabilidade/processados",
+        }:
             raise _http_error(409)
-        if method == "PATCH" and payload == {"original_name": f"contato_deivid_tim_silver_{now_stub}_001.csv"}:
+        if method == "PATCH" and payload == {
+            "original_name": f"contato_deivid_tim_silver_{now_stub}_001.csv",
+            "folder_path": "mailings/AeC/tim-portabilidade/processados",
+        }:
             return 200, "{}"
         raise AssertionError(f"Unexpected call: {method} {url} payload={payload}")
 
@@ -64,7 +68,7 @@ async def test_move_processed_file_to_processados_with_rename_fallback(monkeypat
     assert result["status"] == "done"
     assert result["target_folder"] == "mailings/AeC/tim-portabilidade/processados"
     assert result["target_name"] == f"contato_deivid_tim_silver_{now_stub}_001.csv"
-    assert len(calls) == 4
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
@@ -77,11 +81,13 @@ async def test_move_processed_file_to_processados_retries_transient_500_on_move(
         calls.append((method, url, payload))
         if method == "POST" and url.endswith("/files/folders"):
             return 201, "{}"
-        if method == "PATCH" and payload == {"folder_path": "mailings/AeC/tim-portabilidade/processados"}:
-            if len([item for item in calls if item[0] == "PATCH" and item[2] == {"folder_path": "mailings/AeC/tim-portabilidade/processados"}]) == 1:
+        if method == "PATCH" and payload == {
+            "original_name": f"contato_deivid_tim_silver_{now_stub}.csv",
+            "folder_path": "mailings/AeC/tim-portabilidade/processados",
+        }:
+            patch_calls = [item for item in calls if item[0] == "PATCH"]
+            if len(patch_calls) == 1:
                 raise _http_error(500)
-            return 200, "{}"
-        if method == "PATCH" and payload == {"original_name": f"contato_deivid_tim_silver_{now_stub}.csv"}:
             return 200, "{}"
         raise AssertionError(f"Unexpected call: {method} {url} payload={payload}")
 
