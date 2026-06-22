@@ -392,6 +392,7 @@ async def _process_fileapp_tipo1_event_task(
                 entity_type="file",
                 entity_address=str(payload_file.get("folder_path") or ""),
             )
+        raise
     except Exception as exc:
         payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
         logger.exception(
@@ -421,6 +422,7 @@ async def _process_fileapp_tipo1_event_task(
                 entity_type="file",
                 entity_address=str(payload_file.get("folder_path") or ""),
             )
+        raise
 
     payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
     association_task = associate_fileapp_mailing_task.apply_async(
