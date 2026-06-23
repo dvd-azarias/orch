@@ -1050,15 +1050,94 @@ def _should_resume_run_flow_blocking_execution(runtime_variables: dict[str, Any]
     return _is_new_callback_for_waiting_run_flow(runtime_variables)
 
 
-def _get_by_dot_path(payload: dict[str, Any], path: str) -> Any:
+def _parse_variable_path_tokens(path: str) -> list[str | int] | None:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return None
+
+    tokens: list[str | int] = []
+    length = len(raw_path)
+    cursor = 0
+
+    while cursor < length:
+        if raw_path[cursor] == ".":
+            return None
+
+        if raw_path[cursor] != "[":
+            start = cursor
+            while cursor < length and raw_path[cursor] not in ".[":
+                cursor += 1
+            identifier = raw_path[start:cursor].strip()
+            if not identifier:
+                return None
+            tokens.append(identifier)
+
+        while cursor < length and raw_path[cursor] == "[":
+            cursor += 1
+            while cursor < length and raw_path[cursor].isspace():
+                cursor += 1
+            if cursor >= length:
+                return None
+
+            token_value: str | int
+            if raw_path[cursor] in {"'", '"'}:
+                quote = raw_path[cursor]
+                cursor += 1
+                start = cursor
+                while cursor < length and raw_path[cursor] != quote:
+                    cursor += 1
+                if cursor >= length:
+                    return None
+                token_value = raw_path[start:cursor]
+                cursor += 1
+                while cursor < length and raw_path[cursor].isspace():
+                    cursor += 1
+                if cursor >= length or raw_path[cursor] != "]":
+                    return None
+                cursor += 1
+            else:
+                start = cursor
+                while cursor < length and raw_path[cursor].isdigit():
+                    cursor += 1
+                index_text = raw_path[start:cursor]
+                while cursor < length and raw_path[cursor].isspace():
+                    cursor += 1
+                if not index_text or cursor >= length or raw_path[cursor] != "]":
+                    return None
+                cursor += 1
+                token_value = int(index_text)
+
+            tokens.append(token_value)
+
+        if cursor >= length:
+            break
+        if raw_path[cursor] != ".":
+            return None
+        cursor += 1
+        if cursor >= length:
+            return None
+
+    return tokens or None
+
+
+def _get_by_dot_path(payload: Any, path: str) -> Any:
+    tokens = _parse_variable_path_tokens(path)
+    if not tokens:
+        return None
+
     current: Any = payload
-    for segment in path.split("."):
-        key = segment.strip()
-        if not key:
+    for token in tokens:
+        if isinstance(token, int):
+            if not isinstance(current, list):
+                return None
+            if token < 0 or token >= len(current):
+                return None
+            current = current[token]
+            continue
+
+        if not isinstance(current, dict) or token not in current:
             return None
-        if not isinstance(current, dict) or key not in current:
-            return None
-        current = current[key]
+        current = current[token]
     return current
 
 
