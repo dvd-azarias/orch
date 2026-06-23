@@ -751,6 +751,22 @@ def _run_process_dialer_response(
     return branch
 
 
+def _resolve_send_with_dialer_branch_label(
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    status = _extract_dialer_status_from_runtime(runtime_variables)
+    if status is None:
+        return None
+    branch = DIALER_RESPONSE_BRANCH_BY_STATUS.get(status)
+    runtime_variables["dialer_last_response"] = {
+        "component_ref_id": component.get("ref_id"),
+        "status": status,
+        "branch": branch,
+    }
+    return branch
+
+
 def _run_run_flow(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
@@ -3308,6 +3324,10 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
             elif _should_resume_dialer_blocking_execution(runtime_variables):
+                if blocking_stop_reason == "blocked_send_with_dialer":
+                    resumed_from_card = str(session_state.get("last_card_uuid") or "").strip()
+                    if resumed_from_card:
+                        current_card_uuid = resumed_from_card
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -3799,12 +3819,19 @@ async def execute_workflow_m2_for_session(
                             )
                             should_block_execution = False
                     elif kind == "send_with_dialer":
-                        await _prepare_send_with_dialer_contact_member(
-                            db_session=db_session,
-                            flow_uuid=flow_uuid,
-                            session_id=session_id,
+                        branch_label = _resolve_send_with_dialer_branch_label(
+                            component=component,
                             runtime_variables=runtime_variables,
                         )
+                        if branch_label is None:
+                            await _prepare_send_with_dialer_contact_member(
+                                db_session=db_session,
+                                flow_uuid=flow_uuid,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                            )
+                        else:
+                            should_block_execution = False
                     elif kind == "run_flow":
                         _set_run_flow_waiting(runtime_variables, card_cursor=next_card_uuid)
                     if should_block_execution:

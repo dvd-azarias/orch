@@ -34,6 +34,7 @@ from app.services.workflow_m2_service import (
     _run_generate_file,
     _run_intelligent_agent,
     _read_loop_guard_repeat_threshold,
+    _resolve_send_with_dialer_branch_label,
     _run_process_dialer_response,
     _run_run_flow,
     _run_process_whatsapp_response,
@@ -336,6 +337,35 @@ def test_run_process_dialer_response_maps_status_to_branch() -> None:
     assert branch == "busy"
     assert runtime_variables["dialer_last_response"]["status"] == "busy"
     assert runtime_variables["dialer_last_response"]["branch"] == "busy"
+
+
+def test_resolve_send_with_dialer_branch_label_maps_status_to_branch() -> None:
+    runtime_variables = {
+        "last_payload": {
+            "hangup": {
+                "Disposition": "NO ANSWER",
+                "DialerClassifierStatus": "",
+                "Cause-txt": "",
+            }
+        }
+    }
+    branch = _resolve_send_with_dialer_branch_label(
+        component={"ref_id": "dialer-send-1"},
+        runtime_variables=runtime_variables,
+    )
+    assert branch == "no_answer"
+    assert runtime_variables["dialer_last_response"]["status"] == "no_answer"
+    assert runtime_variables["dialer_last_response"]["branch"] == "no_answer"
+
+
+def test_resolve_send_with_dialer_branch_label_returns_none_without_status() -> None:
+    runtime_variables = {"last_payload": {"external_id": "generic-event"}}
+    branch = _resolve_send_with_dialer_branch_label(
+        component={"ref_id": "dialer-send-1"},
+        runtime_variables=runtime_variables,
+    )
+    assert branch is None
+    assert "dialer_last_response" not in runtime_variables
 
 
 def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -> None:
