@@ -28,6 +28,7 @@ from app.services.workflow_m2_service import (
     _read_blocking_stop_reason,
     _read_whatsapp_last_preempt_signature,
     _read_whatsapp_resume_cursor,
+    _render_value,
     _run_api_call,
     _run_code_editor,
     _run_condition,
@@ -337,6 +338,47 @@ def test_run_process_dialer_response_maps_status_to_branch() -> None:
     assert branch == "busy"
     assert runtime_variables["dialer_last_response"]["status"] == "busy"
     assert runtime_variables["dialer_last_response"]["branch"] == "busy"
+
+
+def test_render_value_resolves_array_index_path() -> None:
+    variables = {
+        "dados_contato": [
+            {"phone": "5511999990001"},
+            {"phone": "5511999990002"},
+        ]
+    }
+    rendered = _render_value(
+        "Valor do segundo telefone: {{dados_contato[1].phone}}",
+        variables,
+    )
+    assert rendered == "Valor do segundo telefone: 5511999990002"
+
+
+def test_render_value_resolves_array_index_path_as_single_token() -> None:
+    variables = {
+        "dados_contato": [
+            {"phone": "5511999990001"},
+            {"phone": "5511999990002"},
+        ]
+    }
+    rendered = _render_value("{{dados_contato[0].phone}}", variables)
+    assert rendered == "5511999990001"
+
+
+def test_render_value_resolves_bracket_string_key_path() -> None:
+    variables = {"dados_contato": [{"phone": "5511999990003"}]}
+    rendered = _render_value("{{dados_contato[0]['phone']}}", variables)
+    assert rendered == "5511999990003"
+
+
+def test_render_value_returns_none_or_empty_for_out_of_range_index() -> None:
+    variables = {"dados_contato": [{"phone": "5511999990001"}]}
+    assert _render_value("{{dados_contato[3].phone}}", variables) is None
+    rendered = _render_value(
+        "Valor do segundo telefone: {{dados_contato[3].phone}}",
+        variables,
+    )
+    assert rendered == "Valor do segundo telefone: "
 
 
 def test_resolve_send_with_dialer_branch_label_maps_status_to_branch() -> None:
