@@ -1429,9 +1429,14 @@ def _render_value(template: Any, variables: dict[str, Any]) -> Any:
         if not matches:
             return template
 
+        utils = variables.get("utils") if isinstance(variables.get("utils"), dict) else {}
+
         if len(matches) == 1 and matches[0].span() == (0, len(template)):
             token = matches[0].group(1).strip()
             resolved = _get_by_dot_path(variables, token)
+            if resolved is None:
+                if token and "." not in token and token in utils:
+                    resolved = utils.get(token)
             if resolved is None:
                 customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
                 payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
@@ -1444,6 +1449,9 @@ def _render_value(template: Any, variables: dict[str, Any]) -> Any:
         for match in matches:
             token = match.group(1).strip()
             value = _get_by_dot_path(variables, token)
+            if value is None:
+                if token and "." not in token and token in utils:
+                    value = utils.get(token)
             if value is None:
                 customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
                 payload = variables.get("payload") if isinstance(variables.get("payload"), dict) else {}
