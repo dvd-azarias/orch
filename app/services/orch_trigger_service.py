@@ -11,11 +11,13 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.request_context import get_request_id
 from app.core.workspace import get_current_workspace_schema
+from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_sessions_repository import (
     WHATSAPP_STATUS_COLUMNS,
     fetch_latest_session_by_flow_entity_address,
     persist_callback_event_for_active_entity,
     persist_run_flow_event_for_active_entity_address,
+    persist_run_flow_event_for_recent_entity_address,
 )
 from app.schemas.orch import OrchTriggerAccepted
 from app.services.alarm_service import persist_alarm
@@ -23,6 +25,7 @@ from app.services.channel_event_service import persist_channel_events
 from app.services.discarded_event_service import persist_discarded_event
 from app.services.session_extractor import extract_session_fields
 from app.services.session_service import SessionPersistResponse, persist_session
+from app.services.workflow_engine import component_kind
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.tasks.workflow_tasks import advance_session_task
@@ -67,6 +70,42 @@ def _extract_whatsapp_status_name(payload: dict[str, Any]) -> str | None:
                 if status:
                     return status
     return None
+
+
+async def _resolve_single_send_with_dialer_ref(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+) -> str | None:
+    flow_row = await fetch_flow_row(db_session, flow_uuid=flow_uuid)
+    if flow_row is None:
+        return None
+
+    selected_revision = await fetch_selected_revision(db_session, flow_id=str(flow_row["id"]))
+    if selected_revision is None:
+        return None
+
+    definition = selected_revision.get("definition")
+    if not isinstance(definition, dict):
+        return None
+
+    components = definition.get("components")
+    if not isinstance(components, list):
+        return None
+
+    send_card_refs: list[str] = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if component_kind(component) != "send_with_dialer":
+            continue
+        ref_id = str(component.get("ref_id") or component.get("uuid") or component.get("id") or "").strip()
+        if ref_id and ref_id not in send_card_refs:
+            send_card_refs.append(ref_id)
+
+    if len(send_card_refs) != 1:
+        return None
+    return send_card_refs[0]
 
 
 async def _should_discard_whatsapp_event(
@@ -179,6 +218,30 @@ async def process_single_payload(
                     "makecall": payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {},
                 },
             )
+            if hangup_persisted is None:
+                resume_card_uuid = await _resolve_single_send_with_dialer_ref(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                )
+                if resume_card_uuid is not None:
+                    settings = get_settings()
+                    hangup_persisted = await persist_run_flow_event_for_recent_entity_address(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        app_name=app_name,
+                        entity_address=extracted.entity_address,
+                        payload=payload,
+                        extracted=extracted.model_dump(),
+                        event_name="hangup",
+                        event_result="hangup",
+                        resume_card_uuid=resume_card_uuid,
+                        correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
+                        event_data={
+                            "uniqueid": payload.get("uniqueid"),
+                            "hangup": payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {},
+                            "makecall": payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {},
+                        },
+                    )
             if hangup_persisted is None:
                 await persist_discarded_event(
                     db_session,
