@@ -3200,7 +3200,7 @@ def _resolve_body(request_config: dict[str, Any], variables: dict[str, Any]) -> 
         rendered = _render_value(body.get("text"), variables)
         return ("" if rendered is None else str(rendered)).encode("utf-8"), "text/plain"
 
-    if mode == "form":
+    if mode in {"form", "x-www-form-urlencoded", "urlencoded"}:
         form_entries = body.get("form") if isinstance(body.get("form"), list) else []
         data: list[tuple[str, str]] = []
         for entry in form_entries:
@@ -3212,6 +3212,19 @@ def _resolve_body(request_config: dict[str, Any], variables: dict[str, Any]) -> 
             value = _render_value(entry.get("value"), variables)
             data.append((str(key).strip(), "" if value is None else str(value)))
         return parse.urlencode(data).encode("utf-8"), "application/x-www-form-urlencoded"
+
+    if mode == "raw":
+        raw_value = body.get("json")
+        content_type = "application/json"
+        if raw_value is None:
+            raw_value = body.get("text")
+            content_type = "text/plain"
+        rendered = _render_value(raw_value, variables)
+        if rendered is None:
+            return b"", content_type
+        if isinstance(rendered, (dict, list, int, float, bool)):
+            return json.dumps(rendered, ensure_ascii=False).encode("utf-8"), "application/json"
+        return str(rendered).encode("utf-8"), content_type
 
     return None, None
 
