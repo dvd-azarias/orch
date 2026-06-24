@@ -359,6 +359,7 @@ def test_run_process_dialer_response_maps_status_to_branch() -> None:
         "last_payload": {
             "hangup": {
                 "Disposition": "BUSY",
+                "Cause": "486",
                 "DialerClassifierStatus": "",
                 "Cause-txt": "",
             }
@@ -419,6 +420,7 @@ def test_resolve_send_with_dialer_branch_label_maps_status_to_branch() -> None:
         "last_payload": {
             "hangup": {
                 "Disposition": "NO ANSWER",
+                "Cause": "480",
                 "DialerClassifierStatus": "",
                 "Cause-txt": "",
             }
@@ -800,6 +802,7 @@ def test_should_resume_dialer_blocking_execution_only_when_status_available() ->
         "last_payload": {
             "hangup": {
                 "Disposition": "ANSWERED",
+                "Cause": "200",
             },
         },
     }

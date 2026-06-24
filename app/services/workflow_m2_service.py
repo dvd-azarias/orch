@@ -43,6 +43,7 @@ from app.repositories.orch_sessions_repository import (
     upsert_person_for_create_contact,
 )
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
+from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
@@ -630,45 +631,7 @@ def _extract_whatsapp_provider_number_from_payload(payload: Any) -> str | None:
 
 
 def _extract_dialer_status_from_payload(payload: Any) -> str | None:
-    if not isinstance(payload, dict):
-        return None
-
-    raw_status = payload.get("status")
-    if raw_status is not None:
-        text = str(raw_status).strip().lower()
-        if text in DIALER_RESPONSE_BRANCH_BY_STATUS:
-            return text
-        if text in {"noanswer", "no_answer"}:
-            return "no_answer"
-        if text in {"invalidnumber", "invalid_number"}:
-            return "invalid_number"
-        if text == "success":
-            return "answered"
-        if text == "failure":
-            return "failed"
-
-    hangup = payload.get("hangup")
-    if not isinstance(hangup, dict):
-        return None
-
-    disposition = str(hangup.get("Disposition", "")).strip().upper()
-    classifier = str(hangup.get("DialerClassifierStatus", "")).strip().upper()
-    cause_txt = str(hangup.get("Cause-txt", "")).strip().upper()
-    hint = " ".join(part for part in [disposition, classifier, cause_txt] if part)
-
-    if "MACHINE" in hint:
-        return "machine"
-    if "ANSWERED" in hint:
-        return "answered"
-    if "BUSY" in hint:
-        return "busy"
-    if any(k in hint for k in ("NO ANSWER", "NOANSWER", "RINGING", "SILENCIO")):
-        return "no_answer"
-    if any(k in hint for k in ("INVALID", "UNALLOCATED", "NOT FOUND")):
-        return "invalid_number"
-    if any(k in hint for k in ("REJECT", "FORBIDDEN", "DECLINED")):
-        return "rejected"
-    return "failed"
+    return resolve_dialer_status_from_release(payload)
 
 
 def _extract_dialer_status_from_runtime(runtime_variables: dict[str, Any]) -> str | None:
