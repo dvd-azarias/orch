@@ -751,6 +751,287 @@ def _run_process_dialer_response(
     return branch
 
 
+def _extract_cache_mapping_entries(component: dict[str, Any]) -> list[tuple[str, Any]]:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    raw_mapping = params.get("mapping")
+    rows: list[tuple[str, Any]] = []
+    if isinstance(raw_mapping, list):
+        for item in raw_mapping:
+            if not isinstance(item, dict):
+                continue
+            raw_key = item.get("key") or item.get("field") or item.get("name")
+            if raw_key is None:
+                continue
+            rows.append((str(raw_key), item.get("value")))
+    elif isinstance(raw_mapping, dict):
+        for raw_key, value in raw_mapping.items():
+            rows.append((str(raw_key), value))
+    return rows
+
+
+def _resolve_cache_post_names_for_definition(
+    *,
+    definition: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> set[str]:
+    variables = _ensure_variables(runtime_variables)
+    names: set[str] = set()
+    components = definition.get("components") if isinstance(definition.get("components"), list) else []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if component_kind(component) != "cache_post":
+            continue
+        params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+        resolved = _render_value(params.get("name"), variables)
+        name = str(resolved or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _read_cache_ttl_days(raw_value: Any) -> int:
+    if raw_value is None:
+        return 7
+    try:
+        parsed = int(float(str(raw_value).strip()))
+    except Exception:
+        return 7
+    if parsed <= 0:
+        return 7
+    return min(parsed, 3650)
+
+
+async def _run_cache_post(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    variables = _ensure_variables(runtime_variables)
+
+    name_raw = _render_value(params.get("name"), variables)
+    name = str(name_raw or "").strip()
+    primary_key_field_raw = _render_value(params.get("primary_key_field"), variables)
+    primary_key_field = str(primary_key_field_raw or "").strip()
+    mapping_entries = _extract_cache_mapping_entries(component)
+    ttl_days = _read_cache_ttl_days(_render_value(params.get("ttl_days"), variables))
+
+    flow_uuid_safe = _to_uuid_or_none(flow_uuid)
+    card_uuid_safe = _to_uuid_or_none(
+        str(component.get("ref_id") or component.get("uuid") or component.get("id") or "").strip() or None
+    )
+
+    if not flow_uuid_safe or not card_uuid_safe or not name or not primary_key_field or not mapping_entries:
+        raise WorkflowExecutionError(
+            "cache_post.invalid_parameters",
+            "cache_post requer flow/card UUID válidos, name, primary_key_field e mapping.",
+        )
+
+    payload: dict[str, Any] = {}
+    for raw_key, raw_value in mapping_entries:
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        payload[key] = _render_value(raw_value, variables)
+
+    if primary_key_field not in payload:
+        raise WorkflowExecutionError(
+            "cache_post.invalid_parameters",
+            f"Campo primary_key_field '{primary_key_field}' ausente no mapping resolvido.",
+        )
+    cache_key = str(payload.get(primary_key_field) or "").strip()
+    if not cache_key:
+        raise WorkflowExecutionError(
+            "cache_post.invalid_parameters",
+            f"Valor de cache_key vazio para primary_key_field '{primary_key_field}'.",
+        )
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    try:
+        await db_session.execute(
+            text(
+                """
+                DELETE FROM cache_card_store
+                WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+                  AND name = :name
+                  AND cache_key = :cache_key
+                  AND card_uuid <> CAST(:card_uuid AS uuid)
+                """
+            ),
+            {
+                "flow_uuid": flow_uuid_safe,
+                "card_uuid": card_uuid_safe,
+                "name": name,
+                "cache_key": cache_key,
+            },
+        )
+        await db_session.execute(
+            text(
+                """
+                INSERT INTO cache_card_store (
+                    flow_uuid,
+                    card_uuid,
+                    name,
+                    cache_key,
+                    data,
+                    expires_at,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    CAST(:flow_uuid AS uuid),
+                    CAST(:card_uuid AS uuid),
+                    :name,
+                    :cache_key,
+                    CAST(:data AS jsonb),
+                    :expires_at,
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (flow_uuid, card_uuid, cache_key)
+                DO UPDATE
+                   SET name = EXCLUDED.name,
+                       data = EXCLUDED.data,
+                       expires_at = EXCLUDED.expires_at,
+                       updated_at = NOW()
+                """
+            ),
+            {
+                "flow_uuid": flow_uuid_safe,
+                "card_uuid": card_uuid_safe,
+                "name": name,
+                "cache_key": cache_key,
+                "data": json.dumps(payload, ensure_ascii=False),
+                "expires_at": expires_at,
+            },
+        )
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "cache_post.persist_failed",
+            f"Falha ao persistir cache_post: {exc}",
+        ) from exc
+
+    runtime_variables["cache_post_last_result"] = {
+        "component_ref_id": component.get("ref_id"),
+        "flow_uuid": flow_uuid_safe,
+        "name": name,
+        "cache_key": cache_key,
+        "primary_key_field": primary_key_field,
+        "ttl_days": ttl_days,
+        "expires_at": expires_at.isoformat(),
+        "data": payload,
+    }
+    return "proximo"
+
+
+async def _run_cache_get(
+    *,
+    db_session: AsyncSession,
+    definition: dict[str, Any],
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    branch_labels: list[str],
+) -> str:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    variables = _ensure_variables(runtime_variables)
+
+    name_raw = _render_value(params.get("name"), variables)
+    name = str(name_raw or "").strip()
+    key_raw = _render_value(params.get("key"), variables)
+    cache_key = str(key_raw or "").strip()
+    output_var_raw = _render_value(params.get("output_var"), variables)
+    output_var = str(output_var_raw or "").strip() or name
+
+    flow_uuid_safe = _to_uuid_or_none(flow_uuid)
+    if not flow_uuid_safe or not name or not cache_key:
+        raise WorkflowExecutionError(
+            "cache_get.invalid_parameters",
+            "cache_get requer flow_uuid, name e key válidos.",
+        )
+
+    configured_names = _resolve_cache_post_names_for_definition(
+        definition=definition,
+        runtime_variables=runtime_variables,
+    )
+    if name not in configured_names:
+        raise WorkflowExecutionError(
+            "cache_get.cache_name_not_configured",
+            f"Nome de cache '{name}' não configurado em nenhum cache_post do flow.",
+        )
+
+    try:
+        query_result = await db_session.execute(
+            text(
+                """
+                SELECT data
+                FROM cache_card_store
+                WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+                  AND name = :name
+                  AND cache_key = :cache_key
+                  AND expires_at > NOW()
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "flow_uuid": flow_uuid_safe,
+                "name": name,
+                "cache_key": cache_key,
+            },
+        )
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "cache_get.fetch_failed",
+            f"Falha ao consultar cache_get: {exc}",
+        ) from exc
+
+    row = query_result.first()
+    if row is None:
+        runtime_variables["cache_get_last_result"] = {
+            "component_ref_id": component.get("ref_id"),
+            "flow_uuid": flow_uuid_safe,
+            "name": name,
+            "cache_key": cache_key,
+            "output_var": output_var,
+            "found": False,
+        }
+        normalized_labels = [str(label or "").strip().lower() for label in branch_labels if str(label or "").strip()]
+        if "nao_encontrado" not in normalized_labels:
+            raise WorkflowExecutionError(
+                "cache_get.not_found",
+                f"Cache não encontrado para name='{name}' e key='{cache_key}'.",
+            )
+        return "nao_encontrado"
+
+    payload = row[0]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {"value": payload}
+
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = payload
+    _set_by_path(variables, output_var, payload)
+
+    runtime_variables["cache_get_last_result"] = {
+        "component_ref_id": component.get("ref_id"),
+        "flow_uuid": flow_uuid_safe,
+        "name": name,
+        "cache_key": cache_key,
+        "output_var": output_var,
+        "found": True,
+        "data": payload,
+    }
+    return "encontrado"
+
+
 def _resolve_send_with_dialer_branch_label(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
@@ -3524,6 +3805,55 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
+                elif kind == "cache_post":
+                    try:
+                        branch_label = await _run_cache_post(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        if exception_branch is None:
+                            raise
+                        runtime_variables["cache_post_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        branch_label = exception_branch
+                elif kind == "cache_get":
+                    try:
+                        branch_label = await _run_cache_get(
+                            db_session=db_session,
+                            definition=definition,
+                            flow_uuid=flow_uuid,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            branch_labels=outgoing_branch_labels(
+                                definition,
+                                current_card_uuid=next_card_uuid,
+                            ),
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        if exception_branch is None:
+                            raise
+                        runtime_variables["cache_get_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        branch_label = exception_branch
                 elif kind == "generate_file":
                     branch_label = await _run_generate_file(
                         db_session=db_session,

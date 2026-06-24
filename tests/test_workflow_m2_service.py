@@ -30,6 +30,8 @@ from app.services.workflow_m2_service import (
     _read_whatsapp_resume_cursor,
     _render_value,
     _run_api_call,
+    _run_cache_get,
+    _run_cache_post,
     _run_code_editor,
     _run_condition,
     _run_generate_file,
@@ -1567,3 +1569,169 @@ async def test_intelligent_agent_raises_when_llm_response_not_json(monkeypatch) 
         )
 
     assert getattr(exc.value, "code", "") == "intelligent_agent_invalid_response"
+
+
+class _FakeExecuteResult:
+    def __init__(self, row: object | None) -> None:
+        self._row = row
+
+    def first(self) -> object | None:
+        return self._row
+
+
+class _FakeDbSession:
+    def __init__(self, *, rows: list[object | None] | None = None, fail_on_call: int | None = None) -> None:
+        self.rows = rows or []
+        self.fail_on_call = fail_on_call
+        self.calls: list[dict[str, object]] = []
+        self._execute_count = 0
+
+    async def execute(self, statement, params=None):  # noqa: ANN001
+        self._execute_count += 1
+        if self.fail_on_call is not None and self._execute_count == self.fail_on_call:
+            raise RuntimeError("db failure")
+        self.calls.append(
+            {
+                "statement": str(statement),
+                "params": params or {},
+            }
+        )
+        row = self.rows.pop(0) if self.rows else None
+        return _FakeExecuteResult(row)
+
+
+@pytest.mark.asyncio
+async def test_run_cache_post_persists_payload_and_returns_proximo() -> None:
+    db_session = _FakeDbSession()
+    runtime_variables = {
+        "variables": {
+            "payload": {"contact_id": "abc-123", "name": "Deivid"},
+            "customs": {},
+        }
+    }
+    component = {
+        "ref_id": "15fd9afb-5d57-4601-b9d3-c73985e2f2dc",
+        "component_id": "cache_post",
+        "parameters": {
+            "name": "dados_cliente",
+            "primary_key_field": "identificador",
+            "ttl_days": "10",
+            "mapping": [
+                {"key": "identificador", "value": "{{payload.contact_id}}"},
+                {"key": "nome", "value": "{{payload.name}}"},
+            ],
+        },
+    }
+
+    branch = await _run_cache_post(
+        db_session=db_session,
+        flow_uuid="190a9c32-a8af-457b-b954-81af70704f00",
+        component=component,
+        runtime_variables=runtime_variables,
+    )
+
+    assert branch == "proximo"
+    assert len(db_session.calls) == 2
+    assert runtime_variables["cache_post_last_result"]["name"] == "dados_cliente"
+    assert runtime_variables["cache_post_last_result"]["cache_key"] == "abc-123"
+    assert runtime_variables["cache_post_last_result"]["ttl_days"] == 10
+    assert runtime_variables["cache_post_last_result"]["data"]["nome"] == "Deivid"
+
+
+@pytest.mark.asyncio
+async def test_run_cache_get_found_routes_encontrado_and_sets_output_var() -> None:
+    db_session = _FakeDbSession(rows=[({"nome": "Maria", "identificador": "77"},)])
+    runtime_variables = {"variables": {"payload": {}, "customs": {}}}
+    definition = {
+        "components": [
+            {
+                "ref_id": "f51c9448-9aea-46db-b1ea-c3fce56f964b",
+                "component_id": "cache_post",
+                "parameters": {"name": "dados_cliente", "mapping": []},
+            }
+        ]
+    }
+    component = {
+        "ref_id": "6f05349f-458b-4fa5-b0eb-35b594f5cd1d",
+        "component_id": "cache_get",
+        "parameters": {
+            "name": "dados_cliente",
+            "key": "77",
+            "output_var": "cache_hit",
+        },
+    }
+
+    branch = await _run_cache_get(
+        db_session=db_session,
+        definition=definition,
+        flow_uuid="190a9c32-a8af-457b-b954-81af70704f00",
+        component=component,
+        runtime_variables=runtime_variables,
+        branch_labels=["encontrado", "nao_encontrado", "exception"],
+    )
+
+    assert branch == "encontrado"
+    assert runtime_variables["variables"]["customs"]["cache_hit"]["nome"] == "Maria"
+    assert runtime_variables["cache_get_last_result"]["found"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_cache_get_not_found_without_branch_raises() -> None:
+    db_session = _FakeDbSession(rows=[None])
+    runtime_variables = {"variables": {"payload": {}, "customs": {}}}
+    definition = {
+        "components": [
+            {
+                "ref_id": "dc757bba-c9be-45d6-b797-9bf432a6f3e4",
+                "component_id": "cache_post",
+                "parameters": {"name": "dados_cliente", "mapping": []},
+            }
+        ]
+    }
+    component = {
+        "ref_id": "f0ea3490-aeba-4a5d-b388-8dd2f5912739",
+        "component_id": "cache_get",
+        "parameters": {
+            "name": "dados_cliente",
+            "key": "nao-existe",
+        },
+    }
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _run_cache_get(
+            db_session=db_session,
+            definition=definition,
+            flow_uuid="190a9c32-a8af-457b-b954-81af70704f00",
+            component=component,
+            runtime_variables=runtime_variables,
+            branch_labels=["encontrado", "exception"],
+        )
+
+    assert exc.value.code == "cache_get.not_found"
+
+
+@pytest.mark.asyncio
+async def test_run_cache_get_raises_when_name_not_configured() -> None:
+    db_session = _FakeDbSession(rows=[None])
+    runtime_variables = {"variables": {"payload": {}, "customs": {}}}
+    definition = {"components": []}
+    component = {
+        "ref_id": "9ef4f096-469f-41d4-8f95-8e20f24314f4",
+        "component_id": "cache_get",
+        "parameters": {
+            "name": "dados_cliente",
+            "key": "abc",
+        },
+    }
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _run_cache_get(
+            db_session=db_session,
+            definition=definition,
+            flow_uuid="190a9c32-a8af-457b-b954-81af70704f00",
+            component=component,
+            runtime_variables=runtime_variables,
+            branch_labels=["encontrado", "nao_encontrado", "exception"],
+        )
+
+    assert exc.value.code == "cache_get.cache_name_not_configured"
