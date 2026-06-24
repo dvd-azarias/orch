@@ -976,6 +976,90 @@ async def persist_run_flow_event_for_active_entity_address(
     )
 
 
+async def persist_run_flow_event_for_recent_entity_address(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    app_name: str,
+    entity_address: str,
+    payload: dict[str, Any],
+    extracted: dict[str, Any],
+    event_name: str,
+    event_result: str,
+    resume_card_uuid: str,
+    correlation_window_hours: int,
+    event_data: dict[str, Any] | None = None,
+) -> PersistResult | None:
+    lock_key = f"run_flow_event_recent|{flow_uuid}|{entity_address}|{event_name}|{event_result}"
+    runtime_patch_json = _build_run_flow_event_runtime_patch(
+        app_name=app_name,
+        payload=payload,
+        extracted=extracted,
+        event_name=event_name,
+        event_result=event_result,
+        event_data=event_data,
+    )
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": lock_key},
+    )
+
+    safe_window_hours = max(1, int(correlation_window_hours))
+    update_result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                callback_at = NOW(),
+                updated_at = NOW(),
+                state = CASE
+                    WHEN state = :state_finished THEN 1
+                    ELSE state
+                END,
+                ended_at = CASE
+                    WHEN state = :state_finished THEN NULL
+                    ELSE ended_at
+                END,
+                last_card_uuid = CAST(:resume_card_uuid AS uuid),
+                next_card_uuid = CAST(:resume_card_uuid AS uuid)
+            WHERE id = (
+                SELECT id
+                FROM orch_sessions
+                WHERE
+                    flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND entity_type = 'person'
+                    AND entity_address = :entity_address
+                    AND unassigned_at IS NULL
+                    AND created_at >= NOW() - make_interval(hours => CAST(:window_hours AS int))
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            RETURNING id, uuid::text AS uuid, state
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity_address": entity_address,
+            "runtime_patch": runtime_patch_json,
+            "resume_card_uuid": resume_card_uuid,
+            "window_hours": safe_window_hours,
+            "state_finished": SESSION_STATE_FINISHED,
+        },
+    )
+    row = update_result.mappings().first()
+    if row is None:
+        return None
+    return PersistResult(
+        id=int(row["id"]),
+        uuid=str(row["uuid"]),
+        state=int(row["state"]),
+        created=False,
+    )
+
+
 async def fetch_session_by_uuid(
     db_session: AsyncSession,
     *,
