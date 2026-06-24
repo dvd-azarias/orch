@@ -20,6 +20,7 @@ from typing import Any
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1480,6 +1481,87 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+RUNTIME_UTILS_TZ = ZoneInfo("America/Sao_Paulo")
+WEEKDAY_NAMES_PT_BR = (
+    "segunda-feira",
+    "terça-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "sábado",
+    "domingo",
+)
+
+
+def _is_business_day(date_value) -> bool:  # noqa: ANN001
+    return date_value.weekday() < 5
+
+
+def _next_business_day(date_value):  # noqa: ANN001
+    cursor = date_value + timedelta(days=1)
+    while not _is_business_day(cursor):
+        cursor = cursor + timedelta(days=1)
+    return cursor
+
+
+def _previous_business_day(date_value):  # noqa: ANN001
+    cursor = date_value - timedelta(days=1)
+    while not _is_business_day(cursor):
+        cursor = cursor - timedelta(days=1)
+    return cursor
+
+
+def _fifth_business_day_of_month(date_value):  # noqa: ANN001
+    cursor = date_value.replace(day=1)
+    business_days_found = 0
+    while cursor.month == date_value.month:
+        if _is_business_day(cursor):
+            business_days_found += 1
+            if business_days_found == 5:
+                return cursor
+        cursor = cursor + timedelta(days=1)
+    return date_value
+
+
+def _build_runtime_utils_payload(*, now_utc: datetime | None = None) -> dict[str, Any]:
+    reference_now = now_utc or datetime.now(timezone.utc)
+    if reference_now.tzinfo is None:
+        reference_now = reference_now.replace(tzinfo=timezone.utc)
+    now_local = reference_now.astimezone(RUNTIME_UTILS_TZ)
+
+    current_hour = now_local.hour
+    if current_hour < 12:
+        periodo_do_dia = "manha"
+        saudacao = "Bom dia"
+    elif current_hour < 18:
+        periodo_do_dia = "tarde"
+        saudacao = "Boa tarde"
+    else:
+        periodo_do_dia = "noite"
+        saudacao = "Boa noite"
+
+    today = now_local.date()
+    return {
+        "saudacao": saudacao,
+        "periodo_do_dia": periodo_do_dia,
+        "dia_da_semana": WEEKDAY_NAMES_PT_BR[today.weekday()],
+        "hora_atual": now_local.strftime("%H:%M:%S"),
+        "dia_atual": today.isoformat(),
+        "proximo_dia_util": _next_business_day(today).isoformat(),
+        "quinto_dia_util": _fifth_business_day_of_month(today).isoformat(),
+        "dia_util_anterior": _previous_business_day(today).isoformat(),
+        "e_dia_util_hoje": _is_business_day(today),
+    }
+
+
+def _ensure_runtime_utils_scope(variables: dict[str, Any]) -> None:
+    utils_scope = variables.get("utils")
+    if not isinstance(utils_scope, dict):
+        utils_scope = {}
+        variables["utils"] = utils_scope
+    utils_scope.update(_build_runtime_utils_payload())
+
+
 def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
     variables = runtime_variables.get("variables")
     if isinstance(variables, dict):
@@ -1502,6 +1584,7 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
         file_content = file_scope.get("content")
         if not isinstance(file_content, dict):
             file_scope["content"] = {}
+        _ensure_runtime_utils_scope(variables)
         return variables
 
     input_payload = runtime_variables.get("input_payload")
@@ -1520,6 +1603,7 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
             "callback": {},
             "file": {"content": {}},
         }
+    _ensure_runtime_utils_scope(runtime_variables["variables"])
     return runtime_variables["variables"]
 
 

@@ -6,6 +6,7 @@ import pytest
 import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
     WorkflowExecutionError,
+    _build_runtime_utils_payload,
     _build_create_contact_records,
     _blocking_stop_reason_for_component,
     _clear_blocking_execution,
@@ -117,6 +118,25 @@ def test_ensure_variables_seeds_callback_and_file_content_scopes() -> None:
     assert isinstance(variables["callback"], dict)
     assert isinstance(variables["file"], dict)
     assert isinstance(variables["file"]["content"], dict)
+    assert isinstance(variables["utils"], dict)
+    assert variables["utils"]["saudacao"] is not None
+    assert variables["utils"]["periodo_do_dia"] in {"manha", "tarde", "noite"}
+    assert isinstance(variables["utils"]["e_dia_util_hoje"], bool)
+
+
+def test_build_runtime_utils_payload_handles_business_day_math_and_greeting() -> None:
+    reference_utc = datetime(2026, 6, 22, 13, 45, 0, tzinfo=timezone.utc)
+    payload = _build_runtime_utils_payload(now_utc=reference_utc)
+
+    assert payload["dia_atual"] == "2026-06-22"
+    assert payload["dia_da_semana"] == "segunda-feira"
+    assert payload["hora_atual"] == "10:45:00"
+    assert payload["periodo_do_dia"] == "manha"
+    assert payload["saudacao"] == "Bom dia"
+    assert payload["proximo_dia_util"] == "2026-06-23"
+    assert payload["dia_util_anterior"] == "2026-06-19"
+    assert payload["quinto_dia_util"] == "2026-06-05"
+    assert payload["e_dia_util_hoje"] is True
 
 
 def test_build_create_contact_records_renders_required_fields() -> None:
