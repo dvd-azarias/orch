@@ -126,6 +126,34 @@ def _is_permission_like_error(exc: Exception) -> bool:
     )
 
 
+def _build_row_buffer_payload(
+    *,
+    row_payload: dict[str, Any],
+    destination_config: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "__row": row_payload,
+        "__destination_config": destination_config,
+    }
+
+
+def _extract_row_runtime_payload(
+    payload_jsonb: Any,
+    *,
+    default_destination_config: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if isinstance(payload_jsonb, dict):
+        wrapped_row = payload_jsonb.get("__row")
+        wrapped_destination = payload_jsonb.get("__destination_config")
+        if isinstance(wrapped_row, dict):
+            destination_config = dict(default_destination_config)
+            if isinstance(wrapped_destination, dict):
+                destination_config.update(wrapped_destination)
+            return wrapped_row, destination_config
+        return payload_jsonb, dict(default_destination_config)
+    return {}, dict(default_destination_config)
+
+
 async def upsert_job_and_buffer_row(
     db_session: AsyncSession,
     *,
@@ -219,7 +247,11 @@ async def upsert_job_and_buffer_row(
         raise RuntimeError("Falha ao registrar job generate_file.")
     job_id = str(job_row["id"])
 
-    payload_text = json.dumps(row_payload, ensure_ascii=False, sort_keys=True)
+    row_buffer_payload = _build_row_buffer_payload(
+        row_payload=row_payload,
+        destination_config=destination_config,
+    )
+    payload_text = json.dumps(row_buffer_payload, ensure_ascii=False, sort_keys=True)
     row_hash = hashlib.md5(payload_text.encode("utf-8")).hexdigest()
     row_result = await db_session.execute(
         text(
@@ -636,7 +668,10 @@ async def process_generate_file_job(
     for row in rows:
         try:
             payload_jsonb = row.get("payload_jsonb")
-            payload_row = payload_jsonb if isinstance(payload_jsonb, dict) else {}
+            payload_row, row_destination_config = _extract_row_runtime_payload(
+                payload_jsonb,
+                default_destination_config=destination_config,
+            )
             text_payload = _serialize_rows(
                 format_type=format_type,
                 delimiter=delimiter,
@@ -645,7 +680,7 @@ async def process_generate_file_job(
                 rows=[payload_row],
             )
             last_result = _sftp_write(
-                destination_config=destination_config,
+                destination_config=row_destination_config,
                 format_config=format_config,
                 session_id=int(row["session_id"]),
                 payload_text=text_payload,
