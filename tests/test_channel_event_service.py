@@ -101,6 +101,7 @@ def test_extract_channel_events_returns_dialer_item() -> None:
         "hangup": {
             "Event": "Hangup",
             "Disposition": "BUSY",
+            "Cause": "486",
             "Uniqueid": "GW01-444.1",
         },
     }

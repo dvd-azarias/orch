@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema
 from app.repositories.orch_channel_events_repository import insert_channel_event
+from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 
 logger = get_logger(__name__)
 
@@ -144,34 +145,7 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
 
 
 def _extract_dialer_status(payload: dict[str, Any]) -> str | None:
-    raw_status = payload.get("status")
-    if raw_status is not None:
-        text = str(raw_status).strip().lower()
-        if text:
-            return text
-
-    hangup = payload.get("hangup")
-    if not isinstance(hangup, dict):
-        return None
-
-    disposition = str(hangup.get("Disposition", "")).strip().upper()
-    classifier = str(hangup.get("DialerClassifierStatus", "")).strip().upper()
-    cause_txt = str(hangup.get("Cause-txt", "")).strip().upper()
-    hint = " ".join(part for part in [disposition, classifier, cause_txt] if part)
-
-    if "MACHINE" in hint:
-        return "machine"
-    if "ANSWERED" in hint:
-        return "answered"
-    if "BUSY" in hint:
-        return "busy"
-    if any(k in hint for k in ("NO ANSWER", "NOANSWER", "RINGING", "SILENCIO")):
-        return "no_answer"
-    if any(k in hint for k in ("INVALID", "UNALLOCATED", "NOT FOUND")):
-        return "invalid_number"
-    if any(k in hint for k in ("REJECT", "FORBIDDEN", "DECLINED")):
-        return "rejected"
-    return "failed"
+    return resolve_dialer_status_from_release(payload)
 
 
 def _extract_dialer_channel_events(payload: dict[str, Any]) -> list[ChannelEventItem]:
