@@ -139,6 +139,16 @@ def test_build_runtime_utils_payload_handles_business_day_math_and_greeting() ->
     assert payload["e_dia_util_hoje"] is True
 
 
+def test_render_value_resolves_utils_builtin_without_prefix() -> None:
+    variables = {
+        "payload": {},
+        "customs": {},
+        "utils": {"dia_atual": "2026-06-23"},
+    }
+    assert _render_value("{{dia_atual}}", variables) == "2026-06-23"
+    assert _render_value("hoje={{dia_atual}}", variables) == "hoje=2026-06-23"
+
+
 def test_build_create_contact_records_renders_required_fields() -> None:
     component = {
         "parameters": {
