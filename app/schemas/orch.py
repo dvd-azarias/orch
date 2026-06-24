@@ -151,3 +151,19 @@ class OrchWhatsappLimitUpsertResponse(BaseModel):
     allowed_limit: int
     received_from_meta_at: datetime
     in_use: bool
+
+
+class OrchResubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    contact_channel_address: str
+    contact_identifier: str | None = None
+    person_uuid: str | None = None
+    external_identifier: str | None = None
+    contact_name: str | None = None
+    contact_list_member_id: str | None = None
+    contact_list_id: str | None = None
+    mailing_id: str | None = None
+    reason: str | None = None
+    payload: dict | None = None

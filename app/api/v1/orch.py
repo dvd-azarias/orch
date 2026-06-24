@@ -5,7 +5,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Header, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ from app.schemas.orch import (
     OrchFlowAliasSummary,
     OrchMigrateAllResponse,
     OrchMigrateWorkspaceResponse,
+    OrchResubmitRequest,
     OrchSessionListResponse,
     OrchSessionSummary,
     OrchTriggerAccepted,
@@ -106,6 +107,58 @@ def _build_entity_session_id(*, entity_address: str, flow_uuid: UUID) -> str:
 
 def _is_short_flow_alias(value: str) -> bool:
     return bool(_FLOW_ALIAS_PATTERN.fullmatch(str(value or "").strip().lower()))
+
+
+def _normalize_supplier_entity_address(raw_value: str) -> str:
+    text_value = str(raw_value or "").strip()
+    if not text_value:
+        return ""
+    digits = "".join(char for char in text_value if char.isdigit())
+    return digits or text_value
+
+
+def _is_allowed_supplier_client(*, client_id: str | None, client_secret: str | None) -> bool:
+    settings = get_settings()
+    normalized_id = str(client_id or "").strip()
+    normalized_secret = str(client_secret or "").strip()
+    if not normalized_id or not normalized_secret:
+        return False
+    accepted_pairs: list[tuple[str, str]] = []
+    if settings.sync_ws_client_id and settings.sync_ws_client_secret:
+        accepted_pairs.append((str(settings.sync_ws_client_id).strip(), str(settings.sync_ws_client_secret).strip()))
+    if settings.arquivos_client_id and settings.arquivos_client_secret:
+        accepted_pairs.append((str(settings.arquivos_client_id).strip(), str(settings.arquivos_client_secret).strip()))
+    return any(normalized_id == expected_id and normalized_secret == expected_secret for expected_id, expected_secret in accepted_pairs)
+
+
+async def _find_resubmit_session_by_event_id(
+    *,
+    db_session: AsyncSession,
+    workspace_schema: str,
+    flow_uuid: str,
+    event_id: str,
+) -> dict[str, Any] | None:
+    safe_schema = workspace_schema.replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    result = await db_session.execute(
+        text(
+            """
+            SELECT id, uuid::text AS uuid, state
+            FROM orch_sessions
+            WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+              AND COALESCE(runtime_variables->'last_payload'->>'event_name', '') = 'resubmit'
+              AND COALESCE(runtime_variables->'last_payload'->>'event_id', '') = :event_id
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "event_id": event_id,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
 
 
 async def _trigger_orch_for_workspace(
@@ -654,6 +707,124 @@ async def create_orch_session_by_workspace(
         workflow_bootstrap=workflow_bootstrap,
         workflow_execution=workflow_execution,
     )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/resubmit",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchTriggerAccepted,
+)
+async def resubmit_orch_session_by_workspace(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    request: OrchResubmitRequest = Body(...),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchTriggerAccepted:
+    if not _is_allowed_supplier_client(client_id=x_client_id, client_secret=x_client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciais de cliente inválidas para resubmit.",
+        )
+
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+
+    event_id = _read_required_text(request.event_id, field_name="event_id")
+    entity_address = _normalize_supplier_entity_address(request.contact_channel_address)
+    if not entity_address:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Campo obrigatório inválido: 'contact_channel_address'.",
+        )
+
+    entity = (
+        str(request.contact_identifier or "").strip()
+        or str(request.external_identifier or "").strip()
+        or str(request.person_uuid or "").strip()
+        or entity_address
+    )
+
+    existing = await _find_resubmit_session_by_event_id(
+        db_session=db_session,
+        workspace_schema=workspace_schema,
+        flow_uuid=str(flow_uuid),
+        event_id=event_id,
+    )
+    if existing is not None:
+        extracted = SessionExtraction(
+            entity=entity,
+            entity_type="person",
+            entity_address=entity_address,
+            entity_session_id=event_id,
+        )
+        return OrchTriggerAccepted(
+            status="accepted",
+            accepted=True,
+            flow_uuid=str(flow_uuid),
+            app="GenericApp",
+            persistence="idempotent_replay",
+            extracted=extracted,
+            session_id=int(existing["id"]),
+            session_uuid=str(existing["uuid"]),
+            session_state=int(existing["state"]),
+            session_created=False,
+            workflow_execution={
+                "mode": "async",
+                "enqueued": False,
+                "reason": "resubmit_event_already_processed",
+                "event_id": event_id,
+            },
+        )
+
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        await set_unassigned_at_by_flow_and_entity_address(
+            db_session,
+            flow_uuid=str(flow_uuid),
+            entity_address=entity_address,
+        )
+
+    extra_payload = request.payload if isinstance(request.payload, dict) else {}
+    resubmit_payload: dict[str, Any] = {
+        "event_name": "resubmit",
+        "event_id": event_id,
+        "contact_list_member_id": request.contact_list_member_id,
+        "contact_list_id": request.contact_list_id,
+        "mailing_id": request.mailing_id,
+        "contact_identifier": request.contact_identifier,
+        "person_uuid": request.person_uuid,
+        "external_identifier": request.external_identifier,
+        "contact_name": request.contact_name,
+        "contact_channel_address": entity_address,
+        "reason": request.reason,
+        "source": "supplier_resubmit",
+        "data": extra_payload,
+    }
+
+    response = await create_orch_session_by_workspace(
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        request=OrchCreateSessionRequest(
+            app_name="GenericApp",
+            entity=entity,
+            entity_type="person",
+            entity_address=entity_address,
+            payload=resubmit_payload,
+        ),
+        db_session=db_session,
+    )
+    response.workflow_execution = {
+        **(response.workflow_execution or {}),
+        "resubmit": {
+            "event_id": event_id,
+            "source": "supplier_resubmit",
+        },
+    }
+    return response
 
 
 @router.post(
