@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.services.generate_file_dispatch_service import (
+    _build_row_buffer_payload,
+    _extract_row_runtime_payload,
     _append_internal_suffix,
     _append_session_suffix,
     _is_permission_like_error,
@@ -62,3 +64,34 @@ def test_permission_like_error_detector() -> None:
     assert _is_permission_like_error(RuntimeError("Permission denied")) is True
     assert _is_permission_like_error(RuntimeError("Errno 13")) is True
     assert _is_permission_like_error(RuntimeError("Falha de conexão")) is False
+
+
+def test_row_buffer_payload_wraps_row_and_destination_snapshot() -> None:
+    payload = _build_row_buffer_payload(
+        row_payload={"nome": "Ana", "telefone": "5511999999999"},
+        destination_config={"file_name": "carga_ana.csv", "path": "upload"},
+    )
+    assert payload["__row"]["nome"] == "Ana"
+    assert payload["__destination_config"]["file_name"] == "carga_ana.csv"
+
+
+def test_extract_row_runtime_payload_supports_wrapped_and_legacy() -> None:
+    default_destination = {"file_name": "default.csv", "path": "upload"}
+    wrapped_payload = {
+        "__row": {"nome": "Paulo", "telefone": "5511988887777"},
+        "__destination_config": {"file_name": "carga_paulo.csv"},
+    }
+    row_payload, destination = _extract_row_runtime_payload(
+        wrapped_payload,
+        default_destination_config=default_destination,
+    )
+    assert row_payload["nome"] == "Paulo"
+    assert destination["file_name"] == "carga_paulo.csv"
+    assert destination["path"] == "upload"
+
+    legacy_row_payload, legacy_destination = _extract_row_runtime_payload(
+        {"nome": "Legado"},
+        default_destination_config=default_destination,
+    )
+    assert legacy_row_payload["nome"] == "Legado"
+    assert legacy_destination["file_name"] == "default.csv"
