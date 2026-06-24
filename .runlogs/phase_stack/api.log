@@ -1,0 +1,15 @@
+INFO:     Started server process [45342]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:7777 (Press CTRL+C to quit)
+{"timestamp": "2026-06-15T22:37:38.501404+00:00", "level": "INFO", "logger": "app.main", "message": "request started", "event": "request.start", "request_id": "25afb116-502a-4e10-a972-1b527de7cc12", "method": "GET", "path": "/health/celery"}
+{"timestamp": "2026-06-15T22:37:40.609557+00:00", "level": "INFO", "logger": "app.main", "message": "request finished", "event": "request.finish", "request_id": "25afb116-502a-4e10-a972-1b527de7cc12", "method": "GET", "path": "/health/celery", "status_code": 200, "duration_ms": 2108.15}
+INFO:     127.0.0.1:58860 - "GET /health/celery HTTP/1.1" 200 OK
+{"timestamp": "2026-06-15T22:37:44.702104+00:00", "level": "INFO", "logger": "app.main", "message": "request started", "event": "request.start", "request_id": "51116940-02d8-4414-8df2-21d23b15cc6f", "method": "GET", "path": "/health/live"}
+{"timestamp": "2026-06-15T22:37:44.702432+00:00", "level": "INFO", "logger": "app.main", "message": "request finished", "event": "request.finish", "request_id": "51116940-02d8-4414-8df2-21d23b15cc6f", "method": "GET", "path": "/health/live", "status_code": 200, "duration_ms": 0.35}
+INFO:     127.0.0.1:58906 - "GET /health/live HTTP/1.1" 200 OK
+{"timestamp": "2026-06-15T22:37:44.712656+00:00", "level": "INFO", "logger": "app.main", "message": "request started", "event": "request.start", "request_id": "e89e2e3b-cf8a-45c3-9942-2ad16512182f", "method": "POST", "path": "/v1/orch/ba7eb0ec-e565-447c-8c11-8f870cf72a60/3c97fa90-9385-45c9-b86b-fb4a1626d214"}
+{"timestamp": "2026-06-15T22:37:45.399457+00:00", "level": "INFO", "logger": "app.services.orch_trigger_service", "message": "orch trigger accepted", "event": "orch.trigger.accepted", "request_id": "e89e2e3b-cf8a-45c3-9942-2ad16512182f", "flow_uuid": "3c97fa90-9385-45c9-b86b-fb4a1626d214", "app": "WhatsApp", "entity": "5511975620806", "session_id": 6547, "session_uuid": "c2049f8e-1794-4c9a-8f2c-ed45e627f456"}
+{"timestamp": "2026-06-15T22:37:45.543713+00:00", "level": "INFO", "logger": "app.services.orch_trigger_service", "message": "channel events persisted", "event": "orch.channel_events.persisted", "flow_uuid": "3c97fa90-9385-45c9-b86b-fb4a1626d214", "app": "WhatsApp", "session_id": 6547}
+{"timestamp": "2026-06-15T22:37:45.766784+00:00", "level": "INFO", "logger": "app.main", "message": "request finished", "event": "request.finish", "request_id": "e89e2e3b-cf8a-45c3-9942-2ad16512182f", "method": "POST", "path": "/v1/orch/ba7eb0ec-e565-447c-8c11-8f870cf72a60/3c97fa90-9385-45c9-b86b-fb4a1626d214", "status_code": 202, "duration_ms": 1054.16}
+INFO:     127.0.0.1:58907 - "POST /v1/orch/ba7eb0ec-e565-447c-8c11-8f870cf72a60/3c97fa90-9385-45c9-b86b-fb4a1626d214 HTTP/1.1" 202 Accepted

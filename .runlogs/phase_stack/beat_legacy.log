@@ -1,0 +1,5 @@
+[2026-06-15 19:37:41,376: INFO/MainProcess] beat: Starting...
+[2026-06-15 19:37:43,464: INFO/MainProcess] Scheduler: Sending due task orch-beat-heartbeat (app.tasks.workflow.beat_heartbeat)
+[2026-06-15 19:37:43,557: INFO/MainProcess] Scheduler: Sending due task orch-dispatch-pending-sessions (app.tasks.workflow.dispatch_pending_sessions)
+[2026-06-15 19:37:45,382: INFO/MainProcess] Scheduler: Sending due task orch-beat-heartbeat (app.tasks.workflow.beat_heartbeat)
+[2026-06-15 19:37:45,557: INFO/MainProcess] Scheduler: Sending due task orch-dispatch-pending-sessions (app.tasks.workflow.dispatch_pending_sessions)

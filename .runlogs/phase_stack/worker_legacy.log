@@ -1,0 +1,71 @@
+ 
+ -------------- orch-worker-legacy@MacBook-Air-de-Deivid.local v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- macOS-26.5.1-arm64-arm-64bit 2026-06-15 19:37:41
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         orch:0x10a7ee420
+- ** ---------- .> transport:   amqp://admin:**@10.1.20.132:5672//
+- ** ---------- .> results:     redis://:**@10.1.20.239:6379/0
+- *** --- * --- .> concurrency: 10 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> orch_dispatch_f5_local exchange=orch_dispatch_f5_local(direct) key=orch_dispatch_f5_local
+                .> orch_execute_f5_local exchange=orch_execute_f5_local(direct) key=orch_execute_f5_local
+                .> orch_heartbeat_f5_local exchange=orch_heartbeat_f5_local(direct) key=orch_heartbeat_f5_local
+
+[tasks]
+  . app.tasks.component_generate_file.run
+  . app.tasks.component_generate_file.scan_due
+  . app.tasks.fileapp.associate_mailing
+  . app.tasks.fileapp.ingest_event
+  . app.tasks.fileapp.ingest_tipo1_event
+  . app.tasks.fileapp.process_event
+  . app.tasks.fileapp.process_tipo1_event
+  . app.tasks.workflow.advance_session
+  . app.tasks.workflow.beat_heartbeat
+  . app.tasks.workflow.dispatch_pending_sessions
+  . app.tasks.workflow.reconcile_pending_channel_events
+
+[2026-06-15 19:37:41,707: WARNING/MainProcess] /Users/deividazarias/google/prof/gohp/git/orch/.venv/lib/python3.12/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2026-06-15 19:37:41,771: INFO/MainProcess] Connected to amqp://admin:**@10.1.20.132:5672//
+[2026-06-15 19:37:41,772: WARNING/MainProcess] /Users/deividazarias/google/prof/gohp/git/orch/.venv/lib/python3.12/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2026-06-15 19:37:42,235: INFO/MainProcess] orch-worker-legacy@MacBook-Air-de-Deivid.local ready.
+[2026-06-15 19:37:43,579: INFO/MainProcess] Task app.tasks.workflow.beat_heartbeat[009e6a50-356b-4ea6-9a02-eab8b53f6320] received
+[2026-06-15 19:37:43,640: INFO/MainProcess] Task app.tasks.workflow.dispatch_pending_sessions[45deb31e-0c15-4b0e-bce5-d74d814eb492] received
+[2026-06-15 19:37:43,680: INFO/ForkPoolWorker-8] Task app.tasks.workflow.beat_heartbeat[009e6a50-356b-4ea6-9a02-eab8b53f6320] succeeded in 0.10006399999838322s: None
+[2026-06-15 19:37:44,175: INFO/ForkPoolWorker-1] workflow dispatcher workspace scope enabled
+[2026-06-15 19:37:44,283: INFO/MainProcess] Events of group {task} enabled by remote.
+[2026-06-15 19:37:44,333: INFO/ForkPoolWorker-1] workflow dispatcher claimed sessions
+[2026-06-15 19:37:44,522: INFO/MainProcess] Task app.tasks.workflow.advance_session[fe06a41f-14b3-49e2-b4b9-0bff4259d18a] received
+[2026-06-15 19:37:44,522: INFO/MainProcess] Task app.tasks.workflow.advance_session[1260c9f5-8031-48df-895c-280ea6d9f34f] received
+[2026-06-15 19:37:44,683: INFO/ForkPoolWorker-1] workflow dispatch task finished
+[2026-06-15 19:37:44,683: INFO/ForkPoolWorker-1] Task app.tasks.workflow.dispatch_pending_sessions[45deb31e-0c15-4b0e-bce5-d74d814eb492] succeeded in 1.040446040999086s: {'claimed_count': 2}
+[2026-06-15 19:37:45,399: INFO/MainProcess] Task app.tasks.workflow.beat_heartbeat[a1713989-2edc-42ec-a154-ee5aaf4a17c6] received
+[2026-06-15 19:37:45,501: INFO/ForkPoolWorker-1] Task app.tasks.workflow.beat_heartbeat[a1713989-2edc-42ec-a154-ee5aaf4a17c6] succeeded in 0.10103916699881665s: None
+[2026-06-15 19:37:45,575: INFO/MainProcess] Task app.tasks.workflow.dispatch_pending_sessions[fffb3eb1-d021-4da2-883a-b0cadb1a06dd] received
+[2026-06-15 19:37:45,608: INFO/ForkPoolWorker-8] workflow m2 execution metrics
+[2026-06-15 19:37:45,608: INFO/ForkPoolWorker-9] workflow m2 execution metrics
+[2026-06-15 19:37:45,640: WARNING/ForkPoolWorker-8] workflow session stopped in non-resumable reason
+[2026-06-15 19:37:45,640: WARNING/ForkPoolWorker-9] workflow session stopped in non-resumable reason
+[2026-06-15 19:37:45,742: INFO/MainProcess] Task app.tasks.workflow.advance_session[bdc8cd43-be08-453c-a7d7-ad23fb50de60] received
+[2026-06-15 19:37:45,804: INFO/ForkPoolWorker-1] workflow dispatcher workspace scope enabled
+[2026-06-15 19:37:45,923: INFO/ForkPoolWorker-1] workflow dispatcher claimed sessions
+[2026-06-15 19:37:45,935: INFO/MainProcess] Task app.tasks.workflow.advance_session[353149d1-b09d-43c2-aa84-bc651c0ce44c] received
+[2026-06-15 19:37:45,948: INFO/ForkPoolWorker-8] workflow session advanced
+[2026-06-15 19:37:45,948: INFO/ForkPoolWorker-9] workflow session advanced
+[2026-06-15 19:37:45,949: INFO/ForkPoolWorker-8] Task app.tasks.workflow.advance_session[fe06a41f-14b3-49e2-b4b9-0bff4259d18a] succeeded in 1.4256704169965815s: None
+[2026-06-15 19:37:45,949: INFO/ForkPoolWorker-9] Task app.tasks.workflow.advance_session[1260c9f5-8031-48df-895c-280ea6d9f34f] succeeded in 1.425142041000072s: None
+[2026-06-15 19:37:46,088: INFO/ForkPoolWorker-1] workflow dispatch task finished
+[2026-06-15 19:37:46,088: INFO/ForkPoolWorker-1] Task app.tasks.workflow.dispatch_pending_sessions[fffb3eb1-d021-4da2-883a-b0cadb1a06dd] succeeded in 0.5125210000041989s: {'claimed_count': 1}

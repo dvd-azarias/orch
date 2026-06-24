@@ -1,0 +1,44 @@
+ 
+ -------------- orch-worker-gf@MacBook-Air-de-Deivid.local v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- macOS-26.5.1-arm64-arm-64bit 2026-06-15 19:37:41
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         orch:0x1094578c0
+- ** ---------- .> transport:   amqp://admin:**@10.1.20.132:5672//
+- ** ---------- .> results:     redis://:**@10.1.20.239:6379/0
+- *** --- * --- .> concurrency: 10 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> orch_component_generate_file_run_f5_local exchange=orch_component_generate_file_run_f5_local(direct) key=orch_component_generate_file_run_f5_local
+                .> orch_component_generate_file_scan_f5_local exchange=orch_component_generate_file_scan_f5_local(direct) key=orch_component_generate_file_scan_f5_local
+
+[tasks]
+  . app.tasks.component_generate_file.run
+  . app.tasks.component_generate_file.scan_due
+  . app.tasks.fileapp.associate_mailing
+  . app.tasks.fileapp.ingest_event
+  . app.tasks.fileapp.ingest_tipo1_event
+  . app.tasks.fileapp.process_event
+  . app.tasks.fileapp.process_tipo1_event
+  . app.tasks.workflow.advance_session
+  . app.tasks.workflow.beat_heartbeat
+  . app.tasks.workflow.dispatch_pending_sessions
+  . app.tasks.workflow.reconcile_pending_channel_events
+
+[2026-06-15 19:37:41,708: WARNING/MainProcess] /Users/deividazarias/google/prof/gohp/git/orch/.venv/lib/python3.12/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2026-06-15 19:37:41,781: INFO/MainProcess] Connected to amqp://admin:**@10.1.20.132:5672//
+[2026-06-15 19:37:41,782: WARNING/MainProcess] /Users/deividazarias/google/prof/gohp/git/orch/.venv/lib/python3.12/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+  warnings.warn(
+
+[2026-06-15 19:37:42,186: INFO/MainProcess] orch-worker-gf@MacBook-Air-de-Deivid.local ready.
+[2026-06-15 19:37:44,283: INFO/MainProcess] Events of group {task} enabled by remote.
