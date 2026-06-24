@@ -30,6 +30,7 @@ from app.services.workflow_m2_service import (
     _read_whatsapp_last_preempt_signature,
     _read_whatsapp_resume_cursor,
     _render_value,
+    _resolve_body,
     _run_api_call,
     _run_cache_get,
     _run_cache_post,
@@ -1240,6 +1241,44 @@ def test_api_call_retry_exhausted_returns_error(monkeypatch) -> None:
     assert calls["n"] == 2
     assert runtime_variables["api_call_last_result"]["attempts"] == 2
     assert runtime_variables["variables"]["customs"]["api_status"] == 503
+
+
+def test_resolve_body_supports_x_www_form_urlencoded_alias() -> None:
+    request_config = {
+        "body": {
+            "mode": "x-www-form-urlencoded",
+            "form": [
+                {"key": "hoje", "value": "{{dia_atual}}"},
+                {"key": "dias", "value": "{{dias_desde_ultimo_lembrete}}"},
+            ],
+        }
+    }
+    variables = {
+        "payload": {},
+        "customs": {"dias_desde_ultimo_lembrete": 4},
+        "utils": {"dia_atual": "2026-06-23"},
+    }
+    body, content_type = _resolve_body(request_config, variables)
+    assert content_type == "application/x-www-form-urlencoded"
+    assert body == b"hoje=2026-06-23&dias=4"
+
+
+def test_resolve_body_supports_raw_mode_with_template_interpolation() -> None:
+    request_config = {
+        "body": {
+            "mode": "raw",
+            "json": '{\n  "campo": "{{dias_desde_ultimo_lembrete}}"\n}',
+        }
+    }
+    variables = {
+        "payload": {},
+        "customs": {"dias_desde_ultimo_lembrete": 7},
+        "utils": {},
+    }
+    body, content_type = _resolve_body(request_config, variables)
+    assert content_type == "application/json"
+    assert body is not None
+    assert '"campo": "7"' in body.decode("utf-8")
 
 
 @pytest.mark.asyncio
