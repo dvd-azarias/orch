@@ -72,6 +72,12 @@ def _extract_whatsapp_status_name(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _is_run_flow_tabulacao_event(payload: dict[str, Any]) -> bool:
+    event_name = str(payload.get("event_name", "")).strip().lower()
+    result = str(payload.get("result", "")).strip().lower()
+    return event_name == "tabulacao" or result == "tabulacao"
+
+
 async def _resolve_single_send_with_dialer_ref(
     db_session: AsyncSession,
     *,
@@ -106,6 +112,42 @@ async def _resolve_single_send_with_dialer_ref(
     if len(send_card_refs) != 1:
         return None
     return send_card_refs[0]
+
+
+async def _resolve_single_run_flow_ref(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+) -> str | None:
+    flow_row = await fetch_flow_row(db_session, flow_uuid=flow_uuid)
+    if flow_row is None:
+        return None
+
+    selected_revision = await fetch_selected_revision(db_session, flow_id=str(flow_row["id"]))
+    if selected_revision is None:
+        return None
+
+    definition = selected_revision.get("definition")
+    if not isinstance(definition, dict):
+        return None
+
+    components = definition.get("components")
+    if not isinstance(components, list):
+        return None
+
+    run_flow_refs: list[str] = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if component_kind(component) != "run_flow":
+            continue
+        ref_id = str(component.get("ref_id") or component.get("uuid") or component.get("id") or "").strip()
+        if ref_id and ref_id not in run_flow_refs:
+            run_flow_refs.append(ref_id)
+
+    if len(run_flow_refs) != 1:
+        return None
+    return run_flow_refs[0]
 
 
 async def _should_discard_whatsapp_event(
@@ -201,6 +243,7 @@ async def process_single_payload(
             and str(payload.get("event_name", "")).strip().lower() == "callback"
         )
         is_run_flow_hangup_event = app_name == "DialerApp" and _is_dialer_hangup_event(payload)
+        is_run_flow_tabulacao_event = app_name == "GenericApp" and _is_run_flow_tabulacao_event(payload)
 
         if is_run_flow_hangup_event:
             hangup_persisted = await persist_run_flow_event_for_active_entity_address(
@@ -275,6 +318,74 @@ async def process_single_payload(
                 session_id=hangup_persisted.id,
                 session_uuid=hangup_persisted.uuid,
                 session_state=hangup_persisted.state,
+                session_created=False,
+            )
+        elif is_run_flow_tabulacao_event:
+            tabulacao_event_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            tabulacao_persisted = await persist_run_flow_event_for_active_entity_address(
+                db_session,
+                flow_uuid=flow_uuid,
+                app_name=app_name,
+                entity_address=extracted.entity_address,
+                payload=payload,
+                extracted=extracted.model_dump(),
+                event_name="tabulacao",
+                event_result="tabulacao",
+                event_data=tabulacao_event_data,
+            )
+            if tabulacao_persisted is None:
+                resume_card_uuid = await _resolve_single_run_flow_ref(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                )
+                if resume_card_uuid is not None:
+                    settings = get_settings()
+                    tabulacao_persisted = await persist_run_flow_event_for_recent_entity_address(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        app_name=app_name,
+                        entity_address=extracted.entity_address,
+                        payload=payload,
+                        extracted=extracted.model_dump(),
+                        event_name="tabulacao",
+                        event_result="tabulacao",
+                        resume_card_uuid=resume_card_uuid,
+                        correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
+                        event_data=tabulacao_event_data,
+                    )
+            if tabulacao_persisted is None:
+                await persist_discarded_event(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                    app_name=app_name,
+                    entity=extracted.entity,
+                    entity_type=extracted.entity_type,
+                    entity_address=extracted.entity_address,
+                    entity_session_id=extracted.entity_session_id,
+                    discard_reason="run_flow_tabulacao_session_not_found_by_address",
+                    payload=payload,
+                )
+                return OrchTriggerAccepted(
+                    status="ignored",
+                    accepted=False,
+                    flow_uuid=flow_uuid,
+                    app=app_name,
+                    persistence="ignored",
+                    extracted=extracted,
+                    session_id=0,
+                    session_uuid="",
+                    session_state=0,
+                    session_created=False,
+                    workflow_execution={
+                        "mode": "async",
+                        "enqueued": False,
+                        "reason": "run_flow_tabulacao_session_not_found_by_address",
+                    },
+                )
+            persisted = SessionPersistResponse(
+                session_id=tabulacao_persisted.id,
+                session_uuid=tabulacao_persisted.uuid,
+                session_state=tabulacao_persisted.state,
                 session_created=False,
             )
         elif is_callback_event:
