@@ -117,12 +117,31 @@ def test_ensure_variables_seeds_callback_and_file_content_scopes() -> None:
     assert isinstance(variables["payload"], dict)
     assert isinstance(variables["customs"], dict)
     assert isinstance(variables["callback"], dict)
+    assert isinstance(variables["disposition"], dict)
     assert isinstance(variables["file"], dict)
     assert isinstance(variables["file"]["content"], dict)
     assert isinstance(variables["utils"], dict)
     assert variables["utils"]["saudacao"] is not None
     assert variables["utils"]["periodo_do_dia"] in {"manha", "tarde", "noite"}
     assert isinstance(variables["utils"]["e_dia_util_hoje"], bool)
+
+
+def test_inject_callback_runtime_scope_sets_disposition_alias() -> None:
+    runtime_variables = {
+        "callback": {
+            "event_name": "tabulacao",
+            "entity": "30392287848",
+            "result": "tabulacao",
+            "received_at": "2026-06-26T16:26:00+00:00",
+            "category": "neutral",
+            "data": {"resposta_1": "ok"},
+        }
+    }
+    _inject_callback_runtime_scope(runtime_variables=runtime_variables)
+    variables = runtime_variables["variables"]
+    assert variables["callback"]["result"] == "tabulacao"
+    assert variables["disposition"]["category"] == "neutral"
+    assert variables["customs"]["disposition"]["data"]["resposta_1"] == "ok"
 
 
 def test_build_runtime_utils_payload_handles_business_day_math_and_greeting() -> None:

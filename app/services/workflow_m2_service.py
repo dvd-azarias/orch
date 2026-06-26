@@ -1617,6 +1617,9 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
         callback = variables.get("callback")
         if not isinstance(callback, dict):
             variables["callback"] = {}
+        disposition = variables.get("disposition")
+        if not isinstance(disposition, dict):
+            variables["disposition"] = {}
         file_scope = variables.get("file")
         if not isinstance(file_scope, dict):
             file_scope = {}
@@ -1633,6 +1636,7 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
             "payload": dict(input_payload),
             "customs": dict(input_payload),
             "callback": {},
+            "disposition": {},
             "file": {"content": {}},
             **dict(input_payload),
         }
@@ -1641,6 +1645,7 @@ def _ensure_variables(runtime_variables: dict[str, Any]) -> dict[str, Any]:
             "payload": {},
             "customs": {},
             "callback": {},
+            "disposition": {},
             "file": {"content": {}},
         }
     _ensure_runtime_utils_scope(runtime_variables["variables"])
@@ -2144,8 +2149,19 @@ def _inject_callback_runtime_scope(
         variables["customs"] = customs
     callback_payload = _extract_callback_payload_from_runtime(runtime_variables)
     callback_copy = dict(callback_payload) if isinstance(callback_payload, dict) else {}
+    disposition_payload: dict[str, Any] = {}
+    if isinstance(callback_copy.get("disposition"), dict):
+        disposition_payload = dict(callback_copy.get("disposition"))
+    elif callback_copy.get("event_name") == "tabulacao" or callback_copy.get("result") == "tabulacao":
+        disposition_payload = {
+            "category": callback_copy.get("category"),
+            "data": callback_copy.get("data") if isinstance(callback_copy.get("data"), dict) else {},
+            "received_at": callback_copy.get("received_at"),
+        }
     variables["callback"] = callback_copy
+    variables["disposition"] = disposition_payload
     customs["callback"] = callback_copy
+    customs["disposition"] = disposition_payload
 
 
 def _extract_runtime_payload_for_system(runtime_variables: dict[str, Any]) -> dict[str, Any]:

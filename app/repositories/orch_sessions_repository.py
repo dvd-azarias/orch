@@ -129,7 +129,8 @@ def _build_callback_payload(
             event_data=event_data,
             fallback_received_at=received_at,
         )
-        callback_payload["disposition"] = disposition
+        callback_payload["category"] = disposition.get("category")
+        callback_payload["data"] = disposition.get("data") if isinstance(disposition.get("data"), dict) else {}
         return callback_payload
 
     callback_payload["data"] = event_data if isinstance(event_data, dict) else {}
