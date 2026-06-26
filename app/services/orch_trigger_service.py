@@ -78,6 +78,37 @@ def _is_run_flow_tabulacao_event(payload: dict[str, Any]) -> bool:
     return event_name == "tabulacao" or result == "tabulacao"
 
 
+def _extract_tabulacao_event_data(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    additional_data = payload.get("additional_data") if isinstance(payload.get("additional_data"), dict) else {}
+    disposition = payload.get("disposition") if isinstance(payload.get("disposition"), dict) else {}
+
+    composed_disposition = {
+        "category": (
+            str(disposition.get("category", "")).strip()
+            or str(payload.get("disposition_category", "")).strip()
+            or None
+        ),
+        "data": (
+            disposition.get("data")
+            if isinstance(disposition.get("data"), dict)
+            else (
+                additional_data.get("session")
+                if isinstance(additional_data.get("session"), dict)
+                else raw_data
+            )
+        ),
+        "received_at": str(disposition.get("received_at", "")).strip() or None,
+    }
+
+    return {
+        "disposition": composed_disposition,
+        "disposition_category": composed_disposition["category"],
+        "additional_data": additional_data,
+        "data": raw_data,
+    }
+
+
 async def _resolve_single_send_with_dialer_ref(
     db_session: AsyncSession,
     *,
@@ -321,7 +352,7 @@ async def process_single_payload(
                 session_created=False,
             )
         elif is_run_flow_tabulacao_event:
-            tabulacao_event_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            tabulacao_event_data = _extract_tabulacao_event_data(payload)
             tabulacao_persisted = await persist_run_flow_event_for_active_entity_address(
                 db_session,
                 flow_uuid=flow_uuid,

@@ -117,14 +117,60 @@ def _build_callback_payload(
     event_result: str,
     event_data: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    received_at = _now_utc_iso()
     callback_payload = {
         "event_name": str(event_name or "").strip().lower(),
         "entity": str(extracted.get("entity", "")).strip(),
         "result": str(event_result or "").strip().lower(),
-        "data": event_data if isinstance(event_data, dict) else {},
-        "received_at": _now_utc_iso(),
+        "received_at": received_at,
     }
+    if callback_payload["event_name"] == "tabulacao" or callback_payload["result"] == "tabulacao":
+        disposition = _build_tabulacao_disposition_payload(
+            event_data=event_data,
+            fallback_received_at=received_at,
+        )
+        callback_payload["disposition"] = disposition
+        return callback_payload
+
+    callback_payload["data"] = event_data if isinstance(event_data, dict) else {}
     return callback_payload
+
+
+def _build_tabulacao_disposition_payload(
+    *,
+    event_data: dict[str, Any] | None,
+    fallback_received_at: str,
+) -> dict[str, Any]:
+    base = event_data if isinstance(event_data, dict) else {}
+    disposition = base.get("disposition") if isinstance(base.get("disposition"), dict) else {}
+
+    category = (
+        str(disposition.get("category", "")).strip()
+        or str(base.get("disposition_category", "")).strip()
+        or str(base.get("category", "")).strip()
+        or None
+    )
+    data = (
+        disposition.get("data")
+        if isinstance(disposition.get("data"), dict)
+        else (
+            base.get("data")
+            if isinstance(base.get("data"), dict)
+            else (
+                base.get("additional_data", {}).get("session")
+                if isinstance(base.get("additional_data"), dict)
+                and isinstance(base.get("additional_data", {}).get("session"), dict)
+                else {}
+            )
+        )
+    )
+    received_at = str(disposition.get("received_at", "")).strip() or fallback_received_at
+
+    return {
+        "category": category,
+        "data": data,
+        "received_at": received_at,
+    }
 
 
 def _build_run_flow_event_runtime_patch(

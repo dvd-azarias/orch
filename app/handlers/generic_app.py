@@ -10,7 +10,7 @@ from app.schemas.orch import SessionExtraction
 
 def is_callback(payload: dict[str, Any]) -> bool:
     event_name = str(payload.get("event_name", "")).strip().lower()
-    if event_name != "callback":
+    if event_name not in {"callback", "tabulacao"}:
         return False
     entity = str(payload.get("entity", "")).strip()
     return bool(entity)

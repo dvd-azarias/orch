@@ -103,6 +103,31 @@ def test_generic_extraction_generates_external_id_for_blank_external_id() -> Non
     assert extracted.entity_type == "api_request"
 
 
+def test_detect_app_tabulacao_callback_event_as_generic() -> None:
+    payload = {
+        "event_name": "tabulacao",
+        "entity": "30392287848",
+        "result": "tabulacao",
+    }
+    assert detect_app(payload) == "GenericApp"
+
+
+def test_extract_session_fields_tabulacao_callback_event() -> None:
+    payload = {
+        "event_name": "tabulacao",
+        "entity": "30392287848",
+        "entity_type": "person",
+        "entity_address": "5511975620806",
+        "entity_session_id": "GW02-1782489208.18",
+        "result": "tabulacao",
+    }
+    extracted = extract_session_fields("GenericApp", payload)
+    assert extracted.entity == "30392287848"
+    assert extracted.entity_type == "person"
+    assert extracted.entity_address == "5511975620806"
+    assert extracted.entity_session_id == "GW02-1782489208.18"
+
+
 def test_generic_extraction_generates_external_id_when_missing() -> None:
     payload = {"valor_recebido": 100}
     extracted = extract_session_fields("GenericApp", payload)

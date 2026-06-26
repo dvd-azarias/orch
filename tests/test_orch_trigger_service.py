@@ -487,6 +487,12 @@ async def test_process_single_payload_tabulacao_updates_existing_session_by_addr
     async def _fake_persist_tabulacao(*args, **kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("event_name") == "tabulacao"
         assert kwargs.get("event_result") == "tabulacao"
+        event_data = kwargs.get("event_data")
+        assert isinstance(event_data, dict)
+        assert isinstance(event_data.get("disposition"), dict)
+        assert event_data.get("disposition", {}).get("category") == "neutral"
+        assert isinstance(event_data.get("disposition", {}).get("data"), dict)
+        assert event_data.get("disposition", {}).get("data", {}).get("tabulation_code") == "X1"
         return SimpleNamespace(
             id=6650,
             uuid="748d3dcf-df7d-4a16-bbb8-ce4a32c3948f",
@@ -532,6 +538,7 @@ async def test_process_single_payload_tabulacao_updates_existing_session_by_addr
             "entity": "dialer-action-4",
             "entity_type": "person",
             "entity_address": "5511975620806",
+            "disposition_category": "neutral",
             "data": {"tabulation_code": "X1"},
         },
         db_session=_DummySession(),
@@ -566,6 +573,11 @@ async def test_process_single_payload_tabulacao_resumes_recent_session_by_run_fl
         captured["window_hours"] = int(kwargs.get("correlation_window_hours"))
         assert kwargs.get("event_name") == "tabulacao"
         assert kwargs.get("event_result") == "tabulacao"
+        event_data = kwargs.get("event_data")
+        assert isinstance(event_data, dict)
+        assert isinstance(event_data.get("disposition"), dict)
+        assert event_data.get("disposition", {}).get("category") == "neutral"
+        assert event_data.get("disposition", {}).get("data", {}).get("tabulation_code") == "X2"
         return SimpleNamespace(
             id=6651,
             uuid="6f71d342-2711-4f9c-a731-f2b58f7fb07e",
@@ -635,6 +647,7 @@ async def test_process_single_payload_tabulacao_resumes_recent_session_by_run_fl
             "entity": "dialer-action-5",
             "entity_type": "person",
             "entity_address": "5511975620806",
+            "disposition_category": "neutral",
             "data": {"tabulation_code": "X2"},
         },
         db_session=_DummySession(),
