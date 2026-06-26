@@ -94,13 +94,12 @@ def _build_callback_runtime_patch(
     payload: dict[str, Any],
     extracted: dict[str, Any],
 ) -> str:
-    callback_payload = {
-        "event_name": str(payload.get("event_name", "")).strip().lower(),
-        "entity": str(extracted.get("entity", "")).strip(),
-        "result": str(payload.get("result", "")).strip().lower(),
-        "data": payload.get("data") if isinstance(payload.get("data"), dict) else {},
-        "received_at": _now_utc_iso(),
-    }
+    callback_payload = _build_callback_payload(
+        extracted=extracted,
+        event_name=str(payload.get("event_name", "")).strip().lower(),
+        event_result=str(payload.get("result", "")).strip().lower(),
+        event_data=(payload.get("data") if isinstance(payload.get("data"), dict) else {}),
+    )
     runtime_patch = {
         "source_app": app_name,
         "last_event_received_at": _now_utc_iso(),
@@ -109,6 +108,23 @@ def _build_callback_runtime_patch(
         "callback": callback_payload,
     }
     return json.dumps(runtime_patch, ensure_ascii=False)
+
+
+def _build_callback_payload(
+    *,
+    extracted: dict[str, Any],
+    event_name: str,
+    event_result: str,
+    event_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    callback_payload = {
+        "event_name": str(event_name or "").strip().lower(),
+        "entity": str(extracted.get("entity", "")).strip(),
+        "result": str(event_result or "").strip().lower(),
+        "data": event_data if isinstance(event_data, dict) else {},
+        "received_at": _now_utc_iso(),
+    }
+    return callback_payload
 
 
 def _build_run_flow_event_runtime_patch(
@@ -120,13 +136,12 @@ def _build_run_flow_event_runtime_patch(
     event_result: str,
     event_data: dict[str, Any] | None = None,
 ) -> str:
-    callback_payload = {
-        "event_name": str(event_name or "").strip().lower(),
-        "entity": str(extracted.get("entity", "")).strip(),
-        "result": str(event_result or "").strip().lower(),
-        "data": event_data if isinstance(event_data, dict) else {},
-        "received_at": _now_utc_iso(),
-    }
+    callback_payload = _build_callback_payload(
+        extracted=extracted,
+        event_name=event_name,
+        event_result=event_result,
+        event_data=event_data,
+    )
     runtime_patch = {
         "source_app": app_name,
         "last_event_received_at": _now_utc_iso(),
@@ -853,11 +868,18 @@ async def persist_callback_event_for_active_entity(
     extracted: dict[str, Any],
 ) -> PersistResult | None:
     lock_key = f"callback|{flow_uuid}|{entity}"
+    callback_payload = _build_callback_payload(
+        extracted=extracted,
+        event_name=str(payload.get("event_name", "")).strip().lower(),
+        event_result=str(payload.get("result", "")).strip().lower(),
+        event_data=(payload.get("data") if isinstance(payload.get("data"), dict) else {}),
+    )
     runtime_patch_json = _build_callback_runtime_patch(
         app_name=app_name,
         payload=payload,
         extracted=extracted,
     )
+    callback_payload_json = json.dumps(callback_payload, ensure_ascii=False)
     safe_schema = get_current_workspace_schema().replace('"', '""')
 
     await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
@@ -872,7 +894,13 @@ async def persist_callback_event_for_active_entity(
             """
             UPDATE orch_sessions
             SET
-                runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                runtime_variables = jsonb_set(
+                    COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                    '{callbacks_pending}',
+                    COALESCE(COALESCE(runtime_variables, '{}'::jsonb)->'callbacks_pending', '[]'::jsonb)
+                        || CAST(:callback_payload AS jsonb),
+                    true
+                ),
                 callback_at = NOW(),
                 updated_at = NOW()
             WHERE id = (
@@ -893,6 +921,7 @@ async def persist_callback_event_for_active_entity(
             "flow_uuid": flow_uuid,
             "entity": entity,
             "runtime_patch": runtime_patch_json,
+            "callback_payload": callback_payload_json,
         },
     )
     row = update_result.mappings().first()
@@ -919,6 +948,12 @@ async def persist_run_flow_event_for_active_entity_address(
     event_data: dict[str, Any] | None = None,
 ) -> PersistResult | None:
     lock_key = f"run_flow_event|{flow_uuid}|{entity_address}|{event_name}|{event_result}"
+    callback_payload = _build_callback_payload(
+        extracted=extracted,
+        event_name=event_name,
+        event_result=event_result,
+        event_data=event_data,
+    )
     runtime_patch_json = _build_run_flow_event_runtime_patch(
         app_name=app_name,
         payload=payload,
@@ -927,6 +962,7 @@ async def persist_run_flow_event_for_active_entity_address(
         event_result=event_result,
         event_data=event_data,
     )
+    callback_payload_json = json.dumps(callback_payload, ensure_ascii=False)
     safe_schema = get_current_workspace_schema().replace('"', '""')
 
     await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
@@ -941,7 +977,13 @@ async def persist_run_flow_event_for_active_entity_address(
             """
             UPDATE orch_sessions
             SET
-                runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                runtime_variables = jsonb_set(
+                    COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                    '{callbacks_pending}',
+                    COALESCE(COALESCE(runtime_variables, '{}'::jsonb)->'callbacks_pending', '[]'::jsonb)
+                        || CAST(:callback_payload AS jsonb),
+                    true
+                ),
                 callback_at = NOW(),
                 updated_at = NOW()
             WHERE id = (
@@ -963,6 +1005,7 @@ async def persist_run_flow_event_for_active_entity_address(
             "flow_uuid": flow_uuid,
             "entity_address": entity_address,
             "runtime_patch": runtime_patch_json,
+            "callback_payload": callback_payload_json,
         },
     )
     row = update_result.mappings().first()
@@ -991,6 +1034,12 @@ async def persist_run_flow_event_for_recent_entity_address(
     event_data: dict[str, Any] | None = None,
 ) -> PersistResult | None:
     lock_key = f"run_flow_event_recent|{flow_uuid}|{entity_address}|{event_name}|{event_result}"
+    callback_payload = _build_callback_payload(
+        extracted=extracted,
+        event_name=event_name,
+        event_result=event_result,
+        event_data=event_data,
+    )
     runtime_patch_json = _build_run_flow_event_runtime_patch(
         app_name=app_name,
         payload=payload,
@@ -999,6 +1048,7 @@ async def persist_run_flow_event_for_recent_entity_address(
         event_result=event_result,
         event_data=event_data,
     )
+    callback_payload_json = json.dumps(callback_payload, ensure_ascii=False)
     safe_schema = get_current_workspace_schema().replace('"', '""')
     await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
     await db_session.execute(
@@ -1012,7 +1062,13 @@ async def persist_run_flow_event_for_recent_entity_address(
             """
             UPDATE orch_sessions
             SET
-                runtime_variables = COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                runtime_variables = jsonb_set(
+                    COALESCE(runtime_variables, '{}'::jsonb) || CAST(:runtime_patch AS jsonb),
+                    '{callbacks_pending}',
+                    COALESCE(COALESCE(runtime_variables, '{}'::jsonb)->'callbacks_pending', '[]'::jsonb)
+                        || CAST(:callback_payload AS jsonb),
+                    true
+                ),
                 callback_at = NOW(),
                 updated_at = NOW(),
                 state = CASE
@@ -1044,6 +1100,7 @@ async def persist_run_flow_event_for_recent_entity_address(
             "flow_uuid": flow_uuid,
             "entity_address": entity_address,
             "runtime_patch": runtime_patch_json,
+            "callback_payload": callback_payload_json,
             "resume_card_uuid": resume_card_uuid,
             "window_hours": safe_window_hours,
             "state_finished": SESSION_STATE_FINISHED,
