@@ -671,6 +671,60 @@ def test_run_run_flow_maps_hangup_result_to_branch() -> None:
     assert runtime_variables["run_flow_last_callback"]["event_name"] == "hangup"
 
 
+def test_run_run_flow_consumes_callbacks_pending_fifo() -> None:
+    runtime_variables = {
+        "callbacks_pending": [
+            {
+                "event_name": "callback",
+                "entity": "30392287848",
+                "result": "tabulacao",
+                "data": {"reason": "first"},
+                "received_at": "2026-06-26T15:10:00+00:00",
+            },
+            {
+                "event_name": "callback",
+                "entity": "30392287848",
+                "result": "hangup",
+                "data": {"reason": "second"},
+                "received_at": "2026-06-26T15:10:01+00:00",
+            },
+        ]
+    }
+    branch = _run_run_flow(component={"ref_id": "run-flow-1"}, runtime_variables=runtime_variables)
+    assert branch == "tabulacao"
+    assert runtime_variables["run_flow_last_callback"]["result"] == "tabulacao"
+    assert len(runtime_variables["callbacks_pending"]) == 1
+    assert runtime_variables["callbacks_pending"][0]["result"] == "hangup"
+
+
+def test_run_run_flow_consumes_first_pending_after_blocked_at() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "run_flow_waiting": {"blocked_at": "2026-06-26T15:10:00+00:00"},
+        },
+        "callbacks_pending": [
+            {
+                "event_name": "callback",
+                "entity": "30392287848",
+                "result": "hangup",
+                "data": {"reason": "stale"},
+                "received_at": "2026-06-26T15:09:59+00:00",
+            },
+            {
+                "event_name": "callback",
+                "entity": "30392287848",
+                "result": "tabulacao",
+                "data": {"reason": "fresh"},
+                "received_at": "2026-06-26T15:10:01+00:00",
+            },
+        ],
+    }
+    branch = _run_run_flow(component={"ref_id": "run-flow-1"}, runtime_variables=runtime_variables)
+    assert branch == "tabulacao"
+    assert runtime_variables["run_flow_last_callback"]["result"] == "tabulacao"
+    assert runtime_variables["callbacks_pending"] == []
+
+
 def test_should_resume_run_flow_blocking_execution_only_with_new_callback() -> None:
     runtime_variables = {
         "workflow_v2": {
@@ -687,6 +741,33 @@ def test_should_resume_run_flow_blocking_execution_only_with_new_callback() -> N
         "result": "success",
         "data": {},
         "received_at": datetime.now(timezone.utc).isoformat(),
+    }
+    assert _should_resume_run_flow_blocking_execution(runtime_variables) is True
+
+
+def test_should_resume_run_flow_blocking_execution_with_pending_callback_after_block() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_run_flow",
+            "run_flow_waiting": {"blocked_at": "2026-06-26T15:10:00+00:00"},
+        },
+        "callbacks_pending": [
+            {
+                "event_name": "callback",
+                "entity": "30392287848",
+                "result": "hangup",
+                "data": {},
+                "received_at": "2026-06-26T15:09:59+00:00",
+            },
+            {
+                "event_name": "callback",
+                "entity": "30392287848",
+                "result": "tabulacao",
+                "data": {},
+                "received_at": "2026-06-26T15:10:02+00:00",
+            },
+        ],
     }
     assert _should_resume_run_flow_blocking_execution(runtime_variables) is True
 

@@ -321,6 +321,16 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
 
 
 def _extract_callback_payload_from_runtime(runtime_variables: dict[str, Any]) -> dict[str, Any] | None:
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if isinstance(callbacks_pending, list):
+        for callback in callbacks_pending:
+            if not isinstance(callback, dict):
+                continue
+            entity = str(callback.get("entity", "")).strip()
+            result = str(callback.get("result", "")).strip().lower()
+            if entity and result:
+                return callback
+
     callback = runtime_variables.get("callback")
     if not isinstance(callback, dict):
         return None
@@ -345,20 +355,79 @@ def _clear_run_flow_waiting(runtime_variables: dict[str, Any]) -> None:
 
 
 def _is_new_callback_for_waiting_run_flow(runtime_variables: dict[str, Any]) -> bool:
-    callback = _extract_callback_payload_from_runtime(runtime_variables)
-    if not isinstance(callback, dict):
-        return False
-
     workflow_meta = _ensure_workflow_meta(runtime_variables)
     waiting = workflow_meta.get("run_flow_waiting")
     if not isinstance(waiting, dict):
+        return _extract_callback_payload_from_runtime(runtime_variables) is not None
+
+    blocked_at = _parse_iso_datetime(waiting.get("blocked_at"))
+    if blocked_at is None:
         return True
 
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if isinstance(callbacks_pending, list):
+        for callback in callbacks_pending:
+            if not isinstance(callback, dict):
+                continue
+            entity = str(callback.get("entity", "")).strip()
+            result = str(callback.get("result", "")).strip().lower()
+            if not entity or not result:
+                continue
+            callback_at = _parse_iso_datetime(callback.get("received_at"))
+            if callback_at is None or callback_at >= blocked_at:
+                return True
+        return False
+
+    callback = _extract_callback_payload_from_runtime(runtime_variables)
+    if not isinstance(callback, dict):
+        return False
     callback_at = _parse_iso_datetime(callback.get("received_at"))
-    blocked_at = _parse_iso_datetime(waiting.get("blocked_at"))
-    if callback_at is None or blocked_at is None:
+    if callback_at is None:
         return True
     return callback_at >= blocked_at
+
+
+def _consume_callback_for_run_flow(runtime_variables: dict[str, Any]) -> dict[str, Any] | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    waiting = workflow_meta.get("run_flow_waiting")
+    blocked_at = _parse_iso_datetime(waiting.get("blocked_at")) if isinstance(waiting, dict) else None
+
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if isinstance(callbacks_pending, list):
+        selected_callback: dict[str, Any] | None = None
+        retained: list[Any] = []
+        for item in callbacks_pending:
+            if not isinstance(item, dict):
+                continue
+            entity = str(item.get("entity", "")).strip()
+            result = str(item.get("result", "")).strip().lower()
+            if not entity or not result:
+                continue
+            callback_at = _parse_iso_datetime(item.get("received_at"))
+            if blocked_at is not None and callback_at is not None and callback_at < blocked_at:
+                continue
+            if selected_callback is None:
+                selected_callback = item
+                continue
+            retained.append(item)
+
+        if selected_callback is not None:
+            runtime_variables["callbacks_pending"] = retained
+            runtime_variables["callback"] = selected_callback
+            return selected_callback
+
+    callback = runtime_variables.get("callback")
+    if not isinstance(callback, dict):
+        return None
+    entity = str(callback.get("entity", "")).strip()
+    result = str(callback.get("result", "")).strip().lower()
+    if not entity or not result:
+        return None
+    if blocked_at is not None:
+        callback_at = _parse_iso_datetime(callback.get("received_at"))
+        if callback_at is not None and callback_at < blocked_at:
+            return None
+    return callback
 
 
 def _extract_whatsapp_status_signature_from_payload(payload: Any) -> str | None:
@@ -1016,7 +1085,7 @@ def _run_run_flow(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
 ) -> str | None:
-    callback = _extract_callback_payload_from_runtime(runtime_variables)
+    callback = _consume_callback_for_run_flow(runtime_variables)
     if not isinstance(callback, dict):
         return None
     result = str(callback.get("result", "")).strip().lower()
