@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timezone
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 import redis
@@ -20,7 +24,11 @@ from app.services.fileapp_tipo1_manual_pipeline_service import (
     download_file_bytes_for_file_event,
     run_tipo1_manual_pipeline,
 )
-from app.services.fileapp_tipo1_service import resolve_detach_all_files
+from app.services.fileapp_tipo1_service import (
+    extract_monitored_folders_from_orchestration_trigger,
+    resolve_detach_all_files,
+    resolve_mapping_template_uuid,
+)
 from app.services.fileapp_processed_file_service import (
     FileAppProcessedFileError,
     move_processed_file_to_processados,
@@ -165,6 +173,14 @@ def _fileapp_post_process_file_lock_key(*, workspace_uuid: str, file_id: str) ->
     return f"orch:fileapp:post-process:file:{workspace_uuid}:{file_id}"
 
 
+def _fileapp_entrada_rescue_file_lock_key(*, workspace_uuid: str, file_id: str) -> str:
+    return f"orch:fileapp:entrada-rescue:lock:{workspace_uuid}:{file_id}"
+
+
+def _fileapp_entrada_rescue_state_key(*, workspace_uuid: str, file_id: str) -> str:
+    return f"orch:fileapp:entrada-rescue:state:{workspace_uuid}:{file_id}"
+
+
 def _try_acquire_fileapp_post_process_lock(
     redis_client: redis.Redis | None,
     *,
@@ -223,6 +239,300 @@ def _try_acquire_fileapp_post_process_file_lock(
             },
         )
         return True
+
+
+def _try_acquire_fileapp_entrada_rescue_file_lock(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+    lock_seconds: int,
+) -> bool:
+    if redis_client is None:
+        return True
+    try:
+        return bool(
+            redis_client.set(
+                _fileapp_entrada_rescue_file_lock_key(workspace_uuid=workspace_uuid, file_id=file_id),
+                "1",
+                ex=max(1, int(lock_seconds)),
+                nx=True,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_rescue.lock_failed",
+            extra={
+                "event": "orch.fileapp.entrada_rescue.lock_failed",
+                "workspace_uuid": workspace_uuid,
+                "file_id": file_id,
+            },
+        )
+        return True
+
+
+def _get_fileapp_entrada_rescue_attempts(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+) -> int:
+    if redis_client is None:
+        return 0
+    try:
+        raw = redis_client.hget(_fileapp_entrada_rescue_state_key(workspace_uuid=workspace_uuid, file_id=file_id), "attempts")
+        if raw is None:
+            return 0
+        text_value = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+        return int(text_value.strip() or "0")
+    except Exception:
+        return 0
+
+
+def _set_fileapp_entrada_rescue_attempts(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+    attempts: int,
+    ttl_seconds: int,
+) -> None:
+    if redis_client is None:
+        return
+    try:
+        key = _fileapp_entrada_rescue_state_key(workspace_uuid=workspace_uuid, file_id=file_id)
+        redis_client.hset(key, mapping={"attempts": str(max(0, int(attempts)))})
+        redis_client.expire(key, max(60, int(ttl_seconds)))
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_rescue.state_set_failed",
+            extra={
+                "event": "orch.fileapp.entrada_rescue.state_set_failed",
+                "workspace_uuid": workspace_uuid,
+                "file_id": file_id,
+            },
+        )
+
+
+def _clear_fileapp_entrada_rescue_attempts(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.delete(_fileapp_entrada_rescue_state_key(workspace_uuid=workspace_uuid, file_id=file_id))
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_rescue.state_clear_failed",
+            extra={
+                "event": "orch.fileapp.entrada_rescue.state_clear_failed",
+                "workspace_uuid": workspace_uuid,
+                "file_id": file_id,
+            },
+        )
+
+
+def _build_files_api_headers(
+    *,
+    settings,
+    workspace_uuid: str,
+    workspace_api_key: str | None,
+) -> dict[str, str]:
+    headers: dict[str, str] = {"accept": "application/json", "x-application": "files"}
+    client_id = str(settings.arquivos_client_id or "").strip()
+    client_secret = str(settings.arquivos_client_secret or "").strip()
+    has_client_credentials = bool(client_id and client_secret)
+    if has_client_credentials:
+        headers["x-client-id"] = client_id
+        headers["x-client-secret"] = client_secret
+    else:
+        bearer = str(settings.target_core_api_bearer_token or "").strip()
+        if bearer:
+            headers["authorization"] = f"Bearer {bearer}"
+    if str(workspace_uuid or "").strip():
+        headers["x-workspace-uuid"] = str(workspace_uuid).strip()
+    return headers
+
+
+def _parse_file_datetime(raw_value: Any) -> datetime | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, datetime):
+        if raw_value.tzinfo is None:
+            return raw_value.replace(tzinfo=timezone.utc)
+        return raw_value.astimezone(timezone.utc)
+    text_value = str(raw_value).strip()
+    if not text_value:
+        return None
+    normalized = text_value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _list_files_in_folder(
+    *,
+    settings,
+    workspace_uuid: str,
+    folder_path: str,
+    workspace_api_key: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    base_url = str(settings.arquivos_base_url or "").strip().rstrip("/")
+    if not base_url:
+        return []
+
+    headers = _build_files_api_headers(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        workspace_api_key=workspace_api_key,
+    )
+
+    def _fetch_page(offset: int) -> list[dict[str, Any]]:
+        from urllib.parse import urlencode
+
+        bounded_limit = min(100, max(1, int(limit)))
+        params = urlencode({"prefix": f"{folder_path}/", "limit": bounded_limit, "offset": max(0, int(offset))})
+        request = Request(f"{base_url}/files/list?{params}", headers=headers, method="GET")
+        with urlopen(request, timeout=max(2, int(settings.sync_ws_timeout_seconds))) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(body)
+        if isinstance(payload, dict):
+            items = payload.get("items")
+            if not isinstance(items, list):
+                items = payload.get("data")
+            if not isinstance(items, list):
+                items = payload.get("files")
+            return items if isinstance(items, list) else []
+        if isinstance(payload, list):
+            return payload
+        return []
+
+    try:
+        first_page = await asyncio.to_thread(_fetch_page, 0)
+    except HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            error_body = ""
+        logger.exception(
+            "fileapp.entrada_rescue.list_files_failed status=%s folder=%s body=%s",
+            int(exc.code),
+            folder_path,
+            error_body[:500],
+            extra={
+                "event": "orch.fileapp.entrada_rescue.list_files_failed",
+                "workspace_uuid": workspace_uuid,
+                "folder_path": folder_path,
+                "status_code": int(exc.code),
+                "response_body": error_body[:500],
+            },
+        )
+        return []
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError):
+        logger.exception(
+            "fileapp.entrada_rescue.list_files_failed folder=%s",
+            folder_path,
+            extra={
+                "event": "orch.fileapp.entrada_rescue.list_files_failed",
+                "workspace_uuid": workspace_uuid,
+                "folder_path": folder_path,
+            },
+        )
+        return []
+    return first_page
+
+
+async def _fetch_fileapp_rescue_flow_targets(
+    db_session,
+    *,
+    workspace_schema: str,
+) -> list[dict[str, Any]]:
+    safe_schema = workspace_schema.replace('"', '""')
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT
+                f.id::text AS flow_uuid,
+                COALESCE(
+                    cr.definition -> 'canvas_properties' -> 'orchestration_trigger',
+                    dr.definition -> 'canvas_properties' -> 'orchestration_trigger',
+                    '{{}}'::jsonb
+                ) AS orchestration_trigger
+            FROM "{safe_schema}".flow_v2 f
+            LEFT JOIN "{safe_schema}".flow_v2_revision cr ON cr.id = f.current_revision_id
+            LEFT JOIN "{safe_schema}".flow_v2_revision dr ON dr.id = f.draft_revision_id
+            WHERE f.deleted_at IS NULL
+              AND COALESCE(f.is_active, FALSE) = TRUE
+              AND COALESCE(f.status, '') = 'active'
+            ORDER BY f.updated_at DESC
+            """
+        )
+    )
+    rows: list[dict[str, Any]] = []
+    for row in result.mappings().all():
+        flow_uuid = str(row.get("flow_uuid") or "").strip()
+        if not flow_uuid:
+            continue
+        trigger = row.get("orchestration_trigger")
+        if isinstance(trigger, str):
+            try:
+                trigger = json.loads(trigger)
+            except json.JSONDecodeError:
+                trigger = {}
+        folders = sorted(extract_monitored_folders_from_orchestration_trigger(trigger if isinstance(trigger, dict) else {}))
+        if not folders:
+            continue
+        rows.append({"flow_uuid": flow_uuid, "monitored_folders": folders})
+    return rows
+
+
+async def _has_fileapp_ingest_evidence(
+    db_session,
+    *,
+    workspace_schema: str,
+    file_id: str,
+    original_name: str,
+) -> bool:
+    safe_schema = workspace_schema.replace('"', '""')
+    event_check = await db_session.execute(
+        text(
+            f"""
+            SELECT 1
+            FROM "{safe_schema}".arquivos_s3_events
+            WHERE file_id = CAST(:file_id AS uuid)
+               OR file_name = :original_name
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"file_id": file_id, "original_name": original_name},
+    )
+    if event_check.first() is not None:
+        return True
+
+    source_list_check = await db_session.execute(
+        text(
+            f"""
+            SELECT 1
+            FROM "{safe_schema}".source_lists
+            WHERE file_name = :original_name
+               OR file_url ILIKE :file_id_suffix
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"original_name": original_name, "file_id_suffix": f"%{file_id}"},
+    )
+    return source_list_check.first() is not None
 
 
 async def _fetch_fileapp_post_process_candidates(
@@ -568,6 +878,11 @@ def reconcile_fileapp_post_process_task() -> dict[str, int]:
     return asyncio.run(_reconcile_fileapp_post_process_task())
 
 
+@celery_app.task(name="app.tasks.fileapp.reconcile_entrada_rescue", ignore_result=True)
+def reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
+    return asyncio.run(_reconcile_fileapp_entrada_rescue_task())
+
+
 async def _process_fileapp_event_task(*, workspace_uuid: str, flow_uuid: str, payload: dict[str, Any]) -> dict[str, Any]:
     app_name = detect_app(payload)
     if app_name != APP_ARQUIVOS:
@@ -776,29 +1091,75 @@ async def _process_fileapp_tipo1_event_task(
     )
 
     payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-    association_task = associate_fileapp_mailing_task.apply_async(
-        kwargs={
-            "workspace_uuid": safe_workspace_uuid,
-            "flow_uuid": flow_uuid,
-            "mailing_uuid": str(pipeline_result.get("mailing_uuid") or "").strip(),
-            "linked_by": str(payload_file.get("id") or "").strip() or None,
-        },
-        queue=settings.celery_fileapp_mailing_assoc_queue,
-        routing_key=settings.celery_fileapp_mailing_assoc_queue,
-        countdown=max(0, int(settings.celery_fileapp_mailing_assoc_delay_seconds)),
-    )
-    logger.info(
-        "fileapp.tipo1.mailing_association.enqueued",
-        extra={
-            "event": "orch.fileapp.tipo1.mailing_association.enqueued",
-            "workspace_uuid": safe_workspace_uuid,
-            "flow_uuid": flow_uuid,
-            "mailing_uuid": str(pipeline_result.get("mailing_uuid") or "").strip(),
+    mailing_uuid = str(pipeline_result.get("mailing_uuid") or "").strip()
+    association_status: dict[str, Any]
+    try:
+        association_task = associate_fileapp_mailing_task.apply_async(
+            kwargs={
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mailing_uuid": mailing_uuid,
+                "linked_by": str(payload_file.get("id") or "").strip() or None,
+            },
+            queue=settings.celery_fileapp_mailing_assoc_queue,
+            routing_key=settings.celery_fileapp_mailing_assoc_queue,
+            countdown=max(0, int(settings.celery_fileapp_mailing_assoc_delay_seconds)),
+        )
+        association_status = {
+            "status": "queued",
+            "task_id": association_task.id,
             "queue": settings.celery_fileapp_mailing_assoc_queue,
             "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
-            "task_id": association_task.id,
-        },
-    )
+        }
+        logger.info(
+            "fileapp.tipo1.mailing_association.enqueued",
+            extra={
+                "event": "orch.fileapp.tipo1.mailing_association.enqueued",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mailing_uuid": mailing_uuid,
+                "queue": settings.celery_fileapp_mailing_assoc_queue,
+                "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
+                "task_id": association_task.id,
+            },
+        )
+    except Exception as exc:
+        association_status = {
+            "status": "warning",
+            "error_code": "enqueue_failed",
+            "error_message": str(exc),
+            "error_details": {"exception_type": type(exc).__name__},
+        }
+        logger.exception(
+            "fileapp.tipo1.mailing_association.enqueue_failed",
+            extra={
+                "event": "orch.fileapp.tipo1.mailing_association.enqueue_failed",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mailing_uuid": mailing_uuid,
+                "queue": settings.celery_fileapp_mailing_assoc_queue,
+            },
+        )
+        async with session_factory() as alarm_session:
+            bind_workspace_context(safe_workspace_uuid)
+            await persist_alarm(
+                alarm_session,
+                level="warning",
+                code="fileapp_tipo1_mailing_association_enqueue_failed",
+                message="Falha ao enfileirar associacao de mailing no fluxo FileApp tipo1.",
+                details={
+                    "flow_uuid": flow_uuid,
+                    "workspace_uuid": safe_workspace_uuid,
+                    "mailing_uuid": mailing_uuid,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+                flow_uuid=flow_uuid,
+                app_name="ArquivosApp",
+                entity=str(payload_file.get("id") or ""),
+                entity_type="file",
+                entity_address=str(payload_file.get("folder_path") or ""),
+            )
 
     post_process_status: dict[str, Any] | None = None
     try:
@@ -899,12 +1260,7 @@ async def _process_fileapp_tipo1_event_task(
         "flow_uuid": flow_uuid,
         "mapping_template_uuid": mapping_template_uuid,
         "manual_pipeline": pipeline_result,
-        "mailing_association": {
-            "status": "queued",
-            "task_id": association_task.id,
-            "queue": settings.celery_fileapp_mailing_assoc_queue,
-            "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
-        },
+        "mailing_association": association_status,
         "post_process_file": post_process_status or {"status": "skipped"},
     }
 
@@ -1136,6 +1492,286 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
         "moved": moved,
         "quarantined": quarantined,
         "exhausted_quarantined": exhausted_quarantined,
+        "warnings": warnings,
+    }
+
+
+async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
+    settings = get_settings()
+    if not settings.celery_enabled or not settings.celery_fileapp_ingest_enabled:
+        return {
+            "workspaces_scanned": 0,
+            "folders_scanned": 0,
+            "files_scanned": 0,
+            "reingested": 0,
+            "quarantined": 0,
+            "skipped_recent": 0,
+            "skipped_evidence": 0,
+            "warnings": 0,
+        }
+
+    redis_client: redis.Redis | None = None
+    if settings.celery_result_backend:
+        try:
+            redis_client = redis.Redis.from_url(settings.celery_result_backend)
+        except Exception:
+            logger.exception(
+                "fileapp.entrada_rescue.redis_setup_failed",
+                extra={"event": "orch.fileapp.entrada_rescue.redis_setup_failed"},
+            )
+
+    workspace_scope = str(settings.celery_fileapp_entrada_rescue_workspace_uuid or "").strip() or None
+    now_utc = datetime.now(timezone.utc)
+    grace_seconds = max(0, int(settings.celery_fileapp_entrada_rescue_grace_seconds))
+    fail_after_seconds = max(grace_seconds, int(settings.celery_fileapp_entrada_rescue_fail_after_seconds))
+    max_retries = max(1, int(settings.celery_fileapp_entrada_rescue_max_retries))
+    lock_seconds = max(5, int(settings.celery_fileapp_entrada_rescue_lock_seconds))
+    state_ttl_seconds = max(3600, fail_after_seconds * 2)
+
+    session_factory = get_session_factory()
+    workspaces_scanned = 0
+    folders_scanned = 0
+    files_scanned = 0
+    reingested = 0
+    quarantined = 0
+    skipped_recent = 0
+    skipped_evidence = 0
+    warnings = 0
+
+    async with session_factory() as db_session:
+        workspaces = await list_completed_workspaces(db_session)
+        for workspace in workspaces:
+            workspace_uuid = str(workspace.get("workspace_uuid") or "").strip()
+            if not workspace_uuid:
+                continue
+            if workspace_scope and workspace_uuid != workspace_scope:
+                continue
+
+            workspaces_scanned += 1
+            safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
+            workspace_api_key = await fetch_workspace_otima_billing_api_key(
+                db_session,
+                workspace_uuid=safe_workspace_uuid,
+            )
+            try:
+                flow_targets = await _fetch_fileapp_rescue_flow_targets(
+                    db_session,
+                    workspace_schema=workspace_schema,
+                )
+            except Exception:
+                warnings += 1
+                logger.exception(
+                    "fileapp.entrada_rescue.fetch_flow_targets_failed",
+                    extra={
+                        "event": "orch.fileapp.entrada_rescue.fetch_flow_targets_failed",
+                        "workspace_uuid": safe_workspace_uuid,
+                    },
+                )
+                continue
+
+            folder_to_flows: dict[str, list[str]] = {}
+            for flow in flow_targets:
+                flow_uuid = str(flow.get("flow_uuid") or "").strip()
+                for folder in flow.get("monitored_folders") or []:
+                    monitored_folder = str(folder or "").strip().strip("/")
+                    if not monitored_folder:
+                        continue
+                    if monitored_folder.lower().endswith("/processados") or monitored_folder.lower().endswith("/falha"):
+                        continue
+                    folder_to_flows.setdefault(monitored_folder, [])
+                    if flow_uuid not in folder_to_flows[monitored_folder]:
+                        folder_to_flows[monitored_folder].append(flow_uuid)
+
+            for folder_path, flow_uuids in folder_to_flows.items():
+                folders_scanned += 1
+                listed_files = await _list_files_in_folder(
+                    settings=settings,
+                    workspace_uuid=safe_workspace_uuid,
+                    folder_path=folder_path,
+                    workspace_api_key=workspace_api_key,
+                    limit=settings.celery_fileapp_entrada_rescue_batch_size,
+                )
+                for file_item in listed_files:
+                    file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
+                    original_name = str(
+                        file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""
+                    ).strip()
+                    listed_folder = str(file_item.get("folder_path") or file_item.get("path") or folder_path).strip().strip("/")
+                    file_url = str(file_item.get("url") or "").strip()
+                    if not file_id or not original_name:
+                        continue
+                    if listed_folder != folder_path:
+                        continue
+
+                    files_scanned += 1
+                    created_at = _parse_file_datetime(file_item.get("created_at")) or _parse_file_datetime(file_item.get("updated_at"))
+                    if created_at is None:
+                        continue
+                    age_seconds = (now_utc - created_at).total_seconds()
+                    if age_seconds < grace_seconds:
+                        skipped_recent += 1
+                        continue
+
+                    if await _has_fileapp_ingest_evidence(
+                        db_session,
+                        workspace_schema=workspace_schema,
+                        file_id=file_id,
+                        original_name=original_name,
+                    ):
+                        skipped_evidence += 1
+                        _clear_fileapp_entrada_rescue_attempts(
+                            redis_client,
+                            workspace_uuid=safe_workspace_uuid,
+                            file_id=file_id,
+                        )
+                        continue
+
+                    if not _try_acquire_fileapp_entrada_rescue_file_lock(
+                        redis_client,
+                        workspace_uuid=safe_workspace_uuid,
+                        file_id=file_id,
+                        lock_seconds=lock_seconds,
+                    ):
+                        continue
+
+                    attempts = _get_fileapp_entrada_rescue_attempts(
+                        redis_client,
+                        workspace_uuid=safe_workspace_uuid,
+                        file_id=file_id,
+                    )
+                    payload = {
+                        "file": {
+                            "id": file_id,
+                            "folder_path": folder_path,
+                            "original_name": original_name,
+                            "url": file_url,
+                        }
+                    }
+
+                    if age_seconds >= fail_after_seconds and attempts >= max_retries:
+                        try:
+                            quarantine_result = await quarantine_file_to_falha(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                payload=payload,
+                            )
+                            if str(quarantine_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                quarantined += 1
+                                _clear_fileapp_entrada_rescue_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                )
+                            continue
+                        except Exception as exc:
+                            warnings += 1
+                            await persist_alarm(
+                                db_session,
+                                level="warning",
+                                code="fileapp_entrada_rescue_quarantine_failed",
+                                message="Falha ao mover arquivo órfão da entrada para pasta falha.",
+                                details={
+                                    "workspace_uuid": safe_workspace_uuid,
+                                    "file_id": file_id,
+                                    "file_name": original_name,
+                                    "folder_path": folder_path,
+                                    "attempts": attempts,
+                                    "exception_type": type(exc).__name__,
+                                    "exception_message": str(exc),
+                                },
+                                app_name="ArquivosApp",
+                                entity=file_id,
+                                entity_type="file",
+                                entity_address=folder_path,
+                            )
+                            continue
+
+                    enqueued = False
+                    for flow_uuid in flow_uuids:
+                        mapping_template_uuid = await resolve_mapping_template_uuid(
+                            db_session,
+                            workspace_schema=workspace_schema,
+                            flow_uuid=flow_uuid,
+                            payload=payload,
+                        )
+                        if not mapping_template_uuid:
+                            continue
+                        try:
+                            ingest_fileapp_tipo1_event_task.apply_async(
+                                kwargs={
+                                    "workspace_uuid": safe_workspace_uuid,
+                                    "flow_uuid": flow_uuid,
+                                    "payload": payload,
+                                    "mapping_template_uuid": mapping_template_uuid,
+                                },
+                                queue=settings.celery_s3_files_ingest_queue,
+                                routing_key=settings.celery_s3_files_ingest_queue,
+                            )
+                            enqueued = True
+                            reingested += 1
+                            _set_fileapp_entrada_rescue_attempts(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                file_id=file_id,
+                                attempts=attempts + 1,
+                                ttl_seconds=state_ttl_seconds,
+                            )
+                            break
+                        except Exception as exc:
+                            warnings += 1
+                            await persist_alarm(
+                                db_session,
+                                level="warning",
+                                code="fileapp_entrada_rescue_enqueue_failed",
+                                message="Falha ao reingestar arquivo órfão da entrada.",
+                                details={
+                                    "workspace_uuid": safe_workspace_uuid,
+                                    "flow_uuid": flow_uuid,
+                                    "file_id": file_id,
+                                    "file_name": original_name,
+                                    "folder_path": folder_path,
+                                    "attempts": attempts,
+                                    "exception_type": type(exc).__name__,
+                                    "exception_message": str(exc),
+                                },
+                                flow_uuid=flow_uuid,
+                                app_name="ArquivosApp",
+                                entity=file_id,
+                                entity_type="file",
+                                entity_address=folder_path,
+                            )
+                    if not enqueued:
+                        _set_fileapp_entrada_rescue_attempts(
+                            redis_client,
+                            workspace_uuid=safe_workspace_uuid,
+                            file_id=file_id,
+                            attempts=attempts + 1,
+                            ttl_seconds=state_ttl_seconds,
+                        )
+
+    logger.info(
+        "fileapp.entrada_rescue.finished",
+        extra={
+            "event": "orch.fileapp.entrada_rescue.finished",
+            "workspace_scope": workspace_scope,
+            "workspaces_scanned": workspaces_scanned,
+            "folders_scanned": folders_scanned,
+            "files_scanned": files_scanned,
+            "reingested": reingested,
+            "quarantined": quarantined,
+            "skipped_recent": skipped_recent,
+            "skipped_evidence": skipped_evidence,
+            "warnings": warnings,
+        },
+    )
+    return {
+        "workspaces_scanned": workspaces_scanned,
+        "folders_scanned": folders_scanned,
+        "files_scanned": files_scanned,
+        "reingested": reingested,
+        "quarantined": quarantined,
+        "skipped_recent": skipped_recent,
+        "skipped_evidence": skipped_evidence,
         "warnings": warnings,
     }
 

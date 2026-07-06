@@ -61,6 +61,14 @@ class Settings:
     celery_fileapp_post_process_reconcile_batch_size: int
     celery_fileapp_post_process_reconcile_workspace_uuid: str | None
     celery_fileapp_post_process_reconcile_cooldown_seconds: int
+    celery_beat_fileapp_entrada_rescue_enabled: bool
+    celery_fileapp_entrada_rescue_interval_seconds: int
+    celery_fileapp_entrada_rescue_workspace_uuid: str | None
+    celery_fileapp_entrada_rescue_batch_size: int
+    celery_fileapp_entrada_rescue_grace_seconds: int
+    celery_fileapp_entrada_rescue_fail_after_seconds: int
+    celery_fileapp_entrada_rescue_max_retries: int
+    celery_fileapp_entrada_rescue_lock_seconds: int
     celery_reconcile_pending_events_interval_seconds: int
     celery_reconcile_pending_events_batch_size: int
     celery_reconcile_pending_events_stale_seconds: int
@@ -335,6 +343,38 @@ def get_settings() -> Settings:
         ),
         celery_fileapp_post_process_reconcile_cooldown_seconds=_read_env_int(
             "CELERY_FILEAPP_POST_PROCESS_RECONCILE_COOLDOWN_SECONDS",
+            120,
+        ),
+        celery_beat_fileapp_entrada_rescue_enabled=_read_env_bool(
+            "CELERY_BEAT_FILEAPP_ENTRADA_RESCUE_ENABLED",
+            False,
+        ),
+        celery_fileapp_entrada_rescue_interval_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_INTERVAL_SECONDS",
+            60,
+        ),
+        celery_fileapp_entrada_rescue_workspace_uuid=_read_env_optional(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_WORKSPACE_UUID",
+            _read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
+        ),
+        celery_fileapp_entrada_rescue_batch_size=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_BATCH_SIZE",
+            100,
+        ),
+        celery_fileapp_entrada_rescue_grace_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_GRACE_SECONDS",
+            600,
+        ),
+        celery_fileapp_entrada_rescue_fail_after_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_FAIL_AFTER_SECONDS",
+            3600,
+        ),
+        celery_fileapp_entrada_rescue_max_retries=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_MAX_RETRIES",
+            3,
+        ),
+        celery_fileapp_entrada_rescue_lock_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_RESCUE_LOCK_SECONDS",
             120,
         ),
         celery_reconcile_pending_events_interval_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_INTERVAL_SECONDS", 15),
