@@ -13,6 +13,7 @@ from app.tasks.fileapp_ingest_tasks import (
     _list_files_in_folder,
     _process_fileapp_tipo1_event_task,
     ingest_fileapp_event_task,
+    process_fileapp_tipo1_event_task,
 )
 
 
@@ -291,6 +292,52 @@ async def test_list_files_in_folder_accepts_files_key(monkeypatch) -> None:
 
     assert len(files) == 1
     assert files[0]["id"] == "f1"
+
+
+def test_process_tipo1_wrapper_marks_inflight_then_done(monkeypatch) -> None:
+    state_changes: list[str] = []
+
+    async def _fake_process(**_kwargs):  # type: ignore[no-untyped-def]
+        return {"status": "done"}
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._process_fileapp_tipo1_event_task", _fake_process)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._persist_process_tipo1_rescue_flow_state",
+        lambda **kwargs: state_changes.append(str(kwargs["state"])),
+    )
+
+    result = process_fileapp_tipo1_event_task.run(
+        workspace_uuid="w1",
+        flow_uuid="flow-1",
+        payload={"file": {"id": "f-1", "original_name": "x.csv", "folder_path": "ACAN_CONTATOS/entrada"}},
+        mapping_template_uuid="tmpl-1",
+    )
+
+    assert result["status"] == "done"
+    assert state_changes == ["in_flight", "done"]
+
+
+def test_process_tipo1_wrapper_marks_inflight_then_failed(monkeypatch) -> None:
+    state_changes: list[str] = []
+
+    async def _fake_process(**_kwargs):  # type: ignore[no-untyped-def]
+        return {"status": "failed", "reason": "unexpected"}
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._process_fileapp_tipo1_event_task", _fake_process)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._persist_process_tipo1_rescue_flow_state",
+        lambda **kwargs: state_changes.append(str(kwargs["state"])),
+    )
+
+    result = process_fileapp_tipo1_event_task.run(
+        workspace_uuid="w1",
+        flow_uuid="flow-1",
+        payload={"file": {"id": "f-2", "original_name": "x.csv", "folder_path": "ACAN_CONTATOS/entrada"}},
+        mapping_template_uuid="tmpl-1",
+    )
+
+    assert result["status"] == "failed"
+    assert state_changes == ["in_flight", "failed"]
 
 
 @pytest.mark.asyncio
