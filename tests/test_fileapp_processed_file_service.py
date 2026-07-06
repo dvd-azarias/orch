@@ -180,6 +180,77 @@ async def test_move_processed_file_to_processados_retries_transient_404_on_move(
 
 
 @pytest.mark.asyncio
+async def test_move_processed_file_to_processados_fallback_reupload_when_404_persists(monkeypatch) -> None:
+    now_stub = "20260622T204500Z"
+    sleep_calls: list[float] = []
+    patch_calls = {"count": 0}
+    multipart_calls: list[tuple[str, str]] = []
+
+    def _fake_request_json(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "POST" and url.endswith("/files/folders"):
+            return 201, "{}"
+        if method == "PATCH":
+            patch_calls["count"] += 1
+            raise _http_error(404)
+        raise AssertionError(f"Unexpected call: {method} {url} payload={payload}")
+
+    def _fake_request_bytes(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        assert url == "https://storage.example/file.csv"
+        assert headers["x-client-id"] == "sync-client-id"
+        return b"n;f\nx;y\n"
+
+    def _fake_request_multipart(*, url, headers, file_name, file_bytes, folder_path, timeout_seconds):  # type: ignore[no-untyped-def]
+        multipart_calls.append((url, file_name))
+        assert folder_path == "mailings/AeC/tim-portabilidade/processados"
+        assert file_bytes == b"n;f\nx;y\n"
+        return 201, '{"data":{"id":"new-file-id"}}'
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    class _Now:
+        @staticmethod
+        def now(tz=None):  # type: ignore[no-untyped-def]
+            class _DT:
+                @staticmethod
+                def strftime(fmt: str) -> str:
+                    assert fmt == "%Y%m%dT%H%M%SZ"
+                    return now_stub
+
+            return _DT()
+
+    class _FallbackSettings(_DummySettings):
+        sync_ws_client_id = "sync-client-id"
+        sync_ws_client_secret = "sync-client-secret"
+
+    monkeypatch.setattr(service, "_request_json", _fake_request_json)
+    monkeypatch.setattr(service, "_request_bytes", _fake_request_bytes)
+    monkeypatch.setattr(service, "_request_multipart", _fake_request_multipart)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(service, "datetime", _Now)
+
+    result = await service.move_processed_file_to_processados(
+        settings=_FallbackSettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        payload={
+            "file": {
+                "id": "db1af3c8-fb8c-42dc-8e0b-68c274d5cf59",
+                "folder_path": "mailings/AeC/tim-portabilidade",
+                "original_name": "contato_deivid_tim_silver.csv",
+                "url": "https://storage.example/file.csv",
+            }
+        },
+    )
+
+    assert result["status"] == "done"
+    assert result["target_name"] == f"contato_deivid_tim_silver_{now_stub}.csv"
+    assert result["fallback_reupload"]["status"] == "done"
+    assert multipart_calls[0][0].endswith("/files/upload")
+    assert patch_calls["count"] == 5
+    assert sleep_calls == [15.0, 15.0, 15.0, 15.0]
+
+
+@pytest.mark.asyncio
 async def test_move_processed_file_to_processados_skips_when_already_processed(monkeypatch) -> None:
     called = {"count": 0}
 
@@ -236,8 +307,55 @@ async def test_move_processed_file_to_processados_raises_when_move_fails(monkeyp
             },
         )
 
-    assert exc_info.value.code == "move_file_to_processados_failed"
-    assert len(sleep_calls) == 4
+    assert exc_info.value.code == "move_file_to_falha_failed"
+    assert len(sleep_calls) == 8
+
+
+@pytest.mark.asyncio
+async def test_move_processed_file_to_processados_falls_back_to_falha_folder(monkeypatch) -> None:
+    now_stub = "20260622T204500Z"
+    calls: list[tuple[str, str, dict]] = []
+
+    def _fake_request_json(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        calls.append((method, url, payload))
+        if method == "POST" and url.endswith("/files/folders"):
+            return 201, "{}"
+        if method == "PATCH" and payload.get("folder_path") == "mailings/AeC/tim-portabilidade/processados":
+            raise _http_error(500)
+        if method == "PATCH" and payload.get("folder_path") == "mailings/AeC/tim-portabilidade/falha":
+            return 200, "{}"
+        raise AssertionError(f"Unexpected call: {method} {url} payload={payload}")
+
+    class _Now:
+        @staticmethod
+        def now(tz=None):  # type: ignore[no-untyped-def]
+            class _DT:
+                @staticmethod
+                def strftime(fmt: str) -> str:
+                    assert fmt == "%Y%m%dT%H%M%SZ"
+                    return now_stub
+
+            return _DT()
+
+    monkeypatch.setattr(service, "_request_json", _fake_request_json)
+    monkeypatch.setattr(service, "datetime", _Now)
+
+    result = await service.move_processed_file_to_processados(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        payload={
+            "file": {
+                "id": "db1af3c8-fb8c-42dc-8e0b-68c274d5cf59",
+                "folder_path": "mailings/AeC/tim-portabilidade",
+                "original_name": "contato_deivid_tim_silver.csv",
+            }
+        },
+    )
+
+    assert result["status"] == "done"
+    assert result["target_folder"] == "mailings/AeC/tim-portabilidade/falha"
+    assert result["quarantine_folder"] == "falha"
+    assert result["processados_error"]["code"] == "move_file_to_processados_failed"
 
 
 def test_build_rename_candidate_avoids_double_timestamp() -> None:

@@ -329,89 +329,6 @@ async def _process_fileapp_tipo1_event_task(
             "mapping_template_uuid": mapping_template_uuid,
         }
 
-    upload_file_name = original_name
-    try:
-        post_process_result = await move_processed_file_to_processados(
-            settings=settings,
-            workspace_uuid=safe_workspace_uuid,
-            payload=payload,
-        )
-        upload_file_name = str(post_process_result.get("target_name") or "").strip() or original_name
-        logger.info(
-            "fileapp.tipo1.post_process_file.done",
-            extra={
-                "event": "orch.fileapp.tipo1.post_process_file.done",
-                "workspace_uuid": safe_workspace_uuid,
-                "flow_uuid": flow_uuid,
-                "result": post_process_result,
-                "upload_file_name": upload_file_name,
-            },
-        )
-    except FileAppProcessedFileError as exc:
-        payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-        logger.warning(
-            "fileapp.tipo1.post_process_file.failed",
-            extra={
-                "event": "orch.fileapp.tipo1.post_process_file.failed",
-                "workspace_uuid": safe_workspace_uuid,
-                "flow_uuid": flow_uuid,
-                "code": exc.code,
-                "error_message": exc.message,
-                "details": exc.details,
-            },
-        )
-        async with session_factory() as alarm_session:
-            bind_workspace_context(safe_workspace_uuid)
-            await persist_alarm(
-                alarm_session,
-                level="warning",
-                code="fileapp_tipo1_post_process_file_failed",
-                message="Falha ao mover/renomear arquivo para processados após ingestão tipo1.",
-                details={
-                    "flow_uuid": flow_uuid,
-                    "workspace_uuid": safe_workspace_uuid,
-                    "error_code": exc.code,
-                    "error_message": exc.message,
-                    "error_details": exc.details,
-                },
-                flow_uuid=flow_uuid,
-                app_name="ArquivosApp",
-                entity=str(payload_file.get("id") or ""),
-                entity_type="file",
-                entity_address=str(payload_file.get("folder_path") or ""),
-            )
-        raise
-    except Exception as exc:
-        payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-        logger.exception(
-            "fileapp.tipo1.post_process_file.unexpected_error",
-            extra={
-                "event": "orch.fileapp.tipo1.post_process_file.unexpected_error",
-                "workspace_uuid": safe_workspace_uuid,
-                "flow_uuid": flow_uuid,
-            },
-        )
-        async with session_factory() as alarm_session:
-            bind_workspace_context(safe_workspace_uuid)
-            await persist_alarm(
-                alarm_session,
-                level="warning",
-                code="fileapp_tipo1_post_process_file_unexpected_error",
-                message="Erro inesperado no pós-processamento de arquivo tipo1 (move/rename).",
-                details={
-                    "flow_uuid": flow_uuid,
-                    "workspace_uuid": safe_workspace_uuid,
-                    "exception_type": type(exc).__name__,
-                    "exception_message": str(exc),
-                },
-                flow_uuid=flow_uuid,
-                app_name="ArquivosApp",
-                entity=str(payload_file.get("id") or ""),
-                entity_type="file",
-                entity_address=str(payload_file.get("folder_path") or ""),
-            )
-        raise
-
     try:
         pipeline_result = await run_tipo1_manual_pipeline(
             settings=settings,
@@ -424,7 +341,7 @@ async def _process_fileapp_tipo1_event_task(
             mailing_description=mailing_description,
             defer_step7_link_flow=True,
             predownloaded_file_bytes=downloaded_file_bytes,
-            upload_file_name_override=upload_file_name,
+            upload_file_name_override=original_name,
         )
     except FileAppTipo1ManualPipelineError as exc:
         logger.warning(
@@ -475,7 +392,7 @@ async def _process_fileapp_tipo1_event_task(
             "flow_uuid": flow_uuid,
             "mapping_template_uuid": mapping_template_uuid,
             "manual_pipeline": pipeline_result,
-            "upload_file_name": upload_file_name,
+            "upload_file_name": original_name,
         },
     )
 
@@ -503,6 +420,100 @@ async def _process_fileapp_tipo1_event_task(
             "task_id": association_task.id,
         },
     )
+
+    post_process_status: dict[str, Any] | None = None
+    try:
+        post_process_result = await move_processed_file_to_processados(
+            settings=settings,
+            workspace_uuid=safe_workspace_uuid,
+            payload=payload,
+        )
+        post_process_status = {
+            "status": "done",
+            "result": post_process_result,
+        }
+        logger.info(
+            "fileapp.tipo1.post_process_file.done",
+            extra={
+                "event": "orch.fileapp.tipo1.post_process_file.done",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "result": post_process_result,
+            },
+        )
+    except FileAppProcessedFileError as exc:
+        post_process_status = {
+            "status": "warning",
+            "error_code": exc.code,
+            "error_message": exc.message,
+            "error_details": exc.details,
+        }
+        logger.warning(
+            "fileapp.tipo1.post_process_file.failed",
+            extra={
+                "event": "orch.fileapp.tipo1.post_process_file.failed",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "code": exc.code,
+                "error_message": exc.message,
+                "details": exc.details,
+            },
+        )
+        async with session_factory() as alarm_session:
+            bind_workspace_context(safe_workspace_uuid)
+            await persist_alarm(
+                alarm_session,
+                level="warning",
+                code="fileapp_tipo1_post_process_file_failed",
+                message="Falha ao mover/renomear arquivo para processados após ingestão tipo1.",
+                details={
+                    "flow_uuid": flow_uuid,
+                    "workspace_uuid": safe_workspace_uuid,
+                    "error_code": exc.code,
+                    "error_message": exc.message,
+                    "error_details": exc.details,
+                },
+                flow_uuid=flow_uuid,
+                app_name="ArquivosApp",
+                entity=str(payload_file.get("id") or ""),
+                entity_type="file",
+                entity_address=str(payload_file.get("folder_path") or ""),
+            )
+    except Exception as exc:
+        post_process_status = {
+            "status": "warning",
+            "error_code": "unexpected_error",
+            "error_message": str(exc),
+            "error_details": {"exception_type": type(exc).__name__},
+        }
+        logger.exception(
+            "fileapp.tipo1.post_process_file.unexpected_error",
+            extra={
+                "event": "orch.fileapp.tipo1.post_process_file.unexpected_error",
+                "workspace_uuid": safe_workspace_uuid,
+                "flow_uuid": flow_uuid,
+            },
+        )
+        async with session_factory() as alarm_session:
+            bind_workspace_context(safe_workspace_uuid)
+            await persist_alarm(
+                alarm_session,
+                level="warning",
+                code="fileapp_tipo1_post_process_file_unexpected_error",
+                message="Erro inesperado no pós-processamento de arquivo tipo1 (move/rename).",
+                details={
+                    "flow_uuid": flow_uuid,
+                    "workspace_uuid": safe_workspace_uuid,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+                flow_uuid=flow_uuid,
+                app_name="ArquivosApp",
+                entity=str(payload_file.get("id") or ""),
+                entity_type="file",
+                entity_address=str(payload_file.get("folder_path") or ""),
+            )
+
     return {
         "status": "done",
         "workspace_uuid": workspace_uuid,
@@ -515,6 +526,7 @@ async def _process_fileapp_tipo1_event_task(
             "queue": settings.celery_fileapp_mailing_assoc_queue,
             "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
         },
+        "post_process_file": post_process_status or {"status": "skipped"},
     }
 
 

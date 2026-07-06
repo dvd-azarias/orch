@@ -41,7 +41,7 @@ def test_ingest_fileapp_event_task_enqueues_processing(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_tipo1_event_raises_when_post_process_fails(monkeypatch) -> None:
+async def test_process_tipo1_event_continues_when_post_process_fails(monkeypatch) -> None:
     class _DummySessionCtx:
         async def __aenter__(self):  # type: ignore[no-untyped-def]
             return object()
@@ -52,6 +52,9 @@ async def test_process_tipo1_event_raises_when_post_process_fails(monkeypatch) -
     class _DummySettings:
         celery_fileapp_mailing_assoc_queue = "q.mail.assoc"
         celery_fileapp_mailing_assoc_delay_seconds = 0
+
+    class _DummyAssocTask:
+        id = "assoc-123"
 
     persisted: dict[str, object] = {}
 
@@ -72,6 +75,9 @@ async def test_process_tipo1_event_raises_when_post_process_fails(monkeypatch) -
 
     async def _fake_persist_alarm(db_session, **kwargs):  # type: ignore[no-untyped-def]
         persisted.update(kwargs)
+
+    def _fake_apply_async(*, kwargs, queue, routing_key, countdown):  # type: ignore[no-untyped-def]
+        return _DummyAssocTask()
 
     monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.get_settings", lambda: _DummySettings())
     monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.get_session_factory", _fake_get_session_factory)
@@ -95,25 +101,30 @@ async def test_process_tipo1_event_raises_when_post_process_fails(monkeypatch) -
         "app.tasks.fileapp_ingest_tasks.move_processed_file_to_processados",
         _fake_move_processed,
     )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.associate_fileapp_mailing_task.apply_async",
+        _fake_apply_async,
+    )
     monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.persist_alarm", _fake_persist_alarm)
     monkeypatch.setattr(
         "app.tasks.fileapp_ingest_tasks.bind_workspace_context",
         lambda workspace_uuid: (workspace_uuid, "ws_schema"),
     )
 
-    with pytest.raises(FileAppProcessedFileError):
-        await _process_fileapp_tipo1_event_task(
-            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
-            flow_uuid="706c6fef-85f2-4276-bcfd-eb28f75acde2",
-            payload={"file": {"id": "f1", "original_name": "x.csv", "folder_path": "mailings/dev"}},
-            mapping_template_uuid="6fa7bde7-fa2f-49fd-9de8-d1969f6e835b",
-        )
+    result = await _process_fileapp_tipo1_event_task(
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="706c6fef-85f2-4276-bcfd-eb28f75acde2",
+        payload={"file": {"id": "f1", "original_name": "x.csv", "folder_path": "mailings/dev"}},
+        mapping_template_uuid="6fa7bde7-fa2f-49fd-9de8-d1969f6e835b",
+    )
 
+    assert result["status"] == "done"
+    assert result["post_process_file"]["status"] == "warning"
     assert persisted["code"] == "fileapp_tipo1_post_process_file_failed"
 
 
 @pytest.mark.asyncio
-async def test_process_tipo1_event_downloads_then_moves_then_uploads_with_new_name(monkeypatch) -> None:
+async def test_process_tipo1_event_runs_pipeline_then_post_processes_file(monkeypatch) -> None:
     class _DummySessionCtx:
         async def __aenter__(self):  # type: ignore[no-untyped-def]
             return object()
@@ -197,6 +208,6 @@ async def test_process_tipo1_event_downloads_then_moves_then_uploads_with_new_na
     )
 
     assert result["status"] == "done"
-    assert call_order == ["download", "move", "pipeline", "associate"]
+    assert call_order == ["download", "pipeline", "associate", "move"]
     assert pipeline_kwargs_seen["predownloaded_file_bytes"] == b"cpf,telefone\n1,2\n"
-    assert pipeline_kwargs_seen["upload_file_name_override"] == "contato_deivid_tim_silver_20260622T230000Z.csv"
+    assert pipeline_kwargs_seen["upload_file_name_override"] == "x.csv"
