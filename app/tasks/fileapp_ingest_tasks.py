@@ -165,6 +165,13 @@ def _extract_file_id_from_url(file_url: str) -> str | None:
     return file_id or None
 
 
+def _normalize_folder_path(value: str) -> str:
+    normalized = str(value or "").strip().replace("\\", "/")
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    return normalized.strip("/")
+
+
 def _fileapp_post_process_lock_key(*, workspace_uuid: str, source_list_id: int) -> str:
     return f"orch:fileapp:post-process:{workspace_uuid}:{source_list_id}"
 
@@ -590,6 +597,36 @@ async def _list_files_in_folder(
     return first_page
 
 
+async def _fetch_file_metadata_by_id(
+    *,
+    settings,
+    workspace_uuid: str,
+    workspace_api_key: str | None,
+    file_id: str,
+) -> dict[str, Any] | None:
+    base_url = str(settings.arquivos_base_url or "").strip().rstrip("/")
+    if not base_url:
+        return None
+    headers = _build_files_api_headers(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        workspace_api_key=workspace_api_key,
+    )
+    request = Request(f"{base_url}/files/metadata/{file_id}", headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=max(2, int(settings.sync_ws_timeout_seconds))) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(body)
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return data
+        return payload
+    return None
+
+
 async def _fetch_fileapp_rescue_flow_targets(
     db_session,
     *,
@@ -640,20 +677,27 @@ async def _has_fileapp_ingest_evidence(
     workspace_schema: str,
     file_id: str,
     original_name: str,
+    monitored_folder: str,
 ) -> bool:
     safe_schema = workspace_schema.replace('"', '""')
+    normalized_folder = _normalize_folder_path(monitored_folder).lower()
+    if not normalized_folder:
+        return False
     event_check = await db_session.execute(
         text(
             f"""
             SELECT 1
             FROM "{safe_schema}".arquivos_s3_events
-            WHERE file_id = CAST(:file_id AS uuid)
-               OR file_name = :original_name
+            WHERE (
+                    file_id = CAST(:file_id AS uuid)
+                    OR file_name = :original_name
+                  )
+              AND lower(trim(BOTH '/' FROM COALESCE(folder_path, ''))) = :folder_path
             ORDER BY created_at DESC
             LIMIT 1
             """
         ),
-        {"file_id": file_id, "original_name": original_name},
+        {"file_id": file_id, "original_name": original_name, "folder_path": normalized_folder},
     )
     if event_check.first() is not None:
         return True
@@ -663,13 +707,16 @@ async def _has_fileapp_ingest_evidence(
             f"""
             SELECT 1
             FROM "{safe_schema}".source_lists
-            WHERE file_name = :original_name
-               OR file_url ILIKE :file_id_suffix
+            WHERE file_url ILIKE :file_id_suffix
+               OR (
+                   file_name = :original_name
+                   AND lower(trim(BOTH '/' FROM COALESCE(file_path, ''))) = :folder_path
+               )
             ORDER BY created_at DESC
             LIMIT 1
             """
         ),
-        {"original_name": original_name, "file_id_suffix": f"%{file_id}"},
+        {"original_name": original_name, "file_id_suffix": f"%{file_id}", "folder_path": normalized_folder},
     )
     return source_list_check.first() is not None
 
@@ -693,7 +740,6 @@ async def _fetch_fileapp_post_process_candidates(
             FROM "{safe_schema}".source_lists
             WHERE UPPER(COALESCE(status, '')) = 'PROCESSED'
               AND COALESCE(file_name, '') <> ''
-              AND COALESCE(file_path, '') <> ''
               AND COALESCE(file_url, '') <> ''
             ORDER BY COALESCE(updated_at, created_at) DESC
             LIMIT :limit
@@ -1549,8 +1595,21 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
                 if not file_id:
                     continue
 
-                file_path = str(item["file_path"] or "").strip().strip("/")
+                file_path = _normalize_folder_path(str(item.get("file_path") or ""))
+                if not file_path:
+                    metadata = await _fetch_file_metadata_by_id(
+                        settings=settings,
+                        workspace_uuid=safe_workspace_uuid,
+                        workspace_api_key=workspace_api_key,
+                        file_id=file_id,
+                    )
+                    if isinstance(metadata, dict):
+                        file_path = _normalize_folder_path(str(metadata.get("folder_path") or ""))
+                if not file_path:
+                    continue
                 flow_uuids = folder_to_flows.get(file_path, [])
+                if not flow_uuids:
+                    continue
                 mailing_uuid = str(item.get("mailing_uuid") or "").strip()
                 if flow_uuids and mailing_uuid:
                     association_blocked = False
@@ -1627,7 +1686,7 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
                 payload = {
                     "file": {
                         "id": file_id,
-                        "folder_path": item["file_path"],
+                        "folder_path": file_path,
                         "original_name": item["file_name"],
                         "url": item["file_url"],
                     }
@@ -1659,7 +1718,7 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
                         app_name="ArquivosApp",
                         entity=str(source_list_id),
                         entity_type="source_list",
-                        entity_address=str(item["file_path"]),
+                        entity_address=file_path,
                     )
                 except Exception as exc:
                     warnings += 1
@@ -1677,7 +1736,7 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
                         app_name="ArquivosApp",
                         entity=str(source_list_id),
                         entity_type="source_list",
-                        entity_address=str(item["file_path"]),
+                        entity_address=file_path,
                     )
 
             exhausted_candidates = await _fetch_exhausted_quarantine_candidates(
@@ -1904,6 +1963,7 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                         workspace_schema=workspace_schema,
                         file_id=file_id,
                         original_name=original_name,
+                        monitored_folder=folder_path,
                     ):
                         skipped_evidence += 1
                         for flow_uuid in flow_uuids:
