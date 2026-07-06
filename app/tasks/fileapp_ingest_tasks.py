@@ -686,6 +686,7 @@ async def _fetch_fileapp_post_process_candidates(
             f"""
             SELECT
                 id,
+                public_id::text AS mailing_uuid,
                 file_name,
                 file_path,
                 file_url
@@ -705,6 +706,7 @@ async def _fetch_fileapp_post_process_candidates(
         rows.append(
             {
                 "id": int(row["id"]),
+                "mailing_uuid": str(row["mailing_uuid"] or "").strip(),
                 "file_name": str(row["file_name"] or "").strip(),
                 "file_path": str(row["file_path"] or "").strip(),
                 "file_url": str(row["file_url"] or "").strip(),
@@ -1464,6 +1466,8 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
     workspaces_scanned = 0
     candidates_scanned = 0
     moved = 0
+    associations_done = 0
+    associations_blocked = 0
     quarantined = 0
     exhausted_quarantined = 0
     warnings = 0
@@ -1493,6 +1497,39 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
 
             workspaces_scanned += 1
             safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
+            workspace_api_key = await fetch_workspace_otima_billing_api_key(
+                db_session,
+                workspace_uuid=safe_workspace_uuid,
+            )
+            folder_to_flows: dict[str, list[str]] = {}
+            try:
+                flow_targets = await _fetch_fileapp_rescue_flow_targets(
+                    db_session,
+                    workspace_schema=workspace_schema,
+                )
+                for flow in flow_targets:
+                    flow_uuid = str(flow.get("flow_uuid") or "").strip()
+                    if not flow_uuid:
+                        continue
+                    for folder in flow.get("monitored_folders") or []:
+                        monitored_folder = str(folder or "").strip().strip("/")
+                        if not monitored_folder:
+                            continue
+                        if monitored_folder.lower().endswith("/processados") or monitored_folder.lower().endswith("/falha"):
+                            continue
+                        folder_to_flows.setdefault(monitored_folder, [])
+                        if flow_uuid not in folder_to_flows[monitored_folder]:
+                            folder_to_flows[monitored_folder].append(flow_uuid)
+            except Exception:
+                warnings += 1
+                logger.exception(
+                    "fileapp.post_process_reconcile.fetch_flow_targets_failed",
+                    extra={
+                        "event": "orch.fileapp.post_process_reconcile.fetch_flow_targets_failed",
+                        "workspace_uuid": safe_workspace_uuid,
+                    },
+                )
+
             candidates = await _fetch_fileapp_post_process_candidates(
                 db_session,
                 workspace_schema=workspace_schema,
@@ -1511,6 +1548,80 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
                 file_id = _extract_file_id_from_url(item["file_url"])
                 if not file_id:
                     continue
+
+                file_path = str(item["file_path"] or "").strip().strip("/")
+                flow_uuids = folder_to_flows.get(file_path, [])
+                mailing_uuid = str(item.get("mailing_uuid") or "").strip()
+                if flow_uuids and mailing_uuid:
+                    association_blocked = False
+                    for flow_uuid in flow_uuids:
+                        try:
+                            detach_all_files = await resolve_detach_all_files(
+                                db_session,
+                                workspace_schema=workspace_schema,
+                                flow_uuid=flow_uuid,
+                            )
+                            association_result = await associate_mailing_to_flow_from_file_event(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                mailing_uuid=mailing_uuid,
+                                linked_by=file_id,
+                                workspace_api_key=workspace_api_key,
+                                detach_all_files=detach_all_files,
+                            )
+                            association_status = str(association_result.get("status") or "").strip().lower()
+                            if association_status in {"error", "pending"}:
+                                association_blocked = True
+                                warnings += 1
+                                await persist_alarm(
+                                    db_session,
+                                    level="warning",
+                                    code="fileapp_post_process_reconcile_association_blocked",
+                                    message="Import concluído, mas vínculo de mailing ao flow ainda não finalizado.",
+                                    details={
+                                        "workspace_uuid": safe_workspace_uuid,
+                                        "flow_uuid": flow_uuid,
+                                        "source_list_id": source_list_id,
+                                        "file_id": file_id,
+                                        "mailing_uuid": mailing_uuid,
+                                        "association_result": association_result,
+                                    },
+                                    flow_uuid=flow_uuid,
+                                    app_name="ArquivosApp",
+                                    entity=file_id,
+                                    entity_type="file",
+                                    entity_address=file_path,
+                                )
+                                break
+                            associations_done += 1
+                        except Exception as exc:
+                            association_blocked = True
+                            warnings += 1
+                            await persist_alarm(
+                                db_session,
+                                level="warning",
+                                code="fileapp_post_process_reconcile_association_unexpected_error",
+                                message="Erro inesperado ao vincular mailing ao flow no reconciliador de pós-processamento.",
+                                details={
+                                    "workspace_uuid": safe_workspace_uuid,
+                                    "flow_uuid": flow_uuid,
+                                    "source_list_id": source_list_id,
+                                    "file_id": file_id,
+                                    "mailing_uuid": mailing_uuid,
+                                    "exception_type": type(exc).__name__,
+                                    "exception_message": str(exc),
+                                },
+                                flow_uuid=flow_uuid,
+                                app_name="ArquivosApp",
+                                entity=file_id,
+                                entity_type="file",
+                                entity_address=file_path,
+                            )
+                            break
+                    if association_blocked:
+                        associations_blocked += 1
+                        continue
 
                 candidates_scanned += 1
                 payload = {
@@ -1653,6 +1764,8 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
             "workspaces_scanned": workspaces_scanned,
             "candidates_scanned": candidates_scanned,
             "moved": moved,
+            "associations_done": associations_done,
+            "associations_blocked": associations_blocked,
             "quarantined": quarantined,
             "exhausted_quarantined": exhausted_quarantined,
             "warnings": warnings,
@@ -1662,6 +1775,8 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
         "workspaces_scanned": workspaces_scanned,
         "candidates_scanned": candidates_scanned,
         "moved": moved,
+        "associations_done": associations_done,
+        "associations_blocked": associations_blocked,
         "quarantined": quarantined,
         "exhausted_quarantined": exhausted_quarantined,
         "warnings": warnings,
