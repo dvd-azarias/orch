@@ -181,6 +181,10 @@ def _fileapp_entrada_rescue_state_key(*, workspace_uuid: str, file_id: str) -> s
     return f"orch:fileapp:entrada-rescue:state:{workspace_uuid}:{file_id}"
 
 
+def _fileapp_entrada_rescue_flow_state_key(*, workspace_uuid: str, flow_uuid: str, file_id: str) -> str:
+    return f"orch:fileapp:entrada-rescue:flow-state:{workspace_uuid}:{flow_uuid}:{file_id}"
+
+
 def _try_acquire_fileapp_post_process_lock(
     redis_client: redis.Redis | None,
     *,
@@ -333,6 +337,141 @@ def _clear_fileapp_entrada_rescue_attempts(
                 "file_id": file_id,
             },
         )
+
+
+def _get_fileapp_entrada_rescue_flow_state(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    file_id: str,
+) -> str | None:
+    if redis_client is None:
+        return None
+    try:
+        raw = redis_client.get(
+            _fileapp_entrada_rescue_flow_state_key(
+                workspace_uuid=workspace_uuid,
+                flow_uuid=flow_uuid,
+                file_id=file_id,
+            )
+        )
+        if raw is None:
+            return None
+        text_value = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+        normalized = text_value.strip().lower()
+        return normalized or None
+    except Exception:
+        return None
+
+
+def _set_fileapp_entrada_rescue_flow_state(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    file_id: str,
+    state: str,
+    ttl_seconds: int,
+) -> None:
+    if redis_client is None:
+        return
+    normalized_state = str(state or "").strip().lower()
+    if not normalized_state:
+        return
+    try:
+        redis_client.set(
+            _fileapp_entrada_rescue_flow_state_key(
+                workspace_uuid=workspace_uuid,
+                flow_uuid=flow_uuid,
+                file_id=file_id,
+            ),
+            normalized_state,
+            ex=max(60, int(ttl_seconds)),
+        )
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_rescue.flow_state_set_failed",
+            extra={
+                "event": "orch.fileapp.entrada_rescue.flow_state_set_failed",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "file_id": file_id,
+                "state": normalized_state,
+            },
+        )
+
+
+def _try_mark_fileapp_entrada_rescue_flow_in_flight(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    file_id: str,
+    ttl_seconds: int,
+) -> bool:
+    if redis_client is None:
+        return True
+    key = _fileapp_entrada_rescue_flow_state_key(
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        file_id=file_id,
+    )
+    try:
+        return bool(redis_client.set(key, "in_flight", ex=max(60, int(ttl_seconds)), nx=True))
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_rescue.flow_state_in_flight_failed",
+            extra={
+                "event": "orch.fileapp.entrada_rescue.flow_state_in_flight_failed",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "file_id": file_id,
+            },
+        )
+        return True
+
+
+def _extract_payload_file_id(payload: dict[str, Any]) -> str:
+    file_payload = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+    return str(file_payload.get("id") or "").strip()
+
+
+def _persist_process_tipo1_rescue_flow_state(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    payload: dict[str, Any],
+    state: str,
+    ttl_seconds: int = 86400,
+) -> None:
+    file_id = _extract_payload_file_id(payload)
+    if not file_id:
+        return
+    settings = get_settings()
+    if not settings.celery_result_backend:
+        return
+    try:
+        redis_client = redis.Redis.from_url(settings.celery_result_backend)
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_rescue.flow_state_redis_setup_failed",
+            extra={
+                "event": "orch.fileapp.entrada_rescue.flow_state_redis_setup_failed",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "file_id": file_id,
+            },
+        )
+        return
+    _set_fileapp_entrada_rescue_flow_state(
+        redis_client,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        file_id=file_id,
+        state=state,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def _build_files_api_headers(
@@ -547,6 +686,7 @@ async def _fetch_fileapp_post_process_candidates(
             f"""
             SELECT
                 id,
+                public_id::text AS mailing_uuid,
                 file_name,
                 file_path,
                 file_url
@@ -566,6 +706,7 @@ async def _fetch_fileapp_post_process_candidates(
         rows.append(
             {
                 "id": int(row["id"]),
+                "mailing_uuid": str(row["mailing_uuid"] or "").strip(),
                 "file_name": str(row["file_name"] or "").strip(),
                 "file_path": str(row["file_path"] or "").strip(),
                 "file_url": str(row["file_url"] or "").strip(),
@@ -727,14 +868,31 @@ def process_fileapp_tipo1_event_task(
     payload: dict[str, Any],
     mapping_template_uuid: str,
 ) -> dict[str, Any]:
-    result = asyncio.run(
-        _process_fileapp_tipo1_event_task(
+    _persist_process_tipo1_rescue_flow_state(
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        payload=payload,
+        state="in_flight",
+        ttl_seconds=86400,
+    )
+    try:
+        result = asyncio.run(
+            _process_fileapp_tipo1_event_task(
+                workspace_uuid=workspace_uuid,
+                flow_uuid=flow_uuid,
+                payload=payload,
+                mapping_template_uuid=mapping_template_uuid,
+            )
+        )
+    except Exception:
+        _persist_process_tipo1_rescue_flow_state(
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
             payload=payload,
-            mapping_template_uuid=mapping_template_uuid,
+            state="failed",
+            ttl_seconds=86400,
         )
-    )
+        raise
     retry_step: str | None = None
     retry_delays: tuple[int, ...] | None = None
     retry_alarm_code_scheduled: str | None = None
@@ -757,6 +915,14 @@ def process_fileapp_tipo1_event_task(
         retry_alarm_message_scheduled = "Conflito transitório no import (step6). Retry automático agendado."
         retry_alarm_message_exhausted = "Conflito no import (step6) após esgotar retries automáticos."
     else:
+        terminal_state = "done" if str(result.get("status") or "").strip().lower() == "done" else "failed"
+        _persist_process_tipo1_rescue_flow_state(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            payload=payload,
+            state=terminal_state,
+            ttl_seconds=86400,
+        )
         return result
 
     retries = int(self.request.retries or 0)
@@ -818,7 +984,7 @@ def process_fileapp_tipo1_event_task(
                 level="error",
             )
         )
-        return {
+        failed_result = {
             **result,
             "status": "failed_final",
             "retry_exhausted": True,
@@ -827,6 +993,14 @@ def process_fileapp_tipo1_event_task(
             "quarantine_result": quarantine_result,
             "quarantine_error": quarantine_error,
         }
+        _persist_process_tipo1_rescue_flow_state(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            payload=payload,
+            state="failed",
+            ttl_seconds=86400,
+        )
+        return failed_result
 
     asyncio.run(
         _persist_step1_retry_alarm(
@@ -1292,6 +1466,8 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
     workspaces_scanned = 0
     candidates_scanned = 0
     moved = 0
+    associations_done = 0
+    associations_blocked = 0
     quarantined = 0
     exhausted_quarantined = 0
     warnings = 0
@@ -1321,6 +1497,39 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
 
             workspaces_scanned += 1
             safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
+            workspace_api_key = await fetch_workspace_otima_billing_api_key(
+                db_session,
+                workspace_uuid=safe_workspace_uuid,
+            )
+            folder_to_flows: dict[str, list[str]] = {}
+            try:
+                flow_targets = await _fetch_fileapp_rescue_flow_targets(
+                    db_session,
+                    workspace_schema=workspace_schema,
+                )
+                for flow in flow_targets:
+                    flow_uuid = str(flow.get("flow_uuid") or "").strip()
+                    if not flow_uuid:
+                        continue
+                    for folder in flow.get("monitored_folders") or []:
+                        monitored_folder = str(folder or "").strip().strip("/")
+                        if not monitored_folder:
+                            continue
+                        if monitored_folder.lower().endswith("/processados") or monitored_folder.lower().endswith("/falha"):
+                            continue
+                        folder_to_flows.setdefault(monitored_folder, [])
+                        if flow_uuid not in folder_to_flows[monitored_folder]:
+                            folder_to_flows[monitored_folder].append(flow_uuid)
+            except Exception:
+                warnings += 1
+                logger.exception(
+                    "fileapp.post_process_reconcile.fetch_flow_targets_failed",
+                    extra={
+                        "event": "orch.fileapp.post_process_reconcile.fetch_flow_targets_failed",
+                        "workspace_uuid": safe_workspace_uuid,
+                    },
+                )
+
             candidates = await _fetch_fileapp_post_process_candidates(
                 db_session,
                 workspace_schema=workspace_schema,
@@ -1339,6 +1548,80 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
                 file_id = _extract_file_id_from_url(item["file_url"])
                 if not file_id:
                     continue
+
+                file_path = str(item["file_path"] or "").strip().strip("/")
+                flow_uuids = folder_to_flows.get(file_path, [])
+                mailing_uuid = str(item.get("mailing_uuid") or "").strip()
+                if flow_uuids and mailing_uuid:
+                    association_blocked = False
+                    for flow_uuid in flow_uuids:
+                        try:
+                            detach_all_files = await resolve_detach_all_files(
+                                db_session,
+                                workspace_schema=workspace_schema,
+                                flow_uuid=flow_uuid,
+                            )
+                            association_result = await associate_mailing_to_flow_from_file_event(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                mailing_uuid=mailing_uuid,
+                                linked_by=file_id,
+                                workspace_api_key=workspace_api_key,
+                                detach_all_files=detach_all_files,
+                            )
+                            association_status = str(association_result.get("status") or "").strip().lower()
+                            if association_status in {"error", "pending"}:
+                                association_blocked = True
+                                warnings += 1
+                                await persist_alarm(
+                                    db_session,
+                                    level="warning",
+                                    code="fileapp_post_process_reconcile_association_blocked",
+                                    message="Import concluído, mas vínculo de mailing ao flow ainda não finalizado.",
+                                    details={
+                                        "workspace_uuid": safe_workspace_uuid,
+                                        "flow_uuid": flow_uuid,
+                                        "source_list_id": source_list_id,
+                                        "file_id": file_id,
+                                        "mailing_uuid": mailing_uuid,
+                                        "association_result": association_result,
+                                    },
+                                    flow_uuid=flow_uuid,
+                                    app_name="ArquivosApp",
+                                    entity=file_id,
+                                    entity_type="file",
+                                    entity_address=file_path,
+                                )
+                                break
+                            associations_done += 1
+                        except Exception as exc:
+                            association_blocked = True
+                            warnings += 1
+                            await persist_alarm(
+                                db_session,
+                                level="warning",
+                                code="fileapp_post_process_reconcile_association_unexpected_error",
+                                message="Erro inesperado ao vincular mailing ao flow no reconciliador de pós-processamento.",
+                                details={
+                                    "workspace_uuid": safe_workspace_uuid,
+                                    "flow_uuid": flow_uuid,
+                                    "source_list_id": source_list_id,
+                                    "file_id": file_id,
+                                    "mailing_uuid": mailing_uuid,
+                                    "exception_type": type(exc).__name__,
+                                    "exception_message": str(exc),
+                                },
+                                flow_uuid=flow_uuid,
+                                app_name="ArquivosApp",
+                                entity=file_id,
+                                entity_type="file",
+                                entity_address=file_path,
+                            )
+                            break
+                    if association_blocked:
+                        associations_blocked += 1
+                        continue
 
                 candidates_scanned += 1
                 payload = {
@@ -1481,6 +1764,8 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
             "workspaces_scanned": workspaces_scanned,
             "candidates_scanned": candidates_scanned,
             "moved": moved,
+            "associations_done": associations_done,
+            "associations_blocked": associations_blocked,
             "quarantined": quarantined,
             "exhausted_quarantined": exhausted_quarantined,
             "warnings": warnings,
@@ -1490,6 +1775,8 @@ async def _reconcile_fileapp_post_process_task() -> dict[str, int]:
         "workspaces_scanned": workspaces_scanned,
         "candidates_scanned": candidates_scanned,
         "moved": moved,
+        "associations_done": associations_done,
+        "associations_blocked": associations_blocked,
         "quarantined": quarantined,
         "exhausted_quarantined": exhausted_quarantined,
         "warnings": warnings,
@@ -1619,6 +1906,15 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                         original_name=original_name,
                     ):
                         skipped_evidence += 1
+                        for flow_uuid in flow_uuids:
+                            _set_fileapp_entrada_rescue_flow_state(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                file_id=file_id,
+                                state="done",
+                                ttl_seconds=state_ttl_seconds,
+                            )
                         _clear_fileapp_entrada_rescue_attempts(
                             redis_client,
                             workspace_uuid=safe_workspace_uuid,
@@ -1687,7 +1983,17 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                             continue
 
                     enqueued = False
+                    should_increment_attempt = False
                     for flow_uuid in flow_uuids:
+                        flow_state = _get_fileapp_entrada_rescue_flow_state(
+                            redis_client,
+                            workspace_uuid=safe_workspace_uuid,
+                            flow_uuid=flow_uuid,
+                            file_id=file_id,
+                        )
+                        if flow_state in {"in_flight", "done"}:
+                            continue
+
                         mapping_template_uuid = await resolve_mapping_template_uuid(
                             db_session,
                             workspace_schema=workspace_schema,
@@ -1696,6 +2002,15 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                         )
                         if not mapping_template_uuid:
                             continue
+                        if not _try_mark_fileapp_entrada_rescue_flow_in_flight(
+                            redis_client,
+                            workspace_uuid=safe_workspace_uuid,
+                            flow_uuid=flow_uuid,
+                            file_id=file_id,
+                            ttl_seconds=state_ttl_seconds,
+                        ):
+                            continue
+                        should_increment_attempt = True
                         try:
                             ingest_fileapp_tipo1_event_task.apply_async(
                                 kwargs={
@@ -1718,6 +2033,14 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                             )
                             break
                         except Exception as exc:
+                            _set_fileapp_entrada_rescue_flow_state(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                file_id=file_id,
+                                state="failed",
+                                ttl_seconds=state_ttl_seconds,
+                            )
                             warnings += 1
                             await persist_alarm(
                                 db_session,
@@ -1740,7 +2063,7 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                                 entity_type="file",
                                 entity_address=folder_path,
                             )
-                    if not enqueued:
+                    if not enqueued and should_increment_attempt:
                         _set_fileapp_entrada_rescue_attempts(
                             redis_client,
                             workspace_uuid=safe_workspace_uuid,
