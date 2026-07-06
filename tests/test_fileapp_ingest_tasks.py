@@ -340,6 +340,53 @@ def test_process_tipo1_wrapper_marks_inflight_then_failed(monkeypatch) -> None:
     assert state_changes == ["in_flight", "failed"]
 
 
+def test_process_tipo1_wrapper_step6_conflict_defers_without_retrying_pipeline(monkeypatch) -> None:
+    state_changes: list[str] = []
+    process_calls = {"count": 0}
+
+    async def _fake_process(**_kwargs):  # type: ignore[no-untyped-def]
+        process_calls["count"] += 1
+        return {
+            "status": "failed",
+            "reason": "step6_import",
+            "details": {
+                "status_code": 409,
+                "response_body": '{"detail":"Source list já está em processo de ingestão."}',
+                "mailing_uuid": "11111111-1111-1111-1111-111111111111",
+            },
+        }
+
+    async def _fake_handle(**_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "status": "done",
+            "reason": "step6_import_conflict_deferred",
+            "retry_strategy": "association_only_no_reupload",
+        }
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._process_fileapp_tipo1_event_task", _fake_process)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._handle_step6_import_conflict_without_reupload",
+        _fake_handle,
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._persist_process_tipo1_rescue_flow_state",
+        lambda **kwargs: state_changes.append(str(kwargs["state"])),
+    )
+
+    result = process_fileapp_tipo1_event_task.run(
+        workspace_uuid="w1",
+        flow_uuid="flow-1",
+        payload={"file": {"id": "f-3", "original_name": "x.csv", "folder_path": "ACAN_CONTATOS/entrada"}},
+        mapping_template_uuid="tmpl-1",
+    )
+
+    assert process_calls["count"] == 1
+    assert result["status"] == "done"
+    assert result["reason"] == "step6_import_conflict_deferred"
+    assert result["retry_strategy"] == "association_only_no_reupload"
+    assert state_changes == ["in_flight", "done"]
+
+
 @pytest.mark.asyncio
 async def test_process_tipo1_event_continues_when_association_enqueue_fails(monkeypatch) -> None:
     class _DummySessionCtx:

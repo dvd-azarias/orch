@@ -112,6 +112,14 @@ def _is_retryable_step6_import_conflict(result: dict[str, Any]) -> bool:
     return "processo de ingest" in lowered or "already ingest" in lowered or not lowered
 
 
+def _extract_step6_mailing_uuid(result: dict[str, Any]) -> str | None:
+    details = result.get("details")
+    if not isinstance(details, dict):
+        return None
+    value = str(details.get("mailing_uuid") or "").strip()
+    return value or None
+
+
 async def _persist_step1_retry_alarm(
     *,
     workspace_uuid: str,
@@ -153,7 +161,111 @@ async def _persist_step1_retry_alarm(
             entity=str(file_data.get("id") or ""),
             entity_type="file",
             entity_address=str(file_data.get("folder_path") or ""),
+    )
+
+
+async def _handle_step6_import_conflict_without_reupload(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    payload: dict[str, Any],
+    mapping_template_uuid: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    settings = get_settings()
+    session_factory = get_session_factory()
+    payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+    mailing_uuid = _extract_step6_mailing_uuid(result)
+    linked_by = str(payload_file.get("id") or "").strip() or None
+
+    association_status: dict[str, Any] = {"status": "skipped", "reason": "mailing_uuid_not_available"}
+    if mailing_uuid:
+        try:
+            association_task = associate_fileapp_mailing_task.apply_async(
+                kwargs={
+                    "workspace_uuid": workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "mailing_uuid": mailing_uuid,
+                    "linked_by": linked_by,
+                },
+                queue=settings.celery_fileapp_mailing_assoc_queue,
+                routing_key=settings.celery_fileapp_mailing_assoc_queue,
+                countdown=max(0, int(settings.celery_fileapp_mailing_assoc_delay_seconds)),
+            )
+            association_status = {
+                "status": "queued",
+                "task_id": association_task.id,
+                "queue": settings.celery_fileapp_mailing_assoc_queue,
+                "countdown_seconds": int(settings.celery_fileapp_mailing_assoc_delay_seconds),
+            }
+        except Exception as exc:
+            association_status = {
+                "status": "warning",
+                "error_code": "enqueue_failed",
+                "error_message": str(exc),
+                "error_details": {"exception_type": type(exc).__name__},
+            }
+
+    post_process_status: dict[str, Any]
+    try:
+        post_process_result = await move_processed_file_to_processados(
+            settings=settings,
+            workspace_uuid=workspace_uuid,
+            payload=payload,
         )
+        post_process_status = {"status": "done", "result": post_process_result}
+    except FileAppProcessedFileError as exc:
+        post_process_status = {
+            "status": "warning",
+            "error_code": exc.code,
+            "error_message": exc.message,
+            "error_details": exc.details,
+        }
+    except Exception as exc:
+        post_process_status = {
+            "status": "warning",
+            "error_code": "unexpected_error",
+            "error_message": str(exc),
+            "error_details": {"exception_type": type(exc).__name__},
+        }
+
+    async with session_factory() as alarm_session:
+        bind_workspace_context(workspace_uuid)
+        await persist_alarm(
+            alarm_session,
+            level="warning",
+            code="fileapp_tipo1_step6_import_conflict_deferred",
+            message="Conflito de import detectado no step6; pipeline não foi reexecutado para evitar duplicação.",
+            details={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "mapping_template_uuid": mapping_template_uuid,
+                "mailing_uuid": mailing_uuid,
+                "retry_strategy": "association_only_no_reupload",
+                "association_status": association_status,
+                "post_process_file": post_process_status,
+                "original_failure": result,
+            },
+            flow_uuid=flow_uuid,
+            app_name="ArquivosApp",
+            entity=str(payload_file.get("id") or ""),
+            entity_type="file",
+            entity_address=str(payload_file.get("folder_path") or ""),
+        )
+
+    final_status = "done" if association_status.get("status") in {"queued", "done"} else "failed"
+    return {
+        "status": final_status,
+        "reason": "step6_import_conflict_deferred",
+        "workspace_uuid": workspace_uuid,
+        "flow_uuid": flow_uuid,
+        "mapping_template_uuid": mapping_template_uuid,
+        "mailing_uuid": mailing_uuid,
+        "retry_strategy": "association_only_no_reupload",
+        "mailing_association": association_status,
+        "post_process_file": post_process_status,
+        "original_failure": result,
+    }
 
 
 def _extract_file_id_from_url(file_url: str) -> str | None:
@@ -954,12 +1066,24 @@ def process_fileapp_tipo1_event_task(
         retry_alarm_message_scheduled = "Falha transitória no upload (step1). Retry automático agendado."
         retry_alarm_message_exhausted = "Falha no upload (step1) após esgotar retries automáticos."
     elif _is_retryable_step6_import_conflict(result):
-        retry_step = "step6_import"
-        retry_delays = _STEP6_IMPORT_RETRY_DELAYS
-        retry_alarm_code_scheduled = "fileapp_tipo1_step6_import_retry_scheduled"
-        retry_alarm_code_exhausted = "fileapp_tipo1_step6_import_retry_exhausted"
-        retry_alarm_message_scheduled = "Conflito transitório no import (step6). Retry automático agendado."
-        retry_alarm_message_exhausted = "Conflito no import (step6) após esgotar retries automáticos."
+        handled_result = asyncio.run(
+            _handle_step6_import_conflict_without_reupload(
+                workspace_uuid=workspace_uuid,
+                flow_uuid=flow_uuid,
+                payload=payload,
+                mapping_template_uuid=mapping_template_uuid,
+                result=result,
+            )
+        )
+        terminal_state = "done" if str(handled_result.get("status") or "").strip().lower() == "done" else "failed"
+        _persist_process_tipo1_rescue_flow_state(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            payload=payload,
+            state=terminal_state,
+            ttl_seconds=86400,
+        )
+        return handled_result
     else:
         terminal_state = "done" if str(result.get("status") or "").strip().lower() == "done" else "failed"
         _persist_process_tipo1_rescue_flow_state(

@@ -583,7 +583,7 @@ async def run_tipo1_manual_pipeline(
         raise FileAppTipo1ManualPipelineError(
             step="step6_import",
             message=f"Import do mailing falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
+            details={"status_code": int(exc.code), "response_body": detail, "mailing_uuid": mailing_uuid},
         ) from exc
     import_response = _decode_json(body)
     import_data = import_response.get("data") if isinstance(import_response.get("data"), dict) else {}
@@ -592,7 +592,7 @@ async def run_tipo1_manual_pipeline(
         raise FileAppTipo1ManualPipelineError(
             step="step6_import",
             message="Import do mailing não retornou task_id válido.",
-            details={"status_code": status_code, "response_body": body},
+            details={"status_code": status_code, "response_body": body, "mailing_uuid": mailing_uuid},
         )
     step_results.append({"step": "step6_import", "status_code": status_code, "import_task_id": import_task_id})
 
