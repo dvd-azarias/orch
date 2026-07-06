@@ -377,82 +377,86 @@ async def _move_or_reupload_to_folder(
         ) from exc
 
     metadata_url = f"{base_url}/files/metadata/{file_id}"
-    for index in range(0, 1000):
-        candidate_name = _build_rename_candidate(original_name, timestamp=suffix, index=index)
-        try:
-            await _request_json_with_retry(
-                method="PATCH",
-                url=metadata_url,
-                headers=headers,
-                payload={
-                    "original_name": candidate_name,
-                    "folder_path": target_folder,
-                },
-                timeout_seconds=settings.sync_ws_timeout_seconds,
-                retry_not_found=True,
-            )
-            return {
-                "status": "done",
-                "file_id": file_id,
-                "source_folder": folder_path,
-                "target_folder": target_folder,
-                "source_name": original_name,
-                "target_name": candidate_name,
-            }
-        except HTTPError as exc:
-            status_code = int(exc.code)
-            detail = exc.read().decode("utf-8", errors="replace")
-            if status_code == 404 and file_url:
-                file_bytes = await _download_source_file_with_retry(
-                    settings=settings,
-                    workspace_uuid=workspace_uuid,
-                    file_url=file_url,
-                )
-                reupload_result = await _upload_file_to_folder_with_retry(
-                    settings=settings,
-                    base_url=base_url,
-                    headers=headers,
-                    file_name=candidate_name,
-                    file_bytes=file_bytes,
-                    target_folder=target_folder,
-                    folder_label=folder_name,
-                )
-                return {
-                    "status": "done",
-                    "file_id": file_id,
-                    "source_folder": folder_path,
-                    "target_folder": target_folder,
-                    "source_name": original_name,
-                    "target_name": candidate_name,
-                    "fallback_reupload": reupload_result,
-                }
-            if _is_name_conflict(status_code) and index < 999:
-                continue
+    try:
+        await _request_json_with_retry(
+            method="PATCH",
+            url=metadata_url,
+            headers=headers,
+            payload={"folder_path": target_folder},
+            timeout_seconds=settings.sync_ws_timeout_seconds,
+            retry_not_found=True,
+        )
+        return {
+            "status": "done",
+            "file_id": file_id,
+            "source_folder": folder_path,
+            "target_folder": target_folder,
+            "source_name": original_name,
+            "target_name": original_name,
+        }
+    except HTTPError as exc:
+        status_code = int(exc.code)
+        detail = exc.read().decode("utf-8", errors="replace")
+
+        if _is_name_conflict(status_code):
             raise FileAppProcessedFileError(
                 code=move_code,
-                message=f"Falha ao mover/renomear arquivo para {folder_name} (HTTP {status_code}).",
-                details={
-                    "status_code": status_code,
-                    "response_body": detail,
-                    "last_candidate": candidate_name,
-                },
-            ) from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise FileAppProcessedFileError(
-                code=move_code,
-                message=f"Falha ao mover arquivo para {folder_name} após retries.",
-                details={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "last_candidate": candidate_name,
-                },
+                message=f"Falha ao mover arquivo para {folder_name} por conflito de nome (HTTP {status_code}).",
+                details={"status_code": status_code, "response_body": detail},
             ) from exc
 
-    raise FileAppProcessedFileError(
-        code=f"rename_file_to_{folder_name}_failed",
-        message=f"Não foi possível gerar nome único para arquivo em {folder_name}.",
-        details={"base_name": original_name, "suffix": suffix},
-    )
+        if status_code == 404 and file_url:
+            file_bytes = await _download_source_file_with_retry(
+                settings=settings,
+                workspace_uuid=workspace_uuid,
+                file_url=file_url,
+            )
+            for index in range(0, 1000):
+                candidate_name = _build_rename_candidate(original_name, timestamp=suffix, index=index)
+                try:
+                    reupload_result = await _upload_file_to_folder_with_retry(
+                        settings=settings,
+                        base_url=base_url,
+                        headers=headers,
+                        file_name=candidate_name,
+                        file_bytes=file_bytes,
+                        target_folder=target_folder,
+                        folder_label=folder_name,
+                    )
+                    return {
+                        "status": "done",
+                        "file_id": file_id,
+                        "source_folder": folder_path,
+                        "target_folder": target_folder,
+                        "source_name": original_name,
+                        "target_name": candidate_name,
+                        "fallback_reupload": reupload_result,
+                    }
+                except FileAppProcessedFileError as upload_exc:
+                    upload_status = int(upload_exc.details.get("status_code") or 0)
+                    if _is_name_conflict(upload_status) and index < 999:
+                        continue
+                    raise
+            raise FileAppProcessedFileError(
+                code=f"rename_file_to_{folder_name}_failed",
+                message=f"Não foi possível gerar nome único para arquivo em {folder_name}.",
+                details={"base_name": original_name, "suffix": suffix},
+            )
+
+        raise FileAppProcessedFileError(
+            code=move_code,
+            message=f"Falha ao mover arquivo para {folder_name} (HTTP {status_code}).",
+            details={"status_code": status_code, "response_body": detail},
+        ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise FileAppProcessedFileError(
+            code=move_code,
+            message=f"Falha ao mover arquivo para {folder_name} após retries.",
+            details={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        ) from exc
 
 
 async def move_processed_file_to_processados(
@@ -540,3 +544,67 @@ async def move_processed_file_to_processados(
                 "details": processados_error.details,
             },
         }
+
+
+async def quarantine_file_to_falha(
+    *,
+    settings: Settings,
+    workspace_uuid: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    base_url = str(settings.arquivos_base_url or "").strip().rstrip("/")
+    if not base_url:
+        raise FileAppProcessedFileError(
+            code="missing_arquivos_base_url",
+            message="ARQUIVOS_BASE_URL ausente para quarentena do arquivo.",
+        )
+
+    file_data = payload.get("file")
+    if not isinstance(file_data, dict):
+        raise FileAppProcessedFileError(
+            code="invalid_payload_file",
+            message="Payload sem objeto file para quarentena do arquivo.",
+        )
+
+    file_id = str(file_data.get("id") or "").strip()
+    folder_path = _normalize_folder_path(str(file_data.get("folder_path") or ""))
+    original_name = str(file_data.get("original_name") or "").strip()
+    file_url = str(file_data.get("url") or "").strip()
+    if not file_id or not folder_path or not original_name:
+        raise FileAppProcessedFileError(
+            code="missing_file_fields",
+            message="Campos obrigatórios ausentes em file (id/folder_path/original_name).",
+        )
+
+    lower_folder = folder_path.lower()
+    if lower_folder.endswith(f"/{_FALHA_FOLDER_NAME}") or lower_folder == _FALHA_FOLDER_NAME:
+        return {
+            "status": "skipped",
+            "reason": "already_in_falha",
+            "file_id": file_id,
+            "folder_path": folder_path,
+            "original_name": original_name,
+        }
+    if lower_folder.endswith(f"/{_PROCESSADOS_FOLDER_NAME}") or lower_folder == _PROCESSADOS_FOLDER_NAME:
+        return {
+            "status": "skipped",
+            "reason": "already_in_processados",
+            "file_id": file_id,
+            "folder_path": folder_path,
+            "original_name": original_name,
+        }
+
+    headers = _build_headers(settings=settings, workspace_uuid=workspace_uuid)
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return await _move_or_reupload_to_folder(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        base_url=base_url,
+        headers=headers,
+        folder_path=folder_path,
+        folder_name=_FALHA_FOLDER_NAME,
+        original_name=original_name,
+        file_id=file_id,
+        file_url=file_url,
+        suffix=suffix,
+    )

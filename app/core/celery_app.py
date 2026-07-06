@@ -48,6 +48,12 @@ if settings.celery_beat_reconcile_pending_events_enabled:
         "schedule": max(5, settings.celery_reconcile_pending_events_interval_seconds),
         "options": {"queue": settings.celery_dispatch_queue},
     }
+if settings.celery_beat_fileapp_post_process_reconcile_enabled:
+    beat_schedule["orch-fileapp-reconcile-post-process"] = {
+        "task": "app.tasks.fileapp.reconcile_post_process",
+        "schedule": max(15, settings.celery_fileapp_post_process_reconcile_interval_seconds),
+        "options": {"queue": settings.celery_source_list_ingest_queue},
+    }
 if settings.celery_generate_file_enabled and settings.celery_generate_file_scan_enabled:
     beat_schedule["orch-generate-file-scan-due"] = {
         "task": "app.tasks.component_generate_file.scan_due",
@@ -82,6 +88,7 @@ celery_app.conf.update(
         "app.tasks.fileapp.process_event": {"queue": settings.celery_source_list_ingest_queue},
         "app.tasks.fileapp.process_tipo1_event": {"queue": settings.celery_source_list_ingest_queue},
         "app.tasks.fileapp.associate_mailing": {"queue": settings.celery_fileapp_mailing_assoc_queue},
+        "app.tasks.fileapp.reconcile_post_process": {"queue": settings.celery_source_list_ingest_queue},
     },
     beat_schedule=beat_schedule,
 )

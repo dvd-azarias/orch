@@ -56,6 +56,11 @@ class Settings:
     celery_source_list_ingest_queue: str
     celery_fileapp_mailing_assoc_queue: str
     celery_fileapp_mailing_assoc_delay_seconds: int
+    celery_beat_fileapp_post_process_reconcile_enabled: bool
+    celery_fileapp_post_process_reconcile_interval_seconds: int
+    celery_fileapp_post_process_reconcile_batch_size: int
+    celery_fileapp_post_process_reconcile_workspace_uuid: str | None
+    celery_fileapp_post_process_reconcile_cooldown_seconds: int
     celery_reconcile_pending_events_interval_seconds: int
     celery_reconcile_pending_events_batch_size: int
     celery_reconcile_pending_events_stale_seconds: int
@@ -312,6 +317,26 @@ def get_settings() -> Settings:
             or _default_queue_by_profile(queue_profile, "fileapp_mailing_assoc")
         ),
         celery_fileapp_mailing_assoc_delay_seconds=_read_env_int("CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS", 20),
+        celery_beat_fileapp_post_process_reconcile_enabled=_read_env_bool(
+            "CELERY_BEAT_FILEAPP_POST_PROCESS_RECONCILE_ENABLED",
+            True,
+        ),
+        celery_fileapp_post_process_reconcile_interval_seconds=_read_env_int(
+            "CELERY_FILEAPP_POST_PROCESS_RECONCILE_INTERVAL_SECONDS",
+            60,
+        ),
+        celery_fileapp_post_process_reconcile_batch_size=_read_env_int(
+            "CELERY_FILEAPP_POST_PROCESS_RECONCILE_BATCH_SIZE",
+            100,
+        ),
+        celery_fileapp_post_process_reconcile_workspace_uuid=_read_env_optional(
+            "CELERY_FILEAPP_POST_PROCESS_RECONCILE_WORKSPACE_UUID",
+            _read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
+        ),
+        celery_fileapp_post_process_reconcile_cooldown_seconds=_read_env_int(
+            "CELERY_FILEAPP_POST_PROCESS_RECONCILE_COOLDOWN_SECONDS",
+            120,
+        ),
         celery_reconcile_pending_events_interval_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_INTERVAL_SECONDS", 15),
         celery_reconcile_pending_events_batch_size=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_BATCH_SIZE", 200),
         celery_reconcile_pending_events_stale_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_STALE_SECONDS", 30),

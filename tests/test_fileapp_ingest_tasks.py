@@ -6,7 +6,12 @@ import pytest
 
 from app.core.config import get_settings
 from app.services.fileapp_processed_file_service import FileAppProcessedFileError
-from app.tasks.fileapp_ingest_tasks import _process_fileapp_tipo1_event_task, ingest_fileapp_event_task
+from app.tasks.fileapp_ingest_tasks import (
+    _is_retryable_step6_import_conflict,
+    _is_retryable_step1_upload_failure,
+    _process_fileapp_tipo1_event_task,
+    ingest_fileapp_event_task,
+)
 
 
 class _DummyTask:
@@ -211,3 +216,39 @@ async def test_process_tipo1_event_runs_pipeline_then_post_processes_file(monkey
     assert call_order == ["download", "pipeline", "associate", "move"]
     assert pipeline_kwargs_seen["predownloaded_file_bytes"] == b"cpf,telefone\n1,2\n"
     assert pipeline_kwargs_seen["upload_file_name_override"] == "x.csv"
+
+
+def test_is_retryable_step1_upload_failure_for_http_500() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step1_upload",
+        "details": {"status_code": 500, "response_body": '{"detail":"Internal Server Error"}'},
+    }
+    assert _is_retryable_step1_upload_failure(result) is True
+
+
+def test_is_retryable_step1_upload_failure_for_http_400() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step1_upload",
+        "details": {"status_code": 400, "response_body": '{"detail":"Bad Request"}'},
+    }
+    assert _is_retryable_step1_upload_failure(result) is False
+
+
+def test_is_retryable_step6_import_conflict_for_http_409() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step6_import",
+        "details": {"status_code": 409, "response_body": '{"detail":"Source list já está em processo de ingestão."}'},
+    }
+    assert _is_retryable_step6_import_conflict(result) is True
+
+
+def test_is_retryable_step6_import_conflict_for_http_400() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step6_import",
+        "details": {"status_code": 400, "response_body": '{"detail":"Bad Request"}'},
+    }
+    assert _is_retryable_step6_import_conflict(result) is False
