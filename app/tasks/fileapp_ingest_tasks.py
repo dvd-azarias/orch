@@ -120,6 +120,54 @@ def _extract_step6_mailing_uuid(result: dict[str, Any]) -> str | None:
     return value or None
 
 
+async def _resolve_canonical_mailing_uuid_for_file(
+    db_session,
+    *,
+    workspace_schema: str,
+    file_id: str,
+    file_name: str,
+    monitored_folder: str,
+) -> str | None:
+    normalized_folder = _normalize_folder_path(monitored_folder).lower()
+    if not normalized_folder:
+        return None
+    if not str(file_id or "").strip() and not str(file_name or "").strip():
+        return None
+    safe_schema = workspace_schema.replace('"', '""')
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT sl.public_id::text AS mailing_uuid
+            FROM "{safe_schema}".source_lists sl
+            WHERE (
+                    COALESCE(sl.file_url, '') ILIKE :file_id_suffix
+                    OR (
+                        COALESCE(sl.file_name, '') = :file_name
+                        AND (
+                            lower(trim(BOTH '/' FROM COALESCE(sl.file_path, ''))) = :folder_path
+                            OR trim(BOTH '/' FROM COALESCE(sl.file_path, '')) = ''
+                        )
+                    )
+                  )
+            ORDER BY
+                CASE WHEN COALESCE(sl.file_url, '') ILIKE :file_id_suffix THEN 0 ELSE 1 END,
+                sl.id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "file_id_suffix": f"%{file_id}",
+            "file_name": file_name,
+            "folder_path": normalized_folder,
+        },
+    )
+    row = result.first()
+    if row is None:
+        return None
+    resolved = str(row[0] or "").strip()
+    return resolved or None
+
+
 async def _persist_step1_retry_alarm(
     *,
     workspace_uuid: str,
@@ -175,8 +223,25 @@ async def _handle_step6_import_conflict_without_reupload(
     settings = get_settings()
     session_factory = get_session_factory()
     payload_file = payload.get("file") if isinstance(payload.get("file"), dict) else {}
-    mailing_uuid = _extract_step6_mailing_uuid(result)
+    mailing_uuid_from_conflict = _extract_step6_mailing_uuid(result)
     linked_by = str(payload_file.get("id") or "").strip() or None
+    file_id = str(payload_file.get("id") or "").strip()
+    file_name = str(payload_file.get("original_name") or "").strip()
+    folder_path = str(payload_file.get("folder_path") or "").strip()
+
+    mailing_uuid = mailing_uuid_from_conflict
+    canonical_mailing_uuid: str | None = None
+    async with session_factory() as db_session:
+        _, workspace_schema = bind_workspace_context(workspace_uuid)
+        canonical_mailing_uuid = await _resolve_canonical_mailing_uuid_for_file(
+            db_session,
+            workspace_schema=workspace_schema,
+            file_id=file_id,
+            file_name=file_name,
+            monitored_folder=folder_path,
+        )
+    if canonical_mailing_uuid:
+        mailing_uuid = canonical_mailing_uuid
 
     association_status: dict[str, Any] = {"status": "skipped", "reason": "mailing_uuid_not_available"}
     if mailing_uuid:
@@ -241,6 +306,8 @@ async def _handle_step6_import_conflict_without_reupload(
                 "flow_uuid": flow_uuid,
                 "mapping_template_uuid": mapping_template_uuid,
                 "mailing_uuid": mailing_uuid,
+                "mailing_uuid_from_conflict": mailing_uuid_from_conflict,
+                "mailing_uuid_canonical": canonical_mailing_uuid,
                 "retry_strategy": "association_only_no_reupload",
                 "association_status": association_status,
                 "post_process_file": post_process_status,

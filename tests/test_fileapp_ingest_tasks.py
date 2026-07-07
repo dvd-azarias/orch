@@ -8,6 +8,7 @@ from app.core.config import get_settings
 from app.services.fileapp_processed_file_service import FileAppProcessedFileError
 from app.tasks.fileapp_ingest_tasks import (
     _build_files_api_headers,
+    _handle_step6_import_conflict_without_reupload,
     _is_retryable_step6_import_conflict,
     _is_retryable_step1_upload_failure,
     _list_files_in_folder,
@@ -385,6 +386,81 @@ def test_process_tipo1_wrapper_step6_conflict_defers_without_retrying_pipeline(m
     assert result["reason"] == "step6_import_conflict_deferred"
     assert result["retry_strategy"] == "association_only_no_reupload"
     assert state_changes == ["in_flight", "done"]
+
+
+@pytest.mark.asyncio
+async def test_step6_conflict_handler_prefers_canonical_mailing_uuid(monkeypatch) -> None:
+    class _DummySettings:
+        celery_fileapp_mailing_assoc_queue = "q.mail.assoc"
+        celery_fileapp_mailing_assoc_delay_seconds = 0
+
+    class _DummySessionCtx:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+            return False
+
+    captured: dict[str, object] = {}
+
+    def _fake_get_session_factory():  # type: ignore[no-untyped-def]
+        return lambda: _DummySessionCtx()
+
+    async def _fake_resolve_canonical(_db_session, **_kwargs):  # type: ignore[no-untyped-def]
+        return "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    def _fake_apply_async(*, kwargs, queue, routing_key, countdown):  # type: ignore[no-untyped-def]
+        captured["kwargs"] = kwargs
+        return _DummyTask()
+
+    async def _fake_move_processed(**_kwargs):  # type: ignore[no-untyped-def]
+        return {"status": "done"}
+
+    async def _fake_persist_alarm(_db_session, **kwargs):  # type: ignore[no-untyped-def]
+        captured["alarm_details"] = kwargs.get("details")
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.get_settings", lambda: _DummySettings())
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.get_session_factory", _fake_get_session_factory)
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.bind_workspace_context", lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"))
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._resolve_canonical_mailing_uuid_for_file",
+        _fake_resolve_canonical,
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.associate_fileapp_mailing_task.apply_async",
+        _fake_apply_async,
+    )
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.move_processed_file_to_processados", _fake_move_processed)
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.persist_alarm", _fake_persist_alarm)
+
+    result = await _handle_step6_import_conflict_without_reupload(
+        workspace_uuid="f0d1d7cf-8ddd-4dcb-9477-d87c11e81c26",
+        flow_uuid="b049eca9-d856-4379-9c83-434b22036a1b",
+        payload={
+            "file": {
+                "id": "file-123",
+                "original_name": "carga-0012.csv",
+                "folder_path": "ACAN_CONTATOS/entrada",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+            }
+        },
+        mapping_template_uuid="d94523f9-33d0-42db-b5f9-cb3f2c226bfb",
+        result={
+            "status": "failed",
+            "reason": "step6_import",
+            "details": {
+                "status_code": 409,
+                "response_body": '{"detail":"Source list já está em processo de ingestão."}',
+                "mailing_uuid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+        },
+    )
+
+    assert result["status"] == "done"
+    assert result["mailing_uuid"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert captured["kwargs"]["mailing_uuid"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert captured["alarm_details"]["mailing_uuid_from_conflict"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    assert captured["alarm_details"]["mailing_uuid_canonical"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 @pytest.mark.asyncio
