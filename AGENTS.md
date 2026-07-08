@@ -76,6 +76,13 @@ Sem confirmacao explicita do usuario, nao executar:
   - `auto` (padrao): macOS -> `launchd_local`; Linux -> `prod`;
   - perfis aceitos: `launchd_local`, `f5_local`, `prod`;
   - evitar hardcode manual recorrente de filas no `.env`; usar override `CELERY_*_QUEUE` somente quando necessario.
+- Regra de particionamento assíncrono por TEAR (OBRIGATORIA):
+  - em novos fluxos assíncronos, adotar fila por **TEAR** como padrao (nao por workspace);
+  - convencao de nomes: `orch_<dominio>_<etapa>_<tear>` (ex.: `orch_fileapp_ingest_gold`);
+  - carregar `workspace_uuid` no payload/header para fairness, auditoria e rastreabilidade;
+  - aplicar fairness por workspace dentro do mesmo TEAR (prefetch baixo, rate limit e concorrencia controlada);
+  - fila dedicada por workspace somente por excecao formal (SLA/incidente), com prazo de revisao e rollback para modelo por TEAR;
+  - nao criar filas permanentes por workspace como estrategia padrao.
 - Regra de progressao entre fases (OBRIGATORIA):
   - fases novas devem ser validadas com a stack das fases anteriores em execucao;
   - antes de declarar regressao, repetir a subida padronizada e checar `status`;
