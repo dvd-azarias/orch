@@ -562,7 +562,36 @@ def test_inject_contact_runtime_scope_sets_contact_extra() -> None:
     variables = runtime_variables["variables"]
     assert variables["contact"]["identifier"] == "70000700001"
     assert variables["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
+    assert variables["contact"]["channel"]["address"] == "5511900700001"
+    assert variables["contact"]["channel"]["type"] == "voice"
     assert variables["customs"]["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
+
+
+def test_inject_contact_runtime_scope_normalizes_carteira_alias() -> None:
+    runtime_variables: dict[str, object] = {}
+    _inject_contact_runtime_scope(
+        runtime_variables=runtime_variables,
+        contact_row={
+            "contact_list_member_id": 20202,
+            "contact_identifier": "90000900001",
+            "contact_name": "Cliente Carteira",
+            "contact_full_name": "Cliente Carteira",
+            "contact_gender": None,
+            "contact_country": None,
+            "contact_province": None,
+            "contact_city": None,
+            "contact_birth_date": None,
+            "contact_age": None,
+            "contact_channel_type": "voice",
+            "contact_channel_label": "tel1",
+            "contact_channel_address": "5511999999999",
+            "contact_channel_extra_data": {"Carteira ID": "CART-123"},
+            "person_uuid": "0254807a-840b-4072-93a8-4193d5626fe7",
+        },
+    )
+    variables = runtime_variables["variables"]
+    assert variables["contact"]["extra"]["carteira"] == "CART-123"
+    assert variables["customs"]["contact"]["extra"]["carteira"] == "CART-123"
 
 
 def test_inject_callback_runtime_scope_sets_callback_builtin() -> None:
