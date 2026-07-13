@@ -2102,6 +2102,35 @@ def _normalize_contact_extra_data(raw_extra: Any) -> dict[str, Any]:
     return {}
 
 
+def _normalize_contact_extra_key(raw_key: Any) -> str:
+    token = str(raw_key or "").strip().lower()
+    if not token:
+        return ""
+    token = unicodedata.normalize("NFKD", token).encode("ascii", "ignore").decode("ascii")
+    token = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    return token
+
+
+def _build_contact_extra_with_aliases(extra: dict[str, Any]) -> dict[str, Any]:
+    enriched: dict[str, Any] = dict(extra)
+    normalized_index: dict[str, Any] = {}
+
+    for key, value in list(extra.items()):
+        normalized_key = _normalize_contact_extra_key(key)
+        if not normalized_key:
+            continue
+        normalized_index.setdefault(normalized_key, value)
+        enriched.setdefault(normalized_key, value)
+
+    if "carteira" not in enriched:
+        for candidate in ("carteira", "carteira_id", "id_carteira", "carteiraid", "idcarteira"):
+            if candidate in normalized_index:
+                enriched["carteira"] = normalized_index[candidate]
+                break
+
+    return enriched
+
+
 def _inject_contact_runtime_scope(
     *,
     runtime_variables: dict[str, Any],
@@ -2115,6 +2144,15 @@ def _inject_contact_runtime_scope(
     if not isinstance(customs, dict):
         customs = {}
         variables["customs"] = customs
+
+    contact_extra = _build_contact_extra_with_aliases(
+        _normalize_contact_extra_data(contact_row.get("contact_channel_extra_data"))
+    )
+    contact_channel = {
+        "type": contact_row.get("contact_channel_type"),
+        "label": contact_row.get("contact_channel_label"),
+        "address": contact_row.get("contact_channel_address"),
+    }
 
     contact_payload = {
         "contact_list_member_id": contact_row.get("contact_list_member_id"),
@@ -2130,8 +2168,9 @@ def _inject_contact_runtime_scope(
         "channel_type": contact_row.get("contact_channel_type"),
         "channel_label": contact_row.get("contact_channel_label"),
         "channel_address": contact_row.get("contact_channel_address"),
+        "channel": contact_channel,
         "person_uuid": contact_row.get("person_uuid"),
-        "extra": _normalize_contact_extra_data(contact_row.get("contact_channel_extra_data")),
+        "extra": contact_extra,
     }
 
     variables["contact"] = contact_payload
