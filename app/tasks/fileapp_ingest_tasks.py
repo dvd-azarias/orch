@@ -371,6 +371,14 @@ def _fileapp_entrada_rescue_flow_state_key(*, workspace_uuid: str, flow_uuid: st
     return f"orch:fileapp:entrada-rescue:flow-state:{workspace_uuid}:{flow_uuid}:{file_id}"
 
 
+def _fileapp_entrada_hygiene_file_lock_key(*, workspace_uuid: str, file_id: str) -> str:
+    return f"orch:fileapp:entrada-hygiene:lock:{workspace_uuid}:{file_id}"
+
+
+def _fileapp_entrada_hygiene_state_key(*, workspace_uuid: str, file_id: str) -> str:
+    return f"orch:fileapp:entrada-hygiene:state:{workspace_uuid}:{file_id}"
+
+
 def _try_acquire_fileapp_post_process_lock(
     redis_client: redis.Redis | None,
     *,
@@ -461,6 +469,36 @@ def _try_acquire_fileapp_entrada_rescue_file_lock(
         return True
 
 
+def _try_acquire_fileapp_entrada_hygiene_file_lock(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+    lock_seconds: int,
+) -> bool:
+    if redis_client is None:
+        return True
+    try:
+        return bool(
+            redis_client.set(
+                _fileapp_entrada_hygiene_file_lock_key(workspace_uuid=workspace_uuid, file_id=file_id),
+                "1",
+                ex=max(1, int(lock_seconds)),
+                nx=True,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_hygiene.lock_failed",
+            extra={
+                "event": "orch.fileapp.entrada_hygiene.lock_failed",
+                "workspace_uuid": workspace_uuid,
+                "file_id": file_id,
+            },
+        )
+        return True
+
+
 def _get_fileapp_entrada_rescue_attempts(
     redis_client: redis.Redis | None,
     *,
@@ -471,6 +509,24 @@ def _get_fileapp_entrada_rescue_attempts(
         return 0
     try:
         raw = redis_client.hget(_fileapp_entrada_rescue_state_key(workspace_uuid=workspace_uuid, file_id=file_id), "attempts")
+        if raw is None:
+            return 0
+        text_value = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+        return int(text_value.strip() or "0")
+    except Exception:
+        return 0
+
+
+def _get_fileapp_entrada_hygiene_resubmit_attempts(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+) -> int:
+    if redis_client is None:
+        return 0
+    try:
+        raw = redis_client.hget(_fileapp_entrada_hygiene_state_key(workspace_uuid=workspace_uuid, file_id=file_id), "resubmit_attempts")
         if raw is None:
             return 0
         text_value = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
@@ -504,6 +560,31 @@ def _set_fileapp_entrada_rescue_attempts(
         )
 
 
+def _set_fileapp_entrada_hygiene_resubmit_attempts(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+    attempts: int,
+    ttl_seconds: int,
+) -> None:
+    if redis_client is None:
+        return
+    try:
+        key = _fileapp_entrada_hygiene_state_key(workspace_uuid=workspace_uuid, file_id=file_id)
+        redis_client.hset(key, mapping={"resubmit_attempts": str(max(0, int(attempts)))})
+        redis_client.expire(key, max(60, int(ttl_seconds)))
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_hygiene.state_set_failed",
+            extra={
+                "event": "orch.fileapp.entrada_hygiene.state_set_failed",
+                "workspace_uuid": workspace_uuid,
+                "file_id": file_id,
+            },
+        )
+
+
 def _clear_fileapp_entrada_rescue_attempts(
     redis_client: redis.Redis | None,
     *,
@@ -519,6 +600,27 @@ def _clear_fileapp_entrada_rescue_attempts(
             "fileapp.entrada_rescue.state_clear_failed",
             extra={
                 "event": "orch.fileapp.entrada_rescue.state_clear_failed",
+                "workspace_uuid": workspace_uuid,
+                "file_id": file_id,
+            },
+        )
+
+
+def _clear_fileapp_entrada_hygiene_resubmit_attempts(
+    redis_client: redis.Redis | None,
+    *,
+    workspace_uuid: str,
+    file_id: str,
+) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.delete(_fileapp_entrada_hygiene_state_key(workspace_uuid=workspace_uuid, file_id=file_id))
+    except Exception:
+        logger.exception(
+            "fileapp.entrada_hygiene.state_clear_failed",
+            extra={
+                "event": "orch.fileapp.entrada_hygiene.state_clear_failed",
                 "workspace_uuid": workspace_uuid,
                 "file_id": file_id,
             },
@@ -898,6 +1000,59 @@ async def _has_fileapp_ingest_evidence(
         {"original_name": original_name, "file_id_suffix": f"%{file_id}", "folder_path": normalized_folder},
     )
     return source_list_check.first() is not None
+
+
+async def _fetch_fileapp_source_list_state(
+    db_session,
+    *,
+    workspace_schema: str,
+    file_id: str,
+    original_name: str,
+    monitored_folder: str,
+) -> dict[str, Any] | None:
+    safe_schema = workspace_schema.replace('"', '""')
+    normalized_folder = _normalize_folder_path(monitored_folder).lower()
+    if not normalized_folder:
+        return None
+    result = await db_session.execute(
+        text(
+            f"""
+            SELECT
+                id,
+                UPPER(COALESCE(status, '')) AS status,
+                file_name,
+                file_path,
+                file_url,
+                created_at,
+                updated_at
+            FROM "{safe_schema}".source_lists
+            WHERE file_url ILIKE :file_id_suffix
+               OR (
+                   file_name = :original_name
+                   AND lower(trim(BOTH '/' FROM COALESCE(file_path, ''))) = :folder_path
+               )
+            ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "file_id_suffix": f"%{file_id}",
+            "original_name": original_name,
+            "folder_path": normalized_folder,
+        },
+    )
+    row = result.mappings().first()
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "status": str(row["status"] or "").strip() or "UNKNOWN",
+        "file_name": str(row["file_name"] or "").strip(),
+        "file_path": str(row["file_path"] or "").strip(),
+        "file_url": str(row["file_url"] or "").strip(),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 async def _fetch_fileapp_post_process_candidates(
@@ -1292,6 +1447,11 @@ def reconcile_fileapp_post_process_task() -> dict[str, int]:
 @celery_app.task(name="app.tasks.fileapp.reconcile_entrada_rescue", ignore_result=True)
 def reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
     return asyncio.run(_reconcile_fileapp_entrada_rescue_task())
+
+
+@celery_app.task(name="app.tasks.fileapp.reconcile_entrada_hygiene", ignore_result=True)
+def reconcile_fileapp_entrada_hygiene_task() -> dict[str, int]:
+    return asyncio.run(_reconcile_fileapp_entrada_hygiene_task())
 
 
 async def _process_fileapp_event_task(*, workspace_uuid: str, flow_uuid: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2346,6 +2506,344 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
         "quarantined": quarantined,
         "skipped_recent": skipped_recent,
         "skipped_evidence": skipped_evidence,
+        "warnings": warnings,
+    }
+
+
+async def _reconcile_fileapp_entrada_hygiene_task() -> dict[str, int]:
+    settings = get_settings()
+    if not settings.celery_enabled or not settings.celery_fileapp_ingest_enabled:
+        return {
+            "workspaces_scanned": 0,
+            "folders_scanned": 0,
+            "files_scanned": 0,
+            "moved_to_processados": 0,
+            "quarantined_to_falha": 0,
+            "resubmitted": 0,
+            "no_source_pending": 0,
+            "warnings": 0,
+        }
+
+    redis_client: redis.Redis | None = None
+    if settings.celery_result_backend:
+        try:
+            redis_client = redis.Redis.from_url(settings.celery_result_backend)
+        except Exception:
+            logger.exception(
+                "fileapp.entrada_hygiene.redis_setup_failed",
+                extra={"event": "orch.fileapp.entrada_hygiene.redis_setup_failed"},
+            )
+
+    workspace_scope = str(settings.celery_fileapp_entrada_hygiene_workspace_uuid or "").strip() or None
+    now_utc = datetime.now(timezone.utc)
+    lock_seconds = max(10, int(settings.celery_fileapp_entrada_hygiene_lock_seconds))
+    no_source_sla = max(0, int(settings.celery_fileapp_entrada_hygiene_no_source_list_sla_seconds))
+    ready_sla = max(0, int(settings.celery_fileapp_entrada_hygiene_ready_to_ingest_sla_seconds))
+    pending_mapping_sla = max(0, int(settings.celery_fileapp_entrada_hygiene_pending_field_mapping_sla_seconds))
+    root_max_age_sla = max(0, int(settings.celery_fileapp_entrada_hygiene_root_max_age_seconds))
+    resubmit_cooldown = max(0, int(settings.celery_fileapp_entrada_hygiene_resubmit_cooldown_seconds))
+    max_resubmits = max(0, int(settings.celery_fileapp_entrada_hygiene_no_source_list_max_resubmits))
+    state_ttl_seconds = max(3600, root_max_age_sla * 3 if root_max_age_sla > 0 else 3600)
+
+    session_factory = get_session_factory()
+    workspaces_scanned = 0
+    folders_scanned = 0
+    files_scanned = 0
+    moved_to_processados = 0
+    quarantined_to_falha = 0
+    resubmitted = 0
+    no_source_pending = 0
+    warnings = 0
+
+    async with session_factory() as db_session:
+        workspaces = await list_completed_workspaces(db_session)
+        for workspace in workspaces:
+            workspace_uuid = str(workspace.get("workspace_uuid") or "").strip()
+            if not workspace_uuid:
+                continue
+            if workspace_scope and workspace_uuid != workspace_scope:
+                continue
+
+            workspaces_scanned += 1
+            safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)
+            workspace_api_key = await fetch_workspace_otima_billing_api_key(
+                db_session,
+                workspace_uuid=safe_workspace_uuid,
+            )
+            try:
+                flow_targets = await _fetch_fileapp_rescue_flow_targets(
+                    db_session,
+                    workspace_schema=workspace_schema,
+                )
+            except Exception:
+                warnings += 1
+                logger.exception(
+                    "fileapp.entrada_hygiene.fetch_flow_targets_failed",
+                    extra={
+                        "event": "orch.fileapp.entrada_hygiene.fetch_flow_targets_failed",
+                        "workspace_uuid": safe_workspace_uuid,
+                    },
+                )
+                continue
+
+            folder_to_flows: dict[str, list[str]] = {}
+            for flow in flow_targets:
+                flow_uuid = str(flow.get("flow_uuid") or "").strip()
+                for folder in flow.get("monitored_folders") or []:
+                    monitored_folder = str(folder or "").strip().strip("/")
+                    if not monitored_folder:
+                        continue
+                    if monitored_folder.lower().endswith("/processados") or monitored_folder.lower().endswith("/falha"):
+                        continue
+                    folder_to_flows.setdefault(monitored_folder, [])
+                    if flow_uuid not in folder_to_flows[monitored_folder]:
+                        folder_to_flows[monitored_folder].append(flow_uuid)
+
+            for folder_path, flow_uuids in folder_to_flows.items():
+                folders_scanned += 1
+                listed_files = await _list_files_in_folder(
+                    settings=settings,
+                    workspace_uuid=safe_workspace_uuid,
+                    folder_path=folder_path,
+                    workspace_api_key=workspace_api_key,
+                    limit=settings.celery_fileapp_entrada_hygiene_batch_size,
+                )
+                for file_item in listed_files:
+                    file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
+                    original_name = str(
+                        file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""
+                    ).strip()
+                    listed_folder = str(file_item.get("folder_path") or file_item.get("path") or folder_path).strip().strip("/")
+                    file_url = str(file_item.get("url") or "").strip()
+                    if not file_id or not original_name or listed_folder != folder_path:
+                        continue
+
+                    files_scanned += 1
+                    created_at = _parse_file_datetime(file_item.get("created_at")) or _parse_file_datetime(file_item.get("updated_at"))
+                    if created_at is None:
+                        continue
+                    age_seconds = max(0.0, (now_utc - created_at).total_seconds())
+
+                    if not _try_acquire_fileapp_entrada_hygiene_file_lock(
+                        redis_client,
+                        workspace_uuid=safe_workspace_uuid,
+                        file_id=file_id,
+                        lock_seconds=lock_seconds,
+                    ):
+                        continue
+
+                    payload = {
+                        "file": {
+                            "id": file_id,
+                            "folder_path": folder_path,
+                            "original_name": original_name,
+                            "url": file_url,
+                        }
+                    }
+                    state = await _fetch_fileapp_source_list_state(
+                        db_session,
+                        workspace_schema=workspace_schema,
+                        file_id=file_id,
+                        original_name=original_name,
+                        monitored_folder=folder_path,
+                    )
+                    source_status = str(state.get("status") if isinstance(state, dict) else "NO_SOURCE_LIST").strip().upper() or "NO_SOURCE_LIST"
+
+                    try:
+                        if source_status == "PROCESSED":
+                            move_result = await move_processed_file_to_processados(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                payload=payload,
+                            )
+                            if str(move_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                moved_to_processados += 1
+                                _clear_fileapp_entrada_hygiene_resubmit_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                )
+                            continue
+
+                        if source_status == "ERROR":
+                            quarantine_result = await quarantine_file_to_falha(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                payload=payload,
+                            )
+                            if str(quarantine_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                quarantined_to_falha += 1
+                                _clear_fileapp_entrada_hygiene_resubmit_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                )
+                            continue
+
+                        if source_status == "READY_TO_INGEST" and age_seconds >= ready_sla:
+                            quarantine_result = await quarantine_file_to_falha(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                payload=payload,
+                            )
+                            if str(quarantine_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                quarantined_to_falha += 1
+                                _clear_fileapp_entrada_hygiene_resubmit_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                )
+                            continue
+
+                        if source_status == "PENDING_FIELD_MAPPING" and age_seconds >= pending_mapping_sla:
+                            quarantine_result = await quarantine_file_to_falha(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                payload=payload,
+                            )
+                            if str(quarantine_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                quarantined_to_falha += 1
+                                _clear_fileapp_entrada_hygiene_resubmit_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                )
+                            continue
+
+                        if source_status == "NO_SOURCE_LIST":
+                            if age_seconds < no_source_sla:
+                                no_source_pending += 1
+                                continue
+
+                            resubmit_attempts = _get_fileapp_entrada_hygiene_resubmit_attempts(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                file_id=file_id,
+                            )
+                            if resubmit_attempts >= max_resubmits and age_seconds >= (no_source_sla + resubmit_cooldown):
+                                quarantine_result = await quarantine_file_to_falha(
+                                    settings=settings,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    payload=payload,
+                                )
+                                if str(quarantine_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                    quarantined_to_falha += 1
+                                    _clear_fileapp_entrada_hygiene_resubmit_attempts(
+                                        redis_client,
+                                        workspace_uuid=safe_workspace_uuid,
+                                        file_id=file_id,
+                                    )
+                                continue
+
+                            enqueued = False
+                            for flow_uuid in flow_uuids:
+                                flow_state = _get_fileapp_entrada_rescue_flow_state(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    flow_uuid=flow_uuid,
+                                    file_id=file_id,
+                                )
+                                if flow_state in {"in_flight", "done"}:
+                                    continue
+                                mapping_template_uuid = await resolve_mapping_template_uuid(
+                                    db_session,
+                                    workspace_schema=workspace_schema,
+                                    flow_uuid=flow_uuid,
+                                    payload=payload,
+                                )
+                                if not mapping_template_uuid:
+                                    continue
+                                if not _try_mark_fileapp_entrada_rescue_flow_in_flight(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    flow_uuid=flow_uuid,
+                                    file_id=file_id,
+                                    ttl_seconds=state_ttl_seconds,
+                                ):
+                                    continue
+                                ingest_fileapp_tipo1_event_task.apply_async(
+                                    kwargs={
+                                        "workspace_uuid": safe_workspace_uuid,
+                                        "flow_uuid": flow_uuid,
+                                        "payload": payload,
+                                        "mapping_template_uuid": mapping_template_uuid,
+                                    },
+                                    queue=settings.celery_s3_files_ingest_queue,
+                                    routing_key=settings.celery_s3_files_ingest_queue,
+                                )
+                                enqueued = True
+                                resubmitted += 1
+                                _set_fileapp_entrada_hygiene_resubmit_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                    attempts=resubmit_attempts + 1,
+                                    ttl_seconds=state_ttl_seconds,
+                                )
+                                break
+                            if not enqueued:
+                                no_source_pending += 1
+                            continue
+
+                        if root_max_age_sla > 0 and age_seconds >= root_max_age_sla:
+                            quarantine_result = await quarantine_file_to_falha(
+                                settings=settings,
+                                workspace_uuid=safe_workspace_uuid,
+                                payload=payload,
+                            )
+                            if str(quarantine_result.get("status") or "").strip().lower() in {"done", "skipped"}:
+                                quarantined_to_falha += 1
+                                _clear_fileapp_entrada_hygiene_resubmit_attempts(
+                                    redis_client,
+                                    workspace_uuid=safe_workspace_uuid,
+                                    file_id=file_id,
+                                )
+                    except Exception as exc:
+                        warnings += 1
+                        await persist_alarm(
+                            db_session,
+                            level="warning",
+                            code="fileapp_entrada_hygiene_action_failed",
+                            message="Falha na ação automática de higiene da pasta entrada.",
+                            details={
+                                "workspace_uuid": safe_workspace_uuid,
+                                "file_id": file_id,
+                                "file_name": original_name,
+                                "folder_path": folder_path,
+                                "source_status": source_status,
+                                "age_seconds": int(age_seconds),
+                                "exception_type": type(exc).__name__,
+                                "exception_message": str(exc),
+                            },
+                            app_name="ArquivosApp",
+                            entity=file_id,
+                            entity_type="file",
+                            entity_address=folder_path,
+                        )
+
+    logger.info(
+        "fileapp.entrada_hygiene.finished",
+        extra={
+            "event": "orch.fileapp.entrada_hygiene.finished",
+            "workspace_scope": workspace_scope,
+            "workspaces_scanned": workspaces_scanned,
+            "folders_scanned": folders_scanned,
+            "files_scanned": files_scanned,
+            "moved_to_processados": moved_to_processados,
+            "quarantined_to_falha": quarantined_to_falha,
+            "resubmitted": resubmitted,
+            "no_source_pending": no_source_pending,
+            "warnings": warnings,
+        },
+    )
+    return {
+        "workspaces_scanned": workspaces_scanned,
+        "folders_scanned": folders_scanned,
+        "files_scanned": files_scanned,
+        "moved_to_processados": moved_to_processados,
+        "quarantined_to_falha": quarantined_to_falha,
+        "resubmitted": resubmitted,
+        "no_source_pending": no_source_pending,
         "warnings": warnings,
     }
 

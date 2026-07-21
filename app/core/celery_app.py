@@ -60,6 +60,12 @@ if settings.celery_beat_fileapp_entrada_rescue_enabled:
         "schedule": max(15, settings.celery_fileapp_entrada_rescue_interval_seconds),
         "options": {"queue": settings.celery_source_list_ingest_queue},
     }
+if settings.celery_beat_fileapp_entrada_hygiene_enabled:
+    beat_schedule["orch-fileapp-reconcile-entrada-hygiene"] = {
+        "task": "app.tasks.fileapp.reconcile_entrada_hygiene",
+        "schedule": max(30, settings.celery_fileapp_entrada_hygiene_interval_seconds),
+        "options": {"queue": settings.celery_source_list_ingest_queue},
+    }
 if settings.celery_generate_file_enabled and settings.celery_generate_file_scan_enabled:
     beat_schedule["orch-generate-file-scan-due"] = {
         "task": "app.tasks.component_generate_file.scan_due",
@@ -96,6 +102,7 @@ celery_app.conf.update(
         "app.tasks.fileapp.associate_mailing": {"queue": settings.celery_fileapp_mailing_assoc_queue},
         "app.tasks.fileapp.reconcile_post_process": {"queue": settings.celery_source_list_ingest_queue},
         "app.tasks.fileapp.reconcile_entrada_rescue": {"queue": settings.celery_source_list_ingest_queue},
+        "app.tasks.fileapp.reconcile_entrada_hygiene": {"queue": settings.celery_source_list_ingest_queue},
     },
     beat_schedule=beat_schedule,
 )
