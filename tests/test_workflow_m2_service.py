@@ -19,6 +19,7 @@ from app.services.workflow_m2_service import (
     _extract_whatsapp_message_branch_key_from_runtime,
     _extract_send_with_whatsapp_numbers,
     _resolve_send_whatsapp_interactive_branch_label,
+    _resolve_send_whatsapp_interactive_branch_labels,
     _inject_contact_runtime_scope,
     _inject_callback_runtime_scope,
     _inject_system_runtime_scope,
@@ -371,6 +372,34 @@ def test_resolve_send_whatsapp_interactive_branch_label_uses_provider_and_key() 
         )
         == "wic:1147371486:simular_emprestimo"
     )
+
+
+def test_resolve_send_whatsapp_interactive_branch_labels_fallbacks_to_plain_key() -> None:
+    component = {"parameters": {"whatsapp_interactive_config": {"selected_number": "1147371486"}}}
+    runtime_variables = {
+        "last_payload": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "statuses": [
+                                    {
+                                        "status": "sent",
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+    assert _resolve_send_whatsapp_interactive_branch_labels(component=component, runtime_variables=runtime_variables) == [
+        "wic:1147371486:sent",
+        "sent",
+    ]
 
 
 def test_run_process_dialer_response_maps_status_to_branch() -> None:

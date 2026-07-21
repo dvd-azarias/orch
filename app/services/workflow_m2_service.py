@@ -3441,12 +3441,27 @@ def _resolve_send_whatsapp_interactive_branch_label(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
 ) -> str | None:
+    candidates = _resolve_send_whatsapp_interactive_branch_labels(
+        component=component,
+        runtime_variables=runtime_variables,
+    )
+    return candidates[0] if candidates else None
+
+
+def _resolve_send_whatsapp_interactive_branch_labels(
+    *,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> list[str]:
     key = _extract_whatsapp_message_branch_key_from_runtime(runtime_variables)
     if key is None:
         key = _extract_whatsapp_status_from_runtime(runtime_variables)
     if key is None:
-        return None
+        return []
 
+    key_token = str(key).strip()
+    if not key_token:
+        return []
     provider_number = _extract_whatsapp_provider_number_from_payload(runtime_variables.get("last_payload"))
     if provider_number is None:
         routing_meta = runtime_variables.get("send_whatsapp_interactive_routing")
@@ -3456,9 +3471,12 @@ def _resolve_send_whatsapp_interactive_branch_label(
                 provider_number = str(normalize_phone_to_canonical_ani(assignment.get("ani")) or "").strip() or None
     if provider_number is None:
         provider_number = _read_send_whatsapp_interactive_selected_number(component)
-    if provider_number is None:
-        return None
-    return f"wic:{provider_number}:{key}"
+
+    labels: list[str] = []
+    if provider_number is not None:
+        labels.append(f"wic:{provider_number}:{key_token}")
+    labels.append(key_token)
+    return list(dict.fromkeys(labels))
 
 
 def _unwrap_option(value: Any) -> str | None:
@@ -4060,7 +4078,7 @@ async def execute_workflow_m2_for_session(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
-                elif kind == "send_whatsapp_interactive":
+                elif kind in {"send_whatsapp_interactive", "send_whatsapp_template"}:
                     _set_whatsapp_resume_cursor(
                         runtime_variables,
                         process_card_cursor=next_card_uuid,
@@ -4080,22 +4098,24 @@ async def execute_workflow_m2_for_session(
                                 contact_row=contact_runtime_context,
                             )
 
-                    branch_label = _resolve_send_whatsapp_interactive_branch_label(
+                    branch_candidates = _resolve_send_whatsapp_interactive_branch_labels(
                         component=component,
                         runtime_variables=runtime_variables,
                     )
-                    if branch_label is not None:
-                        available_labels = outgoing_branch_labels(
-                            definition,
-                            current_card_uuid=next_card_uuid,
-                        )
-                        normalized_branch = str(branch_label).strip().lower()
-                        if normalized_branch not in available_labels:
+                    branch_label = None
+                    if branch_candidates:
+                        available_labels = outgoing_branch_labels(definition, current_card_uuid=next_card_uuid)
+                        for candidate in branch_candidates:
+                            normalized_candidate = str(candidate).strip().lower()
+                            if normalized_candidate in available_labels:
+                                branch_label = candidate
+                                break
+                        if branch_label is None:
                             runtime_variables["send_whatsapp_interactive_last_error"] = {
                                 "component_ref_id": component.get("ref_id"),
                                 "code": "send_whatsapp_interactive_branch_not_found",
                                 "message": (
-                                    f"Branch '{branch_label}' não encontrado para componente "
+                                    f"Branches '{', '.join(branch_candidates)}' não encontrados para componente "
                                     f"send_whatsapp_interactive. Sessão permanece em escuta."
                                 ),
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -4124,7 +4144,7 @@ async def execute_workflow_m2_for_session(
                                 step_index=executed_steps,
                                 card_cursor=last_card_uuid,
                                 component_kind_value=kind,
-                                details={"branch_label": branch_label, "next_card_uuid": next_card_uuid},
+                                details={"branch_candidates": branch_candidates, "next_card_uuid": next_card_uuid},
                             )
                             return await _finalize(
                                 WorkflowExecutionResult(
@@ -4194,10 +4214,17 @@ async def execute_workflow_m2_for_session(
                                 session_state=session_state,
                                 contact_row=contact_runtime_context,
                             )
-                            branch_label = _resolve_send_whatsapp_interactive_branch_label(
+                            limit_candidates = _resolve_send_whatsapp_interactive_branch_labels(
                                 component=component,
                                 runtime_variables=runtime_variables,
                             )
+                            if limit_candidates:
+                                available_labels = outgoing_branch_labels(definition, current_card_uuid=next_card_uuid)
+                                for candidate in limit_candidates:
+                                    normalized_candidate = str(candidate).strip().lower()
+                                    if normalized_candidate in available_labels:
+                                        branch_label = candidate
+                                        break
                         else:
                             runtime_variables.pop("send_whatsapp_interactive_last_error", None)
 
