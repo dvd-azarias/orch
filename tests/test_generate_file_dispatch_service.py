@@ -6,10 +6,12 @@ import pytest
 
 from app.services.generate_file_dispatch_service import (
     _build_row_buffer_payload,
+    _build_recurring_file_name,
     _extract_row_runtime_payload,
     _append_internal_suffix,
     _append_session_suffix,
     _is_permission_like_error,
+    _read_row_group_key,
     _safe_relpath,
     compute_next_run_at,
 )
@@ -95,3 +97,19 @@ def test_extract_row_runtime_payload_supports_wrapped_and_legacy() -> None:
     )
     assert legacy_row_payload["nome"] == "Legado"
     assert legacy_destination["file_name"] == "default.csv"
+
+
+def test_read_row_group_key_prefers_carteira_variants() -> None:
+    assert _read_row_group_key({"Carteira": "EmpreX"}) == "EmpreX"
+    assert _read_row_group_key({"carteira": "DNC"}) == "DNC"
+    assert _read_row_group_key({"CARTEIRA": "Medway"}) == "Medway"
+    assert _read_row_group_key({"nome": "Sem carteira"}) == "geral"
+
+
+def test_build_recurring_file_name_adds_group_and_timestamp() -> None:
+    value = _build_recurring_file_name(
+        base_file_name="acan.csv",
+        group_key="Parcela Mais",
+        reference_at=datetime(2026, 7, 21, 12, 34, 56, tzinfo=timezone.utc),
+    )
+    assert value == "acan_parcela_mais_20260721_093456.csv"

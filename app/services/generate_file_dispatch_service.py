@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import posixpath
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -16,6 +17,7 @@ from app.core.workspace import normalize_workspace_uuid, workspace_schema_from_u
 
 JOB_TABLE = "orch_generate_file_job"
 ROW_BUFFER_TABLE = "orch_generate_file_row_buffer"
+DISPATCH_AUDIT_TABLE = "orch_generate_file_dispatch_audit"
 
 
 def _tz_offset_hours(tz_id: str) -> int:
@@ -116,6 +118,34 @@ def _append_internal_suffix(file_name: str, sequence: int) -> str:
     return f"{stem}{suffix_token}.{ext}"
 
 
+def _slug_token(value: Any, *, fallback: str = "geral") -> str:
+    token = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    return token or fallback
+
+
+def _split_file_name(file_name: str) -> tuple[str, str]:
+    raw = str(file_name or "").strip() or "export.csv"
+    if "." not in raw:
+        return raw, ""
+    stem, ext = raw.rsplit(".", 1)
+    return stem, f".{ext}"
+
+
+def _build_recurring_file_name(
+    *,
+    base_file_name: str,
+    group_key: str | None,
+    reference_at: datetime | None = None,
+) -> str:
+    stamp_at = reference_at or datetime.now(timezone.utc)
+    stamp = stamp_at.astimezone(timezone(timedelta(hours=-3))).strftime("%Y%m%d_%H%M%S")
+    stem, ext = _split_file_name(base_file_name)
+    carteira_token = _slug_token(group_key, fallback="geral")
+    if carteira_token not in _slug_token(stem, fallback=""):
+        stem = f"{stem}_{carteira_token}"
+    return f"{stem}_{stamp}{ext or '.csv'}"
+
+
 def _is_permission_like_error(exc: Exception) -> bool:
     message = str(exc or "").lower()
     return (
@@ -152,6 +182,14 @@ def _extract_row_runtime_payload(
             return wrapped_row, destination_config
         return payload_jsonb, dict(default_destination_config)
     return {}, dict(default_destination_config)
+
+
+def _read_row_group_key(row_payload: dict[str, Any]) -> str:
+    for key in ("Carteira", "carteira", "CARTEIRA"):
+        value = row_payload.get(key)
+        if str(value or "").strip():
+            return str(value).strip()
+    return "geral"
 
 
 async def upsert_job_and_buffer_row(
@@ -535,6 +573,7 @@ def _sftp_write(
     format_config: dict[str, Any],
     session_id: int,
     payload_text: str,
+    allow_create_collision_fallback: bool = False,
 ) -> dict[str, Any]:
     import paramiko
 
@@ -577,6 +616,24 @@ def _sftp_write(
 
         try:
             if write_mode in {"create", "create_per_session"} and file_exists:
+                if allow_create_collision_fallback:
+                    for sequence in range(1, 10_000):
+                        candidate_name = _append_internal_suffix(file_name, sequence)
+                        if candidate_name in existing:
+                            continue
+                        remote_file = f"{remote_dir}/{candidate_name}" if remote_dir != "." else candidate_name
+                        with sftp.open(remote_file, "wb") as file_handle:
+                            file_handle.write(payload)
+                        target_name = candidate_name
+                        break
+                    else:
+                        raise RuntimeError("Arquivo já existe e não foi possível resolver colisão.")
+                    return {
+                        "file_name": target_name,
+                        "remote_path": f"/{remote_file.lstrip('/')}",
+                        "size_bytes": len(payload),
+                        "md5": hashlib.md5(payload).hexdigest(),
+                    }
                 raise RuntimeError("Arquivo já existe para write_mode=create.")
             if write_mode == "append" and file_exists:
                 with sftp.open(remote_file, "rb") as existing_file:
@@ -624,6 +681,48 @@ def _sftp_write(
         transport.close()
 
 
+async def _insert_dispatch_audit(
+    db_session: AsyncSession,
+    *,
+    workspace_uuid: str,
+    job_id: str,
+    file_target: str,
+    rows_selected: int,
+    rows_sent: int,
+    result: str,
+    error_jsonb: dict[str, Any] | None = None,
+) -> None:
+    safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
+    schema = workspace_schema_from_uuid(safe_workspace_uuid).replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{schema}"'))
+    await db_session.execute(
+        text(
+            f"""
+            INSERT INTO {DISPATCH_AUDIT_TABLE} (
+                job_id, file_target, rows_selected, rows_sent, result, error_jsonb, finished_at, created_at
+            ) VALUES (
+                CAST(:job_id AS uuid),
+                :file_target,
+                :rows_selected,
+                :rows_sent,
+                :result,
+                CAST(:error_jsonb AS jsonb),
+                NOW(),
+                NOW()
+            )
+            """
+        ),
+        {
+            "job_id": job_id,
+            "file_target": file_target,
+            "rows_selected": max(0, int(rows_selected)),
+            "rows_sent": max(0, int(rows_sent)),
+            "result": result,
+            "error_jsonb": json.dumps(error_jsonb or {}, ensure_ascii=False),
+        },
+    )
+
+
 async def process_generate_file_job(
     db_session: AsyncSession,
     *,
@@ -640,6 +739,18 @@ async def process_generate_file_job(
     job = await _load_job(db_session, workspace_uuid=workspace_uuid, job_id=job_id)
     if job is None:
         return {"job_id": job_id, "rows_selected": 0, "rows_sent": 0, "status": "job_not_found"}
+
+    lock_key = f"generate_file_job:{job_id}"
+    safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
+    schema = workspace_schema_from_uuid(safe_workspace_uuid).replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{schema}"'))
+    lock_result = await db_session.execute(
+        text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key)) AS acquired"),
+        {"lock_key": lock_key},
+    )
+    lock_row = lock_result.mappings().first() or {}
+    if not bool(lock_row.get("acquired")):
+        return {"job_id": job_id, "rows_selected": 0, "rows_sent": 0, "status": "locked"}
 
     rows = await _pick_pending_rows(db_session, workspace_uuid=workspace_uuid, job_id=job_id)
     if not rows:
@@ -665,52 +776,186 @@ async def process_generate_file_job(
     failed_ids: list[str] = []
     last_error = ""
     last_result: dict[str, Any] | None = None
-    for row in rows:
-        try:
+    mode = str(job.get("mode") or "imediato").strip().lower()
+    is_batch_mode = mode in {"agendado", "recorrente"}
+
+    if is_batch_mode:
+        grouped_rows: dict[
+            tuple[str, str, str, str, str, str],
+            dict[str, Any],
+        ] = {}
+        for row in rows:
             payload_jsonb = row.get("payload_jsonb")
             payload_row, row_destination_config = _extract_row_runtime_payload(
                 payload_jsonb,
                 default_destination_config=destination_config,
             )
-            text_payload = _serialize_rows(
-                format_type=format_type,
-                delimiter=delimiter,
-                include_header=include_header,
-                line_break=line_break,
-                rows=[payload_row],
+            group_key = _read_row_group_key(payload_row)
+            grouping_tuple = (
+                str(row_destination_config.get("path") or ""),
+                str(row_destination_config.get("sftp_host") or ""),
+                str(row_destination_config.get("sftp_port") or ""),
+                str(row_destination_config.get("sftp_user") or ""),
+                str(row_destination_config.get("sftp_password") or ""),
+                group_key,
             )
-            last_result = _sftp_write(
-                destination_config=row_destination_config,
-                format_config=format_config,
-                session_id=int(row["session_id"]),
-                payload_text=text_payload,
-            )
-            await _store_session_generate_file_result(
-                db_session,
-                workspace_uuid=workspace_uuid,
-                session_id=int(row["session_id"]),
-                result_payload={
-                    **last_result,
-                    "status": "success",
-                    "format_type": format_type,
-                    "write_mode": str(format_config.get("write_mode") or ""),
-                    "destination_type": str(job.get("destination_type") or ""),
+            bucket = grouped_rows.setdefault(
+                grouping_tuple,
+                {
+                    "rows": [],
+                    "row_ids": [],
+                    "session_ids": [],
+                    "destination_config": dict(row_destination_config),
+                    "group_key": group_key,
                 },
             )
-            success_ids.append(str(row["id"]))
-        except Exception as exc:
-            failed_ids.append(str(row["id"]))
-            last_error = str(exc)
-            await _store_session_generate_file_result(
-                db_session,
-                workspace_uuid=workspace_uuid,
-                session_id=int(row["session_id"]),
-                result_payload={
-                    "status": "error",
-                    "error": last_error[:2000],
-                    "job_id": job_id,
-                },
-            )
+            bucket["rows"].append(payload_row)
+            bucket["row_ids"].append(str(row["id"]))
+            bucket["session_ids"].append(int(row["session_id"]))
+
+        for bucket in grouped_rows.values():
+            selected_row_ids = list(bucket["row_ids"])
+            selected_session_ids = list(bucket["session_ids"])
+            group_key = str(bucket["group_key"] or "geral")
+            row_destination_config = dict(bucket["destination_config"])
+            selected_rows = list(bucket["rows"])
+            try:
+                base_file_name = str(row_destination_config.get("file_name") or destination_config.get("file_name") or "export.csv")
+                row_destination_config["file_name"] = _build_recurring_file_name(
+                    base_file_name=base_file_name,
+                    group_key=group_key,
+                )
+                text_payload = _serialize_rows(
+                    format_type=format_type,
+                    delimiter=delimiter,
+                    include_header=include_header,
+                    line_break=line_break,
+                    rows=selected_rows,
+                )
+                last_result = _sftp_write(
+                    destination_config=row_destination_config,
+                    format_config=format_config,
+                    session_id=int(selected_session_ids[0]),
+                    payload_text=text_payload,
+                    allow_create_collision_fallback=True,
+                )
+                for session_id in selected_session_ids:
+                    await _store_session_generate_file_result(
+                        db_session,
+                        workspace_uuid=workspace_uuid,
+                        session_id=int(session_id),
+                        result_payload={
+                            **last_result,
+                            "status": "success",
+                            "format_type": format_type,
+                            "write_mode": str(format_config.get("write_mode") or ""),
+                            "destination_type": str(job.get("destination_type") or ""),
+                            "batched": True,
+                            "rows_in_file": len(selected_rows),
+                        },
+                    )
+                success_ids.extend(selected_row_ids)
+                await _insert_dispatch_audit(
+                    db_session,
+                    workspace_uuid=workspace_uuid,
+                    job_id=job_id,
+                    file_target=str(last_result.get("remote_path") or last_result.get("file_name") or ""),
+                    rows_selected=len(selected_rows),
+                    rows_sent=len(selected_rows),
+                    result="ok",
+                    error_jsonb={"batched": True, "group_key": group_key},
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                failed_ids.extend(selected_row_ids)
+                for session_id in selected_session_ids:
+                    await _store_session_generate_file_result(
+                        db_session,
+                        workspace_uuid=workspace_uuid,
+                        session_id=int(session_id),
+                        result_payload={
+                            "status": "error",
+                            "error": last_error[:2000],
+                            "job_id": job_id,
+                            "batched": True,
+                        },
+                    )
+                await _insert_dispatch_audit(
+                    db_session,
+                    workspace_uuid=workspace_uuid,
+                    job_id=job_id,
+                    file_target=str(row_destination_config.get("file_name") or ""),
+                    rows_selected=len(selected_rows),
+                    rows_sent=0,
+                    result="error",
+                    error_jsonb={"error": last_error[:2000], "batched": True, "group_key": group_key},
+                )
+    else:
+        for row in rows:
+            try:
+                payload_jsonb = row.get("payload_jsonb")
+                payload_row, row_destination_config = _extract_row_runtime_payload(
+                    payload_jsonb,
+                    default_destination_config=destination_config,
+                )
+                text_payload = _serialize_rows(
+                    format_type=format_type,
+                    delimiter=delimiter,
+                    include_header=include_header,
+                    line_break=line_break,
+                    rows=[payload_row],
+                )
+                last_result = _sftp_write(
+                    destination_config=row_destination_config,
+                    format_config=format_config,
+                    session_id=int(row["session_id"]),
+                    payload_text=text_payload,
+                )
+                await _store_session_generate_file_result(
+                    db_session,
+                    workspace_uuid=workspace_uuid,
+                    session_id=int(row["session_id"]),
+                    result_payload={
+                        **last_result,
+                        "status": "success",
+                        "format_type": format_type,
+                        "write_mode": str(format_config.get("write_mode") or ""),
+                        "destination_type": str(job.get("destination_type") or ""),
+                    },
+                )
+                await _insert_dispatch_audit(
+                    db_session,
+                    workspace_uuid=workspace_uuid,
+                    job_id=job_id,
+                    file_target=str(last_result.get("remote_path") or last_result.get("file_name") or ""),
+                    rows_selected=1,
+                    rows_sent=1,
+                    result="ok",
+                )
+                success_ids.append(str(row["id"]))
+            except Exception as exc:
+                failed_ids.append(str(row["id"]))
+                last_error = str(exc)
+                await _store_session_generate_file_result(
+                    db_session,
+                    workspace_uuid=workspace_uuid,
+                    session_id=int(row["session_id"]),
+                    result_payload={
+                        "status": "error",
+                        "error": last_error[:2000],
+                        "job_id": job_id,
+                    },
+                )
+                await _insert_dispatch_audit(
+                    db_session,
+                    workspace_uuid=workspace_uuid,
+                    job_id=job_id,
+                    file_target=str(row_destination_config.get("file_name") or ""),
+                    rows_selected=1,
+                    rows_sent=0,
+                    result="error",
+                    error_jsonb={"error": last_error[:2000]},
+                )
 
     if success_ids:
         updated_success = await _mark_rows(
@@ -736,7 +981,6 @@ async def process_generate_file_job(
                 f"Falha ao atualizar linhas failed: esperado={len(failed_ids)} atualizado={updated_failed}"
             )
 
-    mode = str(job.get("mode") or "imediato").strip().lower()
     scheduling = job.get("scheduling_config") if isinstance(job.get("scheduling_config"), dict) else {}
     if mode in {"agendado", "recorrente"}:
         await _mark_next_run(
