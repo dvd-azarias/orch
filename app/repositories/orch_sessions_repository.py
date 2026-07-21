@@ -259,7 +259,7 @@ def _compute_effective_whatsapp_limit(
 
     percentual = max(0, min(100, int(percentual_consumo)))
     if percentual <= 0:
-        return 0
+        return None
     return int((allowed_limit * percentual) // 100)
 
 

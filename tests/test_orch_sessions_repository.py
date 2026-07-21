@@ -52,5 +52,5 @@ def test_compute_effective_whatsapp_limit_with_percentual_zero() -> None:
             allowed_limit_raw=1000,
             percentual_consumo=0,
         )
-        == 0
+        is None
     )
