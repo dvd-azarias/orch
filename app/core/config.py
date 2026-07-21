@@ -69,6 +69,17 @@ class Settings:
     celery_fileapp_entrada_rescue_fail_after_seconds: int
     celery_fileapp_entrada_rescue_max_retries: int
     celery_fileapp_entrada_rescue_lock_seconds: int
+    celery_beat_fileapp_entrada_hygiene_enabled: bool
+    celery_fileapp_entrada_hygiene_interval_seconds: int
+    celery_fileapp_entrada_hygiene_workspace_uuid: str | None
+    celery_fileapp_entrada_hygiene_batch_size: int
+    celery_fileapp_entrada_hygiene_lock_seconds: int
+    celery_fileapp_entrada_hygiene_no_source_list_sla_seconds: int
+    celery_fileapp_entrada_hygiene_ready_to_ingest_sla_seconds: int
+    celery_fileapp_entrada_hygiene_pending_field_mapping_sla_seconds: int
+    celery_fileapp_entrada_hygiene_root_max_age_seconds: int
+    celery_fileapp_entrada_hygiene_resubmit_cooldown_seconds: int
+    celery_fileapp_entrada_hygiene_no_source_list_max_resubmits: int
     celery_reconcile_pending_events_interval_seconds: int
     celery_reconcile_pending_events_batch_size: int
     celery_reconcile_pending_events_stale_seconds: int
@@ -376,6 +387,50 @@ def get_settings() -> Settings:
         celery_fileapp_entrada_rescue_lock_seconds=_read_env_int(
             "CELERY_FILEAPP_ENTRADA_RESCUE_LOCK_SECONDS",
             120,
+        ),
+        celery_beat_fileapp_entrada_hygiene_enabled=_read_env_bool(
+            "CELERY_BEAT_FILEAPP_ENTRADA_HYGIENE_ENABLED",
+            False,
+        ),
+        celery_fileapp_entrada_hygiene_interval_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_INTERVAL_SECONDS",
+            300,
+        ),
+        celery_fileapp_entrada_hygiene_workspace_uuid=_read_env_optional(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_WORKSPACE_UUID",
+            _read_env_optional("CELERY_FILEAPP_ENTRADA_RESCUE_WORKSPACE_UUID"),
+        ),
+        celery_fileapp_entrada_hygiene_batch_size=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_BATCH_SIZE",
+            200,
+        ),
+        celery_fileapp_entrada_hygiene_lock_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_LOCK_SECONDS",
+            180,
+        ),
+        celery_fileapp_entrada_hygiene_no_source_list_sla_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_NO_SOURCE_LIST_SLA_SECONDS",
+            600,
+        ),
+        celery_fileapp_entrada_hygiene_ready_to_ingest_sla_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_READY_TO_INGEST_SLA_SECONDS",
+            1200,
+        ),
+        celery_fileapp_entrada_hygiene_pending_field_mapping_sla_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_PENDING_FIELD_MAPPING_SLA_SECONDS",
+            1800,
+        ),
+        celery_fileapp_entrada_hygiene_root_max_age_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_ROOT_MAX_AGE_SECONDS",
+            1800,
+        ),
+        celery_fileapp_entrada_hygiene_resubmit_cooldown_seconds=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_RESUBMIT_COOLDOWN_SECONDS",
+            300,
+        ),
+        celery_fileapp_entrada_hygiene_no_source_list_max_resubmits=_read_env_int(
+            "CELERY_FILEAPP_ENTRADA_HYGIENE_NO_SOURCE_LIST_MAX_RESUBMITS",
+            1,
         ),
         celery_reconcile_pending_events_interval_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_INTERVAL_SECONDS", 15),
         celery_reconcile_pending_events_batch_size=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_BATCH_SIZE", 200),
