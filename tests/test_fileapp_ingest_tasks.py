@@ -7,6 +7,7 @@ import pytest
 from app.core.config import get_settings
 from app.services.fileapp_processed_file_service import FileAppProcessedFileError
 from app.tasks.fileapp_ingest_tasks import (
+    _associate_fileapp_mailing_task,
     _build_files_api_headers,
     _handle_step6_import_conflict_without_reupload,
     _is_retryable_step6_import_conflict,
@@ -578,3 +579,54 @@ def test_is_retryable_step6_import_conflict_for_http_400() -> None:
         "details": {"status_code": 400, "response_body": '{"detail":"Bad Request"}'},
     }
     assert _is_retryable_step6_import_conflict(result) is False
+
+
+@pytest.mark.asyncio
+async def test_associate_mailing_retry_exception_includes_target_url(monkeypatch) -> None:
+    class _DummySettings:
+        sync_webhook_base_url = "http://target-core-api.otima.io"
+        sync_ws_timeout_seconds = 5.0
+        target_core_api_bearer_token = "token-123"
+
+    class _DummyRequest:
+        retries = 1
+
+    class _DummyTask:
+        request = _DummyRequest()
+        max_retries = 8
+
+        def retry(self, *, exc, countdown):  # type: ignore[no-untyped-def]
+            raise exc
+
+    async def _fake_associate(**kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "status": "pending",
+            "reason": "mailing_import_not_ready",
+            "target_url": "http://target-core-api.otima.io/v2/flow/flow-uuid-1/mailings",
+        }
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.get_settings", lambda: _DummySettings())
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.fetch_workspace_otima_billing_api_key",
+        AsyncMock(return_value="wk-key"),
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.resolve_detach_all_files",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.associate_mailing_to_flow_from_file_event",
+        _fake_associate,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"mailing_association_not_ready:mailing_import_not_ready .*url=http://target-core-api\.otima\.io/v2/flow/flow-uuid-1/mailings",
+    ):
+        await _associate_fileapp_mailing_task(
+            task=_DummyTask(),
+            workspace_uuid="f0d1d7cf-8ddd-4dcb-9477-d87c11e81c26",
+            flow_uuid="flow-uuid-1",
+            mailing_uuid="mailing-uuid-1",
+            linked_by="2f388d0f-5519-4e30-99ad-de34c96b9a59",
+        )

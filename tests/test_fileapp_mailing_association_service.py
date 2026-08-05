@@ -38,6 +38,7 @@ async def test_associate_mailing_pending_when_import_not_ready(monkeypatch) -> N
 
     assert result["status"] == "pending"
     assert result["reason"] == "mailing_import_not_ready"
+    assert result["target_url"].endswith("/v2/flow/flow-uuid-1/mailings")
     assert post_called is False
 
 

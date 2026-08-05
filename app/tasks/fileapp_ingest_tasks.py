@@ -2882,8 +2882,16 @@ async def _associate_fileapp_mailing_task(
     if result.get("status") in {"error", "pending"}:
         retries = int(task.request.retries or 0)
         countdown = _RETRY_DELAYS[min(retries, len(_RETRY_DELAYS) - 1)]
+        target_url = str(result.get("target_url") or "").strip()
+        error_reason = str(result.get("reason") or "unknown").strip() or "unknown"
+        retry_error = RuntimeError(
+            f"mailing_association_not_ready:{error_reason}"
+            + (f" url={target_url}" if target_url else "")
+        )
+        if retries >= int(task.max_retries or 0):
+            raise retry_error
         raise task.retry(
-            exc=RuntimeError(f"mailing_association_not_ready:{result.get('reason')}"),
+            exc=retry_error,
             countdown=countdown,
         )
     return {

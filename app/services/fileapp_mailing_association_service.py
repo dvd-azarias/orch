@@ -167,6 +167,7 @@ async def associate_mailing_to_flow_from_file_event(
                 "status": "pending",
                 "reason": "mailing_import_not_ready",
                 "mailing_state": mailing_state,
+                "target_url": target_url,
             }
         if detach_all_files:
             flow_mailings_status_code, flow_mailings_body = await asyncio.to_thread(
@@ -216,6 +217,7 @@ async def associate_mailing_to_flow_from_file_event(
             "reason": "http_error",
             "status_code": int(exc.code),
             "response_body": detail,
+            "target_url": target_url,
         }
     except URLError as exc:
         logger.warning(
@@ -232,6 +234,7 @@ async def associate_mailing_to_flow_from_file_event(
             "status": "error",
             "reason": "url_error",
             "error_detail": str(exc.reason),
+            "target_url": target_url,
         }
     except Exception as exc:
         logger.exception(
@@ -247,6 +250,7 @@ async def associate_mailing_to_flow_from_file_event(
             "status": "error",
             "reason": type(exc).__name__,
             "error_detail": str(exc),
+            "target_url": target_url,
         }
 
     logger.info(
