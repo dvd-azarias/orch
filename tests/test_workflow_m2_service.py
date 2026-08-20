@@ -54,6 +54,7 @@ from app.services.workflow_m2_service import (
     _reset_loop_guard_counter,
     _ensure_variables,
     _resolve_code_editor_branch,
+    _resolve_condition_branch_label,
     _resolve_component_exception_branch_label,
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
@@ -243,6 +244,41 @@ def test_resolve_component_exception_branch_label_returns_exception_alias() -> N
         )
         == "exception_hgdxh542k"
     )
+
+
+def test_resolve_condition_branch_redirects_unmapped_branch_to_exception() -> None:
+    definition = {
+        "branches": [
+            {"from": "condition-1", "to": "card-valid", "branch": "valid"},
+            {"from": "condition-1", "to": "card-exception", "branch": "exception_condition"},
+        ]
+    }
+
+    assert (
+        _resolve_condition_branch_label(
+            definition=definition,
+            current_card_uuid="condition-1",
+            branch_label="missing",
+        )
+        == "exception_condition"
+    )
+
+
+def test_resolve_condition_branch_raises_without_exception_fallback() -> None:
+    definition = {
+        "branches": [
+            {"from": "condition-1", "to": "card-valid", "branch": "valid"},
+        ]
+    }
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        _resolve_condition_branch_label(
+            definition=definition,
+            current_card_uuid="condition-1",
+            branch_label="missing",
+        )
+
+    assert exc.value.code == "condition_branch_not_mapped"
 
 
 def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:

@@ -2407,6 +2407,30 @@ def _resolve_component_exception_branch_label(
     return None
 
 
+def _resolve_condition_branch_label(
+    *,
+    definition: dict[str, Any],
+    current_card_uuid: str,
+    branch_label: str | None,
+) -> str:
+    normalized_branch = str(branch_label or "").strip().lower()
+    outgoing_labels = outgoing_branch_labels(definition, current_card_uuid=current_card_uuid)
+    if normalized_branch in outgoing_labels:
+        return normalized_branch
+
+    exception_branch = _resolve_component_exception_branch_label(
+        definition=definition,
+        current_card_uuid=current_card_uuid,
+    )
+    if exception_branch is not None:
+        return exception_branch
+
+    raise WorkflowExecutionError(
+        "condition_branch_not_mapped",
+        f"Branch '{normalized_branch or '<empty>'}' não encontrado e o condition não possui branch de exception.",
+    )
+
+
 def _normalize_create_contact_mapping_key(raw_key: str) -> str:
     token = str(raw_key or "").strip().lower()
     token = (
@@ -3989,7 +4013,11 @@ async def execute_workflow_m2_for_session(
                         }
                         branch_label = exception_branch
                 elif kind == "condition":
-                    branch_label = _run_condition(component, runtime_variables)
+                    branch_label = _resolve_condition_branch_label(
+                        definition=definition,
+                        current_card_uuid=next_card_uuid,
+                        branch_label=_run_condition(component, runtime_variables),
+                    )
                 elif kind == "code_editor":
                     branch_candidates = outgoing_branch_labels(definition, current_card_uuid=next_card_uuid)
                     try:
@@ -4706,20 +4734,49 @@ async def execute_workflow_m2_for_session(
                         WorkflowExecutionResult(True, executed_steps, f"component_not_supported:{kind}", last_card_uuid, next_card_uuid)
                     )
             except Exception as exc:
-                step_finished_at = datetime.now(timezone.utc)
-                _append_metric(
-                    metric_type="card",
-                    status="error",
-                    started_at=step_started_at,
-                    finished_at=step_finished_at,
-                    latency_ms=(time.perf_counter() - step_started_perf) * 1000,
-                    stopped_reason=type(exc).__name__,
-                    step_index=executed_steps + 1,
-                    card_cursor=next_card_uuid,
-                    component_kind_value=kind,
-                    details={"message": str(exc)},
-                )
-                raise
+                if kind == "condition":
+                    exception_branch = _resolve_component_exception_branch_label(
+                        definition=definition,
+                        current_card_uuid=next_card_uuid,
+                    )
+                    if exception_branch is not None:
+                        runtime_variables["condition_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": getattr(exc, "code", type(exc).__name__),
+                            "message": str(exc),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        branch_label = exception_branch
+                    else:
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="error",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=(time.perf_counter() - step_started_perf) * 1000,
+                            stopped_reason=type(exc).__name__,
+                            step_index=executed_steps + 1,
+                            card_cursor=next_card_uuid,
+                            component_kind_value=kind,
+                            details={"message": str(exc)},
+                        )
+                        raise
+                else:
+                    step_finished_at = datetime.now(timezone.utc)
+                    _append_metric(
+                        metric_type="card",
+                        status="error",
+                        started_at=step_started_at,
+                        finished_at=step_finished_at,
+                        latency_ms=(time.perf_counter() - step_started_perf) * 1000,
+                        stopped_reason=type(exc).__name__,
+                        step_index=executed_steps + 1,
+                        card_cursor=next_card_uuid,
+                        component_kind_value=kind,
+                        details={"message": str(exc)},
+                    )
+                    raise
 
             current = next_card_uuid
             if branch_label is not None:
