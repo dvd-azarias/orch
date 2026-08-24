@@ -60,17 +60,19 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R4 — Schedules duplicados entre beats
 
-`STATUS`: LIKELY
+`STATUS`: CONFIRMED RUNTIME
 
 `IMPACT`: high
 
-`PROBABILITY`: medium/high com defaults versionados
+`PROBABILITY`: high enquanto os tres beats compartilharem as flags atuais
 
 `AFFECTED AREA`: Celery Beat
 
-`DESCRIPTION`: beat generate-file desabilita dispatch/heartbeat, mas defaults ainda habilitam reconcile de canal e pos-process FileApp. Dois beats podem publicar as mesmas rotinas.
+`DESCRIPTION`: beat generate-file desabilita dispatch/heartbeat, mas herda reconcile de canal e pos-process FileApp. O beat principal e o beat FileApp tambem herdam schedules FileApp. No host `10.1.20.237`, pending-channel reconcile foi publicado por dois beats; FileApp post-process e entrada-rescue foram publicados pelos tres beats, todos escopados ao mesmo workspace FileApp.
 
-`MITIGATION`: locks/cooldowns parciais.
+`RUNTIME EVIDENCE`: desde a subida conjunta, o beat principal e o generate-file publicaram 251 reconciliacoes de eventos cada. O beat principal, o FileApp e o generate-file publicaram 62 post-process e 62 entrada-rescue cada. Os schedule files sao distintos; nao houve disputa do arquivo local. O excesso e de publishers/tasks.
+
+`MITIGATION`: definir ownership explicito por schedule e desabilitar nos outros beats todas as flags nao pertencentes ao processo. Locks/cooldowns reduzem efeitos de negocio, mas nao eliminam publicacao, consumo e ruido duplicados.
 
 `DETECTION`: comparar logs de ambos os beats e task IDs por schedule.
 
@@ -306,7 +308,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: `send_whatsapp_template` compartilha o caminho de `send_whatsapp_interactive` e persiste `blocked_send_whatsapp_interactive` como sucesso. Esse motivo nao pertence a `BLOCKING_RUNNING_STOP_REASONS`, portanto o dispatcher nao aplica a transicao defensiva para `state=1`. Com o claim nao duravel de R1, a sessao pode permanecer `state=0`, ser selecionada a cada scan e retornar imediatamente o mesmo bloqueio, sem reenviar a mensagem e sem produzir alarme.
 
-`RUNTIME EVIDENCE`: em 2026-08-24 15:28 BRT, o flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` tinha sete sessoes GenericApp `state=0` bloqueadas no card de WhatsApp e 4.389.386 metricas de executor `success/blocked_send_whatsapp_interactive`. O flow nao possuia alarmes. As execucoes continuavam aproximadamente a cada dois segundos.
+`RUNTIME EVIDENCE`: em 2026-08-24 15:28 BRT, o flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` tinha sete sessoes GenericApp `state=0` bloqueadas no card de WhatsApp e 4.389.386 metricas de executor `success/blocked_send_whatsapp_interactive`. A auditoria do host `10.1.20.237`, entre 19:22 e aproximadamente 20:32 BRT, confirmou a amplificacao ainda ativa em tres workspaces: mais de 213 mil execucoes de executor e 428 mil metricas novas. As sessoes quentes continuavam `state=0`, `ended_at=NULL`, `unassigned_at=NULL` e com cursor seguinte. O journal recebeu cerca de 1,27 milhao de linhas/234 MB nessa janela. O banco ja armazenava aproximadamente 199,4 milhoes de linhas e mais de 90 GB em `orch_session_metrics` nos doze schemas com dados.
 
 `MITIGATION`: ate uma correcao aprovada, preservar evidencias e isolar as sessoes/dispatcher somente por procedimento operacional controlado. Nao usar contagem de alarmes como unico detector.
 
@@ -397,3 +399,43 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `DETECTION`: comparar `status` com `lsof`/process list e alertar para warning `node name already using this process mailbox`.
 
 `V2`: supervisor unico com lifecycle verificavel, environment manifest efetivo e recusas fail-closed para DB/broker compartilhados.
+
+## R22 — Health de Celery aceita workers alheios do broker compartilhado
+
+`STATUS`: CONFIRMED CODE / CONFIRMED RUNTIME
+
+`IMPACT`: high
+
+`PROBABILITY`: high no vhost compartilhado atual
+
+`AFFECTED AREA`: readiness / monitoramento / cutover
+
+`DESCRIPTION`: `/health/celery` executa `inspect().ping()` sem destination/filtro e define `worker_ok` quando existe qualquer resposta. O broker observado possui muitos workers de outras aplicacoes; portanto o endpoint pode ficar verde mesmo sem nenhum worker ORCH. `/health/ready` valida apenas DB, schema e a tabela `orch_sessions`, sem compor Celery.
+
+`RUNTIME EVIDENCE`: a resposta do host `10.1.20.237` incluiu os quinze workers ORCH e dezenas de nodes `gohp@...`/`target@...` alheios. Revisao adversarial independente confirmou que nenhum guard valida hostname, filas ou quantidade minima de workers ORCH.
+
+`MITIGATION`: monitorar temporariamente units systemd, hostnames ORCH esperados, passive queue consumers e heartbeat em conjunto. Corrigir o health para validar o conjunto minimo por papel/fila antes de usa-lo como criterio de cutover.
+
+`DETECTION`: comparar `worker_nodes` com o manifest esperado do host e falhar quando qualquer papel obrigatorio estiver ausente.
+
+`V2`: health por componente, fila e deployment identity, sem depender de resposta global do vhost.
+
+## R23 — Reciclagem de child mascara falha com `stopped_reason` indefinido
+
+`STATUS`: CONFIRMED CODE / OBSERVED IN RUNTIME
+
+`IMPACT`: high
+
+`PROBABILITY`: medium durante autoscale, shutdown ou recycle
+
+`AFFECTED AREA`: Celery workflow task / diagnostico / metricas
+
+`DESCRIPTION`: `_advance_session_task` atribui `stopped_reason` somente dentro do `try` ou de `except Exception`, mas o `finally` sempre o persiste. `SystemExit` e `CancelledError` nao sao cobertos por esse `except`; se ocorrerem durante o primeiro await, o `finally` levanta `UnboundLocalError` e mascara a causa primaria.
+
+`RUNTIME EVIDENCE`: childs do host `10.1.20.237` receberam SIGTERM durante conexao asyncpg. O traceback mostrou primeiro `SystemExit: -241` e depois `UnboundLocalError` em `workflow_tasks.py` ao ler `stopped_reason`. A unit permaneceu ativa e nao reiniciou; nao houve repeticao nos vinte minutos finais da auditoria. A razao exata do SIGTERM permanece desconhecida.
+
+`MITIGATION`: inicializar estado de metrica antes do `try` e preservar/categorizar cancelamento sem mascarar a excecao original. Adicionar teste focado para `BaseException`/cancelamento antes da atribuicao.
+
+`DETECTION`: alertar para `UnboundLocalError.*stopped_reason`, `WorkerLostError` e SIGTERM de childs; correlacionar com autoscale e limites de recycle.
+
+`V2`: wrapper de task com outcome inicializado e lifecycle/cancelamento explicitamente modelados.
