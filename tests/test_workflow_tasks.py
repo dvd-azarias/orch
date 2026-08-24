@@ -30,14 +30,26 @@ class _DummySessionContext:
 
 
 @pytest.mark.asyncio
-async def test_advance_session_commits_terminal_branch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("stopped_reason", "alarm_code"),
+    [
+        ("condition_branch_not_mapped", "workflow_m2_condition_branch_not_mapped"),
+        ("contact_member_scope_not_found", "workflow_m2_contact_member_scope_not_found"),
+        ("contact_member_routing_update_failed", "workflow_m2_contact_member_routing_update_failed"),
+    ],
+)
+async def test_advance_session_commits_terminal_failure_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+    stopped_reason: str,
+    alarm_code: str,
+) -> None:
     session_context = _DummySessionContext()
     monkeypatch.setattr(workflow_tasks, "get_settings", lambda: SimpleNamespace(celery_enabled=True))
     monkeypatch.setattr(workflow_tasks, "get_session_factory", lambda: (lambda: session_context))
     monkeypatch.setattr(workflow_tasks, "bind_workspace_context", lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"))
 
     async def _advance(*_args, **_kwargs) -> str:
-        return "condition_branch_not_mapped"
+        return stopped_reason
 
     alarms: list[dict] = []
     metrics: list[list[dict]] = []
@@ -60,6 +72,6 @@ async def test_advance_session_commits_terminal_branch_failure(monkeypatch: pyte
 
     assert session_context.session.commits == 1
     assert len(alarms) == 1
-    assert alarms[0]["code"] == "workflow_m2_condition_branch_not_mapped"
+    assert alarms[0]["code"] == alarm_code
     assert metrics[0][0]["status"] == "error"
-    assert metrics[0][0]["stopped_reason"] == "condition_branch_not_mapped"
+    assert metrics[0][0]["stopped_reason"] == stopped_reason

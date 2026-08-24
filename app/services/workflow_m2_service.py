@@ -112,6 +112,11 @@ DIALER_RESPONSE_BRANCH_BY_STATUS = {
 LOOP_GUARD_WORKFLOW_META_KEY = "loop_guard"
 LOOP_GUARD_COUNTER_KEY = "continuous_steps"
 LOOP_GUARD_LAST_TRANSITION_KEY = "last_transition_signature"
+POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
+TERMINAL_WORKFLOW_ERROR_CODES = {
+    "condition_branch_not_mapped",
+    "contact_member_routing_update_failed",
+}
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,22 @@ class WorkflowExecutionResult:
     stopped_reason: str
     last_card_uuid: str | None
     next_card_uuid: str | None
+
+
+@dataclass(frozen=True)
+class _ContactMemberRoutingScope:
+    contact_list_member_id: int | None
+    contact_list_id: str | None
+    mailing_id: int | None
+    explicit: bool
+    valid: bool
+
+    def selectors(self) -> dict[str, Any]:
+        return {
+            "contact_list_member_id": self.contact_list_member_id,
+            "contact_list_id": self.contact_list_id,
+            "mailing_id": self.mailing_id,
+        }
 
 
 class WorkflowExecutionError(Exception):
@@ -153,6 +174,13 @@ def _read_enabled(settings: Any) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _read_contextual_member_routing_enabled(settings: Any) -> bool:
+    raw = getattr(settings, "workflow_contextual_member_routing_enabled", False)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _read_max_steps(settings: Any) -> int:
     raw = getattr(settings, "workflow_v2_max_steps", 25)
     try:
@@ -178,6 +206,71 @@ def _to_uuid_or_none(raw_value: str | None) -> str | None:
         return str(UUID(str(raw_value)))
     except Exception:
         return None
+
+
+def _extract_contact_member_routing_scope(
+    runtime_variables: dict[str, Any],
+) -> _ContactMemberRoutingScope:
+    input_payload = runtime_variables.get("input_payload")
+    if not isinstance(input_payload, dict):
+        return _ContactMemberRoutingScope(None, None, None, False, True)
+
+    def _non_empty_text(raw_value: Any) -> str | None:
+        if raw_value is None:
+            return None
+        value = str(raw_value).strip()
+        return value or None
+
+    raw_member_id = _non_empty_text(input_payload.get("contact_list_member_id"))
+    raw_contact_list_id = _non_empty_text(input_payload.get("contact_list_id"))
+    raw_mailing_id = _non_empty_text(input_payload.get("mailing_id"))
+    explicit = any((raw_member_id, raw_contact_list_id, raw_mailing_id))
+    valid = True
+
+    contact_list_member_id: int | None = None
+    if raw_member_id is not None:
+        try:
+            contact_list_member_id = int(raw_member_id)
+        except (TypeError, ValueError):
+            valid = False
+        else:
+            if contact_list_member_id <= 0 or contact_list_member_id > POSTGRES_BIGINT_MAX:
+                contact_list_member_id = None
+                valid = False
+
+    contact_list_id: str | None = None
+    if raw_contact_list_id is not None:
+        contact_list_id = _to_uuid_or_none(raw_contact_list_id)
+        if contact_list_id is None:
+            valid = False
+
+    mailing_id: int | None = None
+    if raw_mailing_id is not None:
+        try:
+            mailing_id = int(raw_mailing_id)
+        except (TypeError, ValueError):
+            valid = False
+        else:
+            if mailing_id <= 0 or mailing_id > POSTGRES_BIGINT_MAX:
+                mailing_id = None
+                valid = False
+
+    return _ContactMemberRoutingScope(
+        contact_list_member_id=contact_list_member_id,
+        contact_list_id=contact_list_id,
+        mailing_id=mailing_id,
+        explicit=explicit,
+        valid=valid,
+    )
+
+
+def _resolved_contact_member_id_for_routing(
+    scope: _ContactMemberRoutingScope,
+    resolved_contact_list_member_id: int | None,
+) -> int | None:
+    if not scope.explicit:
+        return None
+    return resolved_contact_list_member_id
 
 
 def _ensure_workflow_meta(runtime_variables: dict[str, Any]) -> dict[str, Any]:
@@ -1195,6 +1288,7 @@ async def _prepare_send_with_whatsapp_contact_member(
     session_id: int,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
+    contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
     numbers, percentual_by_phone = _extract_send_with_whatsapp_number_policies(component)
     assignment = await assign_whatsapp_routing_for_session(
@@ -1203,6 +1297,7 @@ async def _prepare_send_with_whatsapp_contact_member(
         session_id=session_id,
         numbers=numbers,
         percentual_by_phone=percentual_by_phone,
+        contact_list_member_id=contact_list_member_id,
     )
     runtime_variables["send_with_whatsapp_routing"] = {
         "numbers": numbers,
@@ -1210,6 +1305,11 @@ async def _prepare_send_with_whatsapp_contact_member(
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if contact_list_member_id is not None and assignment is None:
+        raise WorkflowExecutionError(
+            "contact_member_routing_update_failed",
+            "O membro contextual deixou de estar ativo antes do roteamento WhatsApp.",
+        )
     return assignment
 
 
@@ -1220,6 +1320,7 @@ async def _prepare_send_whatsapp_interactive_contact_member(
     session_id: int,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
+    contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
     numbers, percentual_by_phone = _extract_send_whatsapp_interactive_number_policies(component)
     assignment = await assign_whatsapp_routing_for_session(
@@ -1228,6 +1329,7 @@ async def _prepare_send_whatsapp_interactive_contact_member(
         session_id=session_id,
         numbers=numbers,
         percentual_by_phone=percentual_by_phone,
+        contact_list_member_id=contact_list_member_id,
     )
     runtime_variables["send_whatsapp_interactive_routing"] = {
         "numbers": numbers,
@@ -1235,6 +1337,11 @@ async def _prepare_send_whatsapp_interactive_contact_member(
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if contact_list_member_id is not None and assignment is None:
+        raise WorkflowExecutionError(
+            "contact_member_routing_update_failed",
+            "O membro contextual deixou de estar ativo antes do roteamento WhatsApp interativo.",
+        )
     return assignment
 
 
@@ -1244,16 +1351,23 @@ async def _prepare_send_with_dialer_contact_member(
     flow_uuid: str,
     session_id: int,
     runtime_variables: dict[str, Any],
+    contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
     assignment = await assign_dialer_routing_for_session(
         db_session,
         flow_uuid=flow_uuid,
         session_id=session_id,
+        contact_list_member_id=contact_list_member_id,
     )
     runtime_variables["send_with_dialer_routing"] = {
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if contact_list_member_id is not None and assignment is None:
+        raise WorkflowExecutionError(
+            "contact_member_routing_update_failed",
+            "O membro contextual deixou de estar ativo antes do roteamento Dialer.",
+        )
     return assignment
 
 
@@ -3702,6 +3816,7 @@ async def execute_workflow_m2_for_session(
     safe_schema = get_current_workspace_schema().replace('"', '""')
     max_steps = _read_max_steps(settings)
     loop_guard_repeat_threshold = _read_loop_guard_repeat_threshold(settings)
+    contextual_member_routing_enabled = _read_contextual_member_routing_enabled(settings)
     execution_started_at = datetime.now(timezone.utc)
     execution_started_perf = time.perf_counter()
     session_uuid_for_metrics: str | None = None
@@ -3842,11 +3957,96 @@ async def execute_workflow_m2_for_session(
                 )
             )
 
-        contact_runtime_context = await fetch_contact_runtime_context_for_session(
-            db_session,
-            flow_uuid=flow_uuid,
-            session_id=session_id,
+        contact_member_scope = _extract_contact_member_routing_scope(runtime_variables)
+        if contextual_member_routing_enabled and contact_member_scope.valid:
+            contact_runtime_context = await fetch_contact_runtime_context_for_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+                contact_list_member_id=contact_member_scope.contact_list_member_id,
+                contact_list_id=contact_member_scope.contact_list_id,
+                mailing_id=contact_member_scope.mailing_id,
+            )
+        elif contextual_member_routing_enabled:
+            contact_runtime_context = None
+        else:
+            contact_runtime_context = await fetch_contact_runtime_context_for_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+            )
+
+        resolved_contact_list_member_id: int | None = None
+        if contextual_member_routing_enabled and isinstance(contact_runtime_context, dict):
+            try:
+                resolved_contact_list_member_id = int(contact_runtime_context["contact_list_member_id"])
+            except (KeyError, TypeError, ValueError):
+                contact_runtime_context = None
+
+        if contextual_member_routing_enabled:
+            workflow_meta = _ensure_workflow_meta(runtime_variables)
+            workflow_meta["contact_member_routing"] = {
+                "selectors": contact_member_scope.selectors(),
+                "explicit": contact_member_scope.explicit,
+                "valid": contact_member_scope.valid,
+                "resolved_contact_list_member_id": resolved_contact_list_member_id,
+            }
+
+        routing_contact_list_member_id = _resolved_contact_member_id_for_routing(
+            contact_member_scope,
+            resolved_contact_list_member_id,
         )
+
+        if (
+            contextual_member_routing_enabled
+            and contact_member_scope.explicit
+            and contact_runtime_context is None
+        ):
+            failed_at = datetime.now(timezone.utc)
+            failure_message = (
+                "Identificadores de membro/lista inválidos no payload de origem."
+                if not contact_member_scope.valid
+                else "Nenhum membro ativo corresponde ao escopo explícito da sessão."
+            )
+            workflow_meta = _ensure_workflow_meta(runtime_variables)
+            workflow_meta["terminal_failure"] = {
+                "code": "contact_member_scope_not_found",
+                "message": failure_message,
+                "selectors": contact_member_scope.selectors(),
+                "failed_at": failed_at.isoformat(),
+            }
+            last_card_uuid = session_state.get("last_card_uuid")
+            _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=None)
+            await replace_session_workflow_state(
+                db_session,
+                session_id=session_id,
+                runtime_variables=runtime_variables,
+                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                next_card_uuid=None,
+                ended_at=failed_at,
+                state=3,
+            )
+            logger.warning(
+                "workflow m2 contact member scope rejected",
+                extra={
+                    "event": "orch.workflow.m2.contact_member_scope_rejected",
+                    "flow_uuid": flow_uuid,
+                    "session_id": session_id,
+                    "session_uuid": session_uuid_for_metrics,
+                    "selectors": contact_member_scope.selectors(),
+                    "scope_valid": contact_member_scope.valid,
+                },
+            )
+            return await _finalize(
+                WorkflowExecutionResult(
+                    True,
+                    0,
+                    "contact_member_scope_not_found",
+                    last_card_uuid,
+                    None,
+                )
+            )
+
         _inject_contact_runtime_scope(
             runtime_variables=runtime_variables,
             contact_row=contact_runtime_context,
@@ -4252,6 +4452,7 @@ async def execute_workflow_m2_for_session(
                             session_id=session_id,
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_list_member_id=routing_contact_list_member_id,
                         )
                         if _is_send_with_whatsapp_limit_exhausted(assignment):
                             _set_synthetic_whatsapp_status_payload(
@@ -4482,6 +4683,7 @@ async def execute_workflow_m2_for_session(
                             session_id=session_id,
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_list_member_id=routing_contact_list_member_id,
                         )
                         if _is_send_with_whatsapp_limit_exhausted(assignment):
                             _clear_blocking_execution(runtime_variables)
@@ -4507,6 +4709,7 @@ async def execute_workflow_m2_for_session(
                                 flow_uuid=flow_uuid,
                                 session_id=session_id,
                                 runtime_variables=runtime_variables,
+                                contact_list_member_id=routing_contact_list_member_id,
                             )
                         else:
                             should_block_execution = False
@@ -4756,56 +4959,53 @@ async def execute_workflow_m2_for_session(
                         WorkflowExecutionResult(True, executed_steps, f"component_not_supported:{kind}", last_card_uuid, next_card_uuid)
                     )
             except Exception as exc:
+                if isinstance(exc, WorkflowExecutionError) and exc.code in TERMINAL_WORKFLOW_ERROR_CODES:
+                    failed_at = datetime.now(timezone.utc)
+                    failed_card_uuid = next_card_uuid
+                    workflow_meta = _ensure_workflow_meta(runtime_variables)
+                    workflow_meta["terminal_failure"] = {
+                        "code": exc.code,
+                        "message": exc.message,
+                        "component_kind": kind,
+                        "component_ref_id": component.get("ref_id"),
+                        "failed_at": failed_at.isoformat(),
+                    }
+                    last_card_uuid = failed_card_uuid
+                    next_card_uuid = None
+                    executed_steps += 1
+                    _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=None)
+                    await replace_session_workflow_state(
+                        db_session,
+                        session_id=session_id,
+                        runtime_variables=runtime_variables,
+                        last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                        next_card_uuid=None,
+                        ended_at=failed_at,
+                        state=3,
+                    )
+                    step_finished_at = datetime.now(timezone.utc)
+                    _append_metric(
+                        metric_type="card",
+                        status="error",
+                        started_at=step_started_at,
+                        finished_at=step_finished_at,
+                        latency_ms=(time.perf_counter() - step_started_perf) * 1000,
+                        stopped_reason=exc.code,
+                        step_index=executed_steps,
+                        card_cursor=last_card_uuid,
+                        component_kind_value=kind,
+                        details={"message": exc.message, "terminal": True},
+                    )
+                    return await _finalize(
+                        WorkflowExecutionResult(
+                            True,
+                            executed_steps,
+                            exc.code,
+                            last_card_uuid,
+                            None,
+                        )
+                    )
                 if kind == "condition":
-                    if isinstance(exc, WorkflowExecutionError) and exc.code == "condition_branch_not_mapped":
-                        failed_at = datetime.now(timezone.utc)
-                        failed_card_uuid = next_card_uuid
-                        workflow_meta = runtime_variables.get("workflow_v2")
-                        if not isinstance(workflow_meta, dict):
-                            workflow_meta = {}
-                            runtime_variables["workflow_v2"] = workflow_meta
-                        workflow_meta["terminal_failure"] = {
-                            "code": exc.code,
-                            "message": exc.message,
-                            "component_kind": kind,
-                            "component_ref_id": component.get("ref_id"),
-                            "failed_at": failed_at.isoformat(),
-                        }
-                        last_card_uuid = failed_card_uuid
-                        next_card_uuid = None
-                        executed_steps += 1
-                        _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=None)
-                        await replace_session_workflow_state(
-                            db_session,
-                            session_id=session_id,
-                            runtime_variables=runtime_variables,
-                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
-                            next_card_uuid=None,
-                            ended_at=failed_at,
-                            state=3,
-                        )
-                        step_finished_at = datetime.now(timezone.utc)
-                        _append_metric(
-                            metric_type="card",
-                            status="error",
-                            started_at=step_started_at,
-                            finished_at=step_finished_at,
-                            latency_ms=(time.perf_counter() - step_started_perf) * 1000,
-                            stopped_reason=exc.code,
-                            step_index=executed_steps,
-                            card_cursor=last_card_uuid,
-                            component_kind_value=kind,
-                            details={"message": exc.message, "terminal": True},
-                        )
-                        return await _finalize(
-                            WorkflowExecutionResult(
-                                True,
-                                executed_steps,
-                                exc.code,
-                                last_card_uuid,
-                                None,
-                            )
-                        )
                     exception_branch = _resolve_component_exception_branch_label(
                         definition=definition,
                         current_card_uuid=next_card_uuid,

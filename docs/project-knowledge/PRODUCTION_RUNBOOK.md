@@ -123,3 +123,19 @@ Seguir `docs/MIGRATIONS_PLAYBOOK.md`. Aplicar primeiro em workspace LAB, validar
 
 Nao ha procedimento universal versionado. Antes de qualquer mudanca, definir rollback por area. Para documentacao apenas, rollback e reverter os arquivos de conhecimento. Para runtime, nao improvisar reset, migration reversa ou purge de fila.
 
+## Rollout do roteamento contextual de membros
+
+A correcao de selecao de `contact_list_members` nao exige migration e fica protegida por `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED`.
+
+Sequencia segura:
+
+1. implantar o codigo com a flag `false` e reiniciar API/workers;
+2. em filas dedicadas e com dispatch/reconcile escopados ao workspace de teste, iniciar com a flag `true`;
+3. antes de habilitar em outro workspace, confirmar que `contact_list_member_id` e `mailing_id` recebidos sao numericos e que `contact_list_id` e UUID;
+4. validar um caso Dialer e um WhatsApp com identificador duplicado, comparando payload, `variables.contact.contact_list_member_id`, metadata `*_routing.assignment` e a linha atualizada;
+5. validar conflito deliberado: sessao deve terminar em `state=3`, `ended_at` preenchido, cursor nulo e um alarme `workflow_m2_contact_member_scope_not_found`;
+6. habilitar a flag no ambiente alvo, reiniciar os processos e monitorar os dois alarmes `workflow_m2_contact_member_scope_not_found` e `workflow_m2_contact_member_routing_update_failed`.
+
+Rollback: definir a flag como `false` e reiniciar API/workers. Isso restaura o seletor legado; nao desfaz `linked_actuator`, `ani`, consumo ou sessoes ja terminalizadas.
+
+Reparacao historica e uma operacao separada. Nao executar backfill em massa: reconstruir a relacao sessao/lista pelo payload, conferir ownership externo e aplicar updates guardados por IDs aprovados.

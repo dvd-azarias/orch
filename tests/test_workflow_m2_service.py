@@ -14,6 +14,7 @@ from app.services.workflow_m2_service import (
     _compute_frozen_until,
     _extract_send_with_whatsapp_number_policies,
     _extract_send_whatsapp_interactive_number_policies,
+    _extract_contact_member_routing_scope,
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
     _extract_whatsapp_message_branch_key_from_runtime,
@@ -28,6 +29,7 @@ from app.services.workflow_m2_service import (
     _mark_blocking_execution,
     _normalize_contact_extra_data,
     _prepare_send_with_whatsapp_contact_member,
+    _prepare_send_with_dialer_contact_member,
     _read_blocking_stop_reason,
     _read_whatsapp_last_preempt_signature,
     _read_whatsapp_resume_cursor,
@@ -42,6 +44,7 @@ from app.services.workflow_m2_service import (
     _run_intelligent_agent,
     _read_loop_guard_repeat_threshold,
     _resolve_send_with_dialer_branch_label,
+    _resolved_contact_member_id_for_routing,
     _run_process_dialer_response,
     _run_run_flow,
     _run_process_whatsapp_response,
@@ -64,6 +67,7 @@ from app.services.workflow_m2_service import (
     _set_run_flow_waiting,
     execute_workflow_m2_for_session,
 )
+from app.services.orch_trigger_service import m2_alarm_from_stopped_reason
 
 
 def test_blocking_stop_reason_for_whatsapp_components() -> None:
@@ -113,6 +117,95 @@ def test_read_loop_guard_repeat_threshold_bounds_values() -> None:
 
     _Settings.workflow_m2_loop_guard_repeat_threshold = "999999"
     assert _read_loop_guard_repeat_threshold(_Settings()) == 5000
+
+
+def test_extract_contact_member_routing_scope_uses_all_explicit_selectors() -> None:
+    scope = _extract_contact_member_routing_scope(
+        {
+            "input_payload": {
+                "contact_list_member_id": "10655",
+                "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
+                "mailing_id": 1115,
+            }
+        }
+    )
+
+    assert scope.explicit is True
+    assert scope.valid is True
+    assert scope.contact_list_member_id == 10655
+    assert scope.contact_list_id == "dc7dc1c1-2c98-42e9-a788-5d186f458daa"
+    assert scope.mailing_id == 1115
+
+
+def test_extract_contact_member_routing_scope_rejects_invalid_explicit_selector() -> None:
+    scope = _extract_contact_member_routing_scope(
+        {
+            "input_payload": {
+                "contact_list_member_id": "not-an-id",
+                "contact_list_id": "not-a-uuid",
+                "mailing_id": None,
+            }
+        }
+    )
+
+    assert scope.explicit is True
+    assert scope.valid is False
+    assert scope.contact_list_member_id is None
+    assert scope.contact_list_id is None
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["contact_list_member_id", "mailing_id"],
+)
+def test_extract_contact_member_routing_scope_rejects_bigint_overflow(field_name: str) -> None:
+    scope = _extract_contact_member_routing_scope(
+        {"input_payload": {field_name: "9223372036854775808"}}
+    )
+
+    assert scope.explicit is True
+    assert scope.valid is False
+
+
+def test_extract_contact_member_routing_scope_preserves_legacy_when_empty() -> None:
+    scope = _extract_contact_member_routing_scope(
+        {
+            "input_payload": {
+                "contact_list_member_id": None,
+                "contact_list_id": "",
+                "mailing_id": None,
+            }
+        }
+    )
+
+    assert scope.explicit is False
+    assert scope.valid is True
+
+
+def test_resolved_contact_member_id_only_pins_explicit_scope() -> None:
+    legacy_scope = _extract_contact_member_routing_scope({"input_payload": {}})
+    explicit_scope = _extract_contact_member_routing_scope(
+        {"input_payload": {"contact_list_member_id": "10655"}}
+    )
+
+    assert _resolved_contact_member_id_for_routing(legacy_scope, 10687) is None
+    assert _resolved_contact_member_id_for_routing(explicit_scope, 10655) == 10655
+
+
+def test_contact_member_terminal_failures_have_inline_alarms() -> None:
+    scope_alarm = m2_alarm_from_stopped_reason("contact_member_scope_not_found")
+    update_alarm = m2_alarm_from_stopped_reason("contact_member_routing_update_failed")
+
+    assert scope_alarm == (
+        "error",
+        "workflow_m2_contact_member_scope_not_found",
+        "Sessão encerrada porque nenhum membro ativo corresponde ao escopo explícito recebido.",
+    )
+    assert update_alarm == (
+        "error",
+        "workflow_m2_contact_member_routing_update_failed",
+        "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
+    )
 
 
 def test_ensure_variables_seeds_callback_and_file_content_scopes() -> None:
@@ -403,6 +496,104 @@ async def test_condition_sem_branch_terminaliza_execucao(monkeypatch: pytest.Mon
     assert persisted[-1]["next_card_uuid"] is None
     assert runtime_variables["workflow_v2"]["terminal_failure"]["code"] == "condition_branch_not_mapped"
     assert metrics[-1][-1]["stopped_reason"] == "condition_branch_not_mapped"
+
+
+@pytest.mark.asyncio
+async def test_contextual_member_scope_conflict_terminalizes_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "33333333-3333-3333-3333-333333333333"
+    card_uuid = "11111111-1111-1111-1111-111111111111"
+    runtime_variables = {
+        "input_payload": {
+            "contact_list_member_id": "10655",
+            "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
+            "mailing_id": 1115,
+        },
+        "workflow_v2": {"next_card_cursor": card_uuid},
+    }
+    persisted: list[dict] = []
+    fetched_scopes: list[dict] = []
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        async def execute(self, *_args, **_kwargs) -> _Result:
+            return _Result()
+
+    async def _fetch_flow(*_args, **_kwargs) -> dict:
+        return {"id": flow_uuid}
+
+    async def _fetch_revision(*_args, **_kwargs) -> dict:
+        return {"id": "44444444-4444-4444-4444-444444444444", "definition": {}}
+
+    async def _fetch_session(*_args, **_kwargs) -> dict:
+        return {
+            "uuid": "55555555-5555-5555-5555-555555555555",
+            "state": 0,
+            "runtime_variables": runtime_variables,
+            "last_card_uuid": None,
+            "next_card_uuid": card_uuid,
+        }
+
+    async def _fetch_contact(*_args, **kwargs):
+        fetched_scopes.append(kwargs)
+        return None
+
+    async def _replace(*_args, **kwargs) -> None:
+        persisted.append(kwargs)
+
+    async def _persist_metrics(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "_read_contextual_member_routing_enabled",
+        lambda _settings: True,
+    )
+    monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", _fetch_flow)
+    monkeypatch.setattr(workflow_m2_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(workflow_m2_service, "fetch_session_workflow_state", _fetch_session)
+    monkeypatch.setattr(workflow_m2_service, "fetch_contact_runtime_context_for_session", _fetch_contact)
+    monkeypatch.setattr(workflow_m2_service, "replace_session_workflow_state", _replace)
+    monkeypatch.setattr(workflow_m2_service, "persist_session_metrics", _persist_metrics)
+
+    result = await execute_workflow_m2_for_session(
+        _Session(),
+        flow_uuid=flow_uuid,
+        session_id=6937,
+    )
+
+    assert fetched_scopes == [
+        {
+            "flow_uuid": flow_uuid,
+            "session_id": 6937,
+            "contact_list_member_id": 10655,
+            "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
+            "mailing_id": 1115,
+        }
+    ]
+    assert result.stopped_reason == "contact_member_scope_not_found"
+    assert persisted[-1]["state"] == 3
+    assert persisted[-1]["ended_at"] is not None
+    assert persisted[-1]["next_card_uuid"] is None
+    assert runtime_variables["workflow_v2"]["terminal_failure"]["code"] == "contact_member_scope_not_found"
 
 
 def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:
@@ -1030,11 +1221,13 @@ async def test_prepare_send_with_whatsapp_contact_member_updates_runtime(monkeyp
         session_id,
         numbers,
         percentual_by_phone,
+        contact_list_member_id,
     ):
         assert flow_uuid == "0300054c-5f39-4cda-ae88-fe993fd9044b"
         assert session_id == 101
         assert numbers == ["1147371485", "1147371486"]
         assert percentual_by_phone == {"1147371485": 0, "1147371486": 0}
+        assert contact_list_member_id == 10
         return {
             "contact_list_member_id": 10,
             "ani": "1147371485",
@@ -1054,11 +1247,75 @@ async def test_prepare_send_with_whatsapp_contact_member_updates_runtime(monkeyp
         session_id=101,
         component=component,
         runtime_variables=runtime_variables,
+        contact_list_member_id=10,
     )
 
     route_data = runtime_variables["send_with_whatsapp_routing"]
     assert route_data["numbers"] == ["1147371485", "1147371486"]
     assert route_data["assignment"]["ani"] == "1147371485"
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_with_dialer_uses_resolved_contact_member(monkeypatch) -> None:
+    runtime_variables: dict[str, object] = {}
+
+    async def fake_assign_dialer_routing_for_session(  # noqa: ANN001
+        db_session,
+        *,
+        flow_uuid,
+        session_id,
+        contact_list_member_id,
+    ):
+        assert flow_uuid == "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"
+        assert session_id == 6937
+        assert contact_list_member_id == 10655
+        return {
+            "contact_list_member_id": 10655,
+            "ani": None,
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_routing_for_session",
+        fake_assign_dialer_routing_for_session,
+    )
+
+    assignment = await _prepare_send_with_dialer_contact_member(
+        db_session=None,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        session_id=6937,
+        runtime_variables=runtime_variables,
+        contact_list_member_id=10655,
+    )
+
+    assert assignment is not None
+    assert assignment["contact_list_member_id"] == 10655
+    assert runtime_variables["send_with_dialer_routing"]["assignment"]["linked_actuator"] == "dialer"
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_with_dialer_fails_when_resolved_member_becomes_inactive(monkeypatch) -> None:
+    async def fake_assign_dialer_routing_for_session(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_routing_for_session",
+        fake_assign_dialer_routing_for_session,
+    )
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _prepare_send_with_dialer_contact_member(
+            db_session=None,
+            flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+            session_id=6937,
+            runtime_variables={},
+            contact_list_member_id=10655,
+        )
+
+    assert exc.value.code == "contact_member_routing_update_failed"
 
 
 def test_should_resume_whatsapp_blocking_execution_when_status_or_message_or_pending() -> None:

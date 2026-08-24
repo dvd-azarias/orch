@@ -62,6 +62,7 @@ DATABASE_POOL_TIMEOUT=30
 DATABASE_POOL_RECYCLE=1800
 WORKFLOW_V2_ENABLED=false
 WORKFLOW_V2_EXECUTE_M2=false
+WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED=false
 WORKFLOW_V2_MAX_STEPS=25
 WORKFLOW_M2_LOOP_GUARD_REPEAT_THRESHOLD=300
 ```
@@ -169,6 +170,7 @@ Observação:
   - executa `finish_flow` com `ended_at` e `state=3`;
   - atualiza `last_card_uuid` e `next_card_uuid` a cada transição;
   - para com segurança em componente fora do escopo e retorna `workflow_execution`.
+- Quando `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED=true`, o M2 resolve `contact_list_members` pelo escopo imutável do payload (`contact_list_member_id`, lista e mailing), valida seletores combinados e só usa o fallback legado quando todos estão ausentes.
 - Para concorrência alta, usa lock transacional por chave lógica via `pg_advisory_xact_lock`.
 - Em condição de corrida/out-of-order, tenta reaproveitar a sessão mais recente pela mesma chave de sessão (`flow_uuid + entity + entity_type + entity_address + entity_session_id`) antes de criar nova.
 - Semântica de origem por sessão:
