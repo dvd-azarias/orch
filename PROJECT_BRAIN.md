@@ -17,7 +17,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 5. FileApp decide `tipo_1` ou `tipo_2` pela resolucao de `mapping_template`. `tipo_1` delega a importacao ao Target Core; `tipo_2` persiste sessoes no ORCH. O efeito final `persons + orch_sessions` do `tipo_1` ainda exige comprovacao E2E externa.
 6. O codigo atual nao implementa autenticacao para trigger, consultas ou endpoints admin de migration. Protecao externa e `UNKNOWN`.
 7. O risco de amplificacao deixou de ser apenas estatico: em 2026-08-24, sessoes invalidas de um flow draft acumularam 1.154.025 falhas. As sessoes `256`, `257` e `263` foram terminalizadas de forma auditada; consulte `docs/project-knowledge/INCIDENT_HISTORY.md` antes de intervir em dispatcher, reconciliador, filas ou sessoes.
-8. Bloqueios considerados sucesso tambem podem ser amplificados sem alarme: outro flow acumulou mais de 4,3 milhoes de execucoes `blocked_send_whatsapp_interactive` para sete sessoes pendentes. O motivo nao pertence a `BLOCKING_RUNNING_STOP_REASONS`; consulte o historico antes de diagnosticar apenas por alarmes.
+8. Bloqueios considerados sucesso tambem podem ser amplificados sem alarme. A auditoria posterior a migracao dos workers para o host `10.1.20.237` confirmou o loop `blocked_send_whatsapp_interactive` ativo em tres workspaces, mais de 213 mil execucoes de executor e 428 mil metricas em cerca de 70 minutos. O motivo nao pertence a `BLOCKING_RUNNING_STOP_REASONS`; consulte o historico antes de diagnosticar apenas por alarmes.
 9. A suite coleta 295 testes. Em 2026-08-24, 270 passaram e 25 pararam primeiro porque testes antigos chamam a rota legada com o parametro removido `flow_uuid`; corrigir apenas a assinatura pode revelar divergencias semanticas adicionais. Nao trate a suite como verde.
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
 
@@ -107,14 +107,17 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - O flow `0e378237-4a61-4d5f-89f3-b07b594df38f` demonstrou em runtime que erro permanente de definicao pode ser reenfileirado indefinidamente. A contenção final terminou em 1.154.025 alarmes; as sessoes `256`, `257` e `263` foram encerradas e a contagem estabilizou.
 - `CELERY_DISPATCH_WORKSPACE_UUID` nao limita o reconciliador de eventos pendentes. Uma stack `f5_local` com dispatcher escopado, mas sem `CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID`, varreu outro workspace no DB compartilhado e reativou a sessao `263`.
 - `scripts/dev_phase_stack.sh status` pode reportar down enquanto subprocessos Uvicorn/Celery sobrevivem ao wrapper registrado no pidfile. Em 2026-08-24 foram encontrados processos `f5_local` stale por quase duas horas; a contencao exigiu encerramento por command line.
-- O seletor legado de Dialer/WhatsApp/contexto escolhe o membro ativo mais novo por `contact_identifier`; em 2026-08-24 foram confirmadas 26 sessoes divergentes no workspace Highcomm. A correcao contextual esta implementada sob `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED`, default-off e ainda pendente de validacao runtime/rollout.
+- O seletor legado de Dialer/WhatsApp/contexto escolhe o membro ativo mais novo por `contact_identifier`; em 2026-08-24 foram confirmadas 26 sessoes divergentes no workspace Highcomm. A correcao contextual foi habilitada no host `10.1.20.237`: 46 sessoes novas com escopo explicito produziram 46 assignments sem divergencia de membro, lista, mailing ou atuador; a sessao `6941` do flow alvo resolveu o membro `10655` e persistiu `linked_actuator=dialer`.
 - O flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` demonstrou a variante silenciosa: 4.389.386 metricas de executor com `blocked_send_whatsapp_interactive`, sete sessoes `state=0` e nenhum alarme do flow na fotografia de 2026-08-24 15:28 BRT.
+- No snapshot pos-migracao, API, tres beats e quinze workers ORCH estavam ativos no `10.1.20.237`, sem restart de unit; as oito filas ORCH tinham cinco consumers e zero mensagens prontas. Os workers/beats ORCH permaneceram desabilitados no `10.1.20.136`, cuja API continuou ativa por restricao temporaria do proxy.
+- Tres beats no `10.1.20.237` publicavam schedules sobrepostos: pending-channel reconcile em dois beats e FileApp post-process/rescue em tres. Os arquivos de schedule eram distintos; a duplicacao vinha das flags herdadas pelo mesmo `celery_app`.
+- `/health/celery` considera qualquer worker do vhost compartilhado como prova de `worker_ok`; `/health/ready` valida somente DB/schema. Ambos podem permanecer verdes sem workers ORCH.
+- Reciclagem SIGTERM de child process expos `UnboundLocalError` em `_advance_session_task`: `stopped_reason` pode ser lido no `finally` antes de ser inicializado, mascarando a excecao original.
 - `live` nao e suportado no branch atual nem em `main`; o commit isolado `bd461a5` nao foi integrado e sua implementacao nao executa handoff ou callback externo.
 - O smoke versionado valida aceite HTTP, nao conclusao E2E.
 
 ### LIKELY
 
-- Os dois beats podem publicar reconciliacoes duplicadas se os defaults versionados forem usados.
 - Enqueues duplicados podem ocorrer enquanto claims do dispatcher sao revertidos ou antes do commit do request.
 - O storm silencioso do WhatsApp e fortemente compativel com claim revertido + scan periodico, agravado pela ausencia do stop reason na transicao defensiva do dispatcher.
 - `generate_file` pode repetir efeito SFTP se houver crash entre upload e commit.
@@ -122,13 +125,11 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 
 ### UNKNOWN
 
-- Versao, units, filas, flags, workers, beats e backlog efetivamente ativos em producao.
 - Commit efetivo de cada worker que processou o flow de WhatsApp e origem exata de cada uma das tarefas repetidas.
 - Protecao de proxy/ingress, TLS e autorizacao externa.
 - Cobertura real das migrations em cada workspace e drift de schema.
-- Saude atual de PostgreSQL, RabbitMQ, Redis, Target Core, Files API, LLM e SFTP.
+- Saude funcional atual de Target Core, Files API, LLM e SFTP; a auditoria confirmou apenas conectividade da API com PostgreSQL, RabbitMQ e Redis.
 - Se o Target Core produz `persons + orch_sessions` para todo FileApp `tipo_1`.
-- Backlog e impacto real da fila `orch_fileapp_mailing_assoc`.
 - Ultima evidencia E2E completa de FileApp, `api_call` e `generate_file`.
 
 ## Indice de conhecimento

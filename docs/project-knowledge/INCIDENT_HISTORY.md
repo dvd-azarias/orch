@@ -175,3 +175,30 @@ A analise do commit `bd461a5` refutou a hipotese de que bastaria integra-lo: par
 ### Acoes executadas nesta investigacao
 
 Somente consultas read-only a PostgreSQL/Celery, leitura de codigo, historico Git e revisao adversarial. Nenhuma sessao, flow, fila, worker ou dado de producao foi alterado.
+
+## 2026-08-24 — Amplificacao e gaps observados apos cutover para `10.1.20.237`
+
+`STATUS`: ACTIVE WHEN OBSERVED / INFRASTRUCTURE STABLE
+
+`SEVERITY`: critical para amplificacao; high para health e wrapper
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+### Baseline do cutover
+
+- Os dezenove servicos esperados no novo host estavam ativos/enabled e sem restart de unit: API, tres beats e quinze workers.
+- Nenhuma fila ORCH tinha mensagem pronta; cada fila tinha cinco consumers.
+- O host antigo permaneceu somente com a API ORCH, conforme restricao temporaria do proxy.
+- A validacao do roteamento contextual passou em runtime: 46 assignments novos sem divergencia e o caso Dialer alvo convergiu para membro/lista/mailing corretos.
+
+### Gaps confirmados
+
+1. `blocked_send_whatsapp_interactive` continuava reclamando sessoes `state=0` em tres workspaces e gerando metricas/logs sem alarme.
+2. Os tres beats publicavam reconciliacoes FileApp iguais; dois tambem publicavam pending-channel reconcile.
+3. `/health/celery` considera qualquer worker do broker compartilhado e `/health/ready` nao cobre Celery.
+4. SIGTERM de child process pode ser mascarado por `UnboundLocalError` no `finally` de `_advance_session_task`.
+5. O custo acumulado ja era material: aproximadamente 199,4 milhoes de linhas e mais de 90 GB em metricas; 234 MB de journal em cerca de 70 minutos no novo host.
+
+### Acoes executadas
+
+Somente consultas read-only, inspecao de systemd/journal, passive queue declare, leitura de codigo e revisao adversarial. Nenhuma intervencao de runtime ou dado foi realizada.

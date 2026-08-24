@@ -210,3 +210,40 @@ Validacao posterior:
 ### ROLLOUT / ROLLBACK
 
 Implantar inicialmente com `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED=false`; validar com filas e workspace isolados usando `true`; somente depois habilitar no ambiente alvo e reiniciar. Rollback operacional: flag `false` + restart. Reparacao historica permanece separada e nao automatizada.
+
+## 2026-08-24 — Pente-fino pos-migracao dos workers para `10.1.20.237`
+
+### REQUEST
+
+Auditar o runtime depois de varias tasks processadas no novo host e identificar GAPs diretamente ligados ao cutover.
+
+### TASK TYPE
+
+Production audit read-only / `ALPHA_FIX_REQUIRED` para os achados criticos e altos.
+
+### CONFIRMED
+
+- API, tres beats e quinze workers ORCH ativos/enabled no `10.1.20.237`, sem restart de unit ou unit falha; API do `10.1.20.136` permaneceu ativa por restricao do proxy e seus workers/beats ORCH permaneceram desabilitados.
+- As oito filas ORCH consultadas passivamente tinham cinco consumers e zero mensagens prontas; `active/reserved/scheduled` nao mostrou backlog de workflow.
+- FileApp e generate-file concluiram todas as tasks observadas na primeira janela, sem task failure marker.
+- A correcao contextual esta efetiva: 46 sessoes novas explicitas produziram 46 assignments e zero divergencias de membro, lista, mailing ou atuador. A sessao `6941` do flow `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17` resolveu `10655` e deixou `linked_actuator=dialer`.
+- Tres beats publicavam schedules sobrepostos; os arquivos de schedule eram distintos, refutando disputa do arquivo local.
+- O loop `blocked_send_whatsapp_interactive` permanecia ativo em tres workspaces. A janela desde 19:22 BRT produziu mais de 213 mil execucoes e 428 mil metricas; o ORCH escreveu aproximadamente 1,27 milhao de linhas/234 MB no journal.
+- Os doze schemas com metricas somavam estimativa de 199,4 milhoes de linhas e mais de 90 GB.
+- O host tinha 152 processos Celery, cerca de 12,9 GB RSS e 187% de CPU agregada no snapshot; havia capacidade de RAM/disco, mas churn elevado de processos/logs.
+- SIGTERM de child process expos `UnboundLocalError` por `stopped_reason` nao inicializado no wrapper da task.
+- `/health/celery` aceita qualquer worker do vhost e `/health/ready` nao inclui Celery; ambos sao insuficientes isoladamente para validar o cutover.
+
+### ADVERSARIAL REVIEW
+
+Dois revisores independentes confirmaram: severidade critica para o loop WhatsApp; alta para o wrapper de task, falso positivo de health e readiness sem Celery; critica para publishers duplicados segundo o revisor operacional. A classificacao operacional final manteve a duplicacao como `high`, pois locks/cooldowns limitam parte dos efeitos e nao houve backlog no snapshot.
+
+### UNKNOWN
+
+- Motivo exato dos SIGTERM nos childs.
+- Efeito funcional atual de Target Core, Files API, LLM e SFTP fora das tasks observadas.
+- Retencao efetiva do journal sob o volume atual e capacidade livre do servidor PostgreSQL.
+
+### CHANGE
+
+Somente documentacao de conhecimento. Nenhum codigo funcional, unit, processo, fila, sessao ou dado de producao foi alterado.
