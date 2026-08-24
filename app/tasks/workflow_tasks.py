@@ -16,7 +16,11 @@ from app.repositories.orch_channel_events_repository import list_stale_pending_c
 from app.services.alarm_service import persist_alarm
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
-from app.services.workflow_dispatcher_service import advance_session_once, dispatch_pending_sessions
+from app.services.workflow_dispatcher_service import (
+    TERMINAL_FAILURE_STOP_REASONS,
+    advance_session_once,
+    dispatch_pending_sessions,
+)
 
 logger = get_logger(__name__)
 
@@ -328,6 +332,22 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
                 session_id=session_id,
             )
             status = "success"
+            if stopped_reason in TERMINAL_FAILURE_STOP_REASONS:
+                status = "error"
+                await persist_alarm(
+                    db_session,
+                    level="error",
+                    code=f"workflow_m2_{stopped_reason}",
+                    message="Sessão encerrada por falha determinística na definição do workflow.",
+                    details={
+                        "session_id": session_id,
+                        "flow_uuid": flow_uuid,
+                        "workspace_uuid": safe_workspace_uuid,
+                        "stopped_reason": stopped_reason,
+                    },
+                    flow_uuid=flow_uuid,
+                    app_name="Celery",
+                )
         except Exception as exc:
             stopped_reason = "task_exception"
             status = "error"
@@ -371,6 +391,8 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
                     }
                 ],
             )
+        if db_session.in_transaction():
+            await db_session.commit()
     logger.info(
         "workflow session advanced",
         extra={

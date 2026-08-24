@@ -24,6 +24,7 @@ from app.services.workflow_m2_service import (
     _inject_callback_runtime_scope,
     _inject_system_runtime_scope,
     _is_send_with_whatsapp_limit_exhausted,
+    _is_terminal_failure_session_state,
     _mark_blocking_execution,
     _normalize_contact_extra_data,
     _prepare_send_with_whatsapp_contact_member,
@@ -61,6 +62,7 @@ from app.services.workflow_m2_service import (
     _should_resume_run_flow_blocking_execution,
     _should_resume_whatsapp_blocking_execution,
     _set_run_flow_waiting,
+    execute_workflow_m2_for_session,
 )
 
 
@@ -279,6 +281,128 @@ def test_resolve_condition_branch_raises_without_exception_fallback() -> None:
         )
 
     assert exc.value.code == "condition_branch_not_mapped"
+
+
+def test_terminal_failure_guard_requires_explicit_marker() -> None:
+    assert not _is_terminal_failure_session_state(
+        {"state": 3, "runtime_variables": {"workflow_v2": {}}}
+    )
+    assert not _is_terminal_failure_session_state(
+        {
+            "state": 0,
+            "runtime_variables": {"workflow_v2": {"terminal_failure": {"code": "condition_branch_not_mapped"}}},
+        }
+    )
+    assert _is_terminal_failure_session_state(
+        {
+            "state": 3,
+            "runtime_variables": {"workflow_v2": {"terminal_failure": {"code": "condition_branch_not_mapped"}}},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_condition_sem_branch_terminaliza_execucao(monkeypatch: pytest.MonkeyPatch) -> None:
+    condition_ref = "11111111-1111-1111-1111-111111111111"
+    finish_ref = "22222222-2222-2222-2222-222222222222"
+    definition = {
+        "components": [
+            {
+                "ref_id": condition_ref,
+                "component_id": "condition",
+                "parameters": {"conditions": []},
+            },
+            {"ref_id": finish_ref, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": condition_ref, "to": finish_ref, "branch": "known"},
+        ],
+    }
+    runtime_variables = {
+        "workflow_v2": {
+            "flow_id": "33333333-3333-3333-3333-333333333333",
+            "next_card_cursor": condition_ref,
+        },
+        "variables": {"payload": {}, "customs": {}},
+    }
+    persisted: list[dict] = []
+    metrics: list[list[dict]] = []
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        async def execute(self, *_args, **_kwargs) -> _Result:
+            return _Result()
+
+    async def _fetch_flow(*_args, **_kwargs) -> dict:
+        return {"id": "33333333-3333-3333-3333-333333333333"}
+
+    async def _fetch_revision(*_args, **_kwargs) -> dict:
+        return {
+            "id": "44444444-4444-4444-4444-444444444444",
+            "definition": definition,
+        }
+
+    async def _fetch_session(*_args, **_kwargs) -> dict:
+        return {
+            "uuid": "55555555-5555-5555-5555-555555555555",
+            "state": 0,
+            "runtime_variables": runtime_variables,
+            "last_card_uuid": None,
+            "next_card_uuid": condition_ref,
+            "frozen_until": None,
+            "whatsapp_sent_at": None,
+            "whatsapp_delivered_at": None,
+            "whatsapp_read_at": None,
+            "whatsapp_failed_at": None,
+        }
+
+    async def _fetch_contact(*_args, **_kwargs):
+        return None
+
+    async def _replace(*_args, **kwargs) -> None:
+        persisted.append(kwargs)
+
+    async def _persist_metrics(*_args, **kwargs) -> None:
+        metrics.append(kwargs["metrics"])
+
+    monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", _fetch_flow)
+    monkeypatch.setattr(workflow_m2_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(workflow_m2_service, "fetch_session_workflow_state", _fetch_session)
+    monkeypatch.setattr(workflow_m2_service, "fetch_contact_runtime_context_for_session", _fetch_contact)
+    monkeypatch.setattr(workflow_m2_service, "replace_session_workflow_state", _replace)
+    monkeypatch.setattr(workflow_m2_service, "persist_session_metrics", _persist_metrics)
+
+    result = await execute_workflow_m2_for_session(
+        _Session(),
+        flow_uuid="33333333-3333-3333-3333-333333333333",
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "condition_branch_not_mapped"
+    assert result.last_card_uuid == condition_ref
+    assert result.next_card_uuid is None
+    assert persisted[-1]["state"] == 3
+    assert persisted[-1]["ended_at"] is not None
+    assert persisted[-1]["next_card_uuid"] is None
+    assert runtime_variables["workflow_v2"]["terminal_failure"]["code"] == "condition_branch_not_mapped"
+    assert metrics[-1][-1]["stopped_reason"] == "condition_branch_not_mapped"
 
 
 def test_extract_whatsapp_status_from_runtime_uses_last_payload() -> None:

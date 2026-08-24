@@ -2431,6 +2431,17 @@ def _resolve_condition_branch_label(
     )
 
 
+def _is_terminal_failure_session_state(session_state: dict[str, Any]) -> bool:
+    runtime_variables = session_state.get("runtime_variables")
+    workflow_meta = runtime_variables.get("workflow_v2") if isinstance(runtime_variables, dict) else None
+    terminal_failure = workflow_meta.get("terminal_failure") if isinstance(workflow_meta, dict) else None
+    try:
+        session_state_value = int(session_state.get("state"))
+    except (TypeError, ValueError):
+        return False
+    return session_state_value in {3, 5} and isinstance(terminal_failure, dict)
+
+
 def _normalize_create_contact_mapping_key(raw_key: str) -> str:
     token = str(raw_key or "").strip().lower()
     token = (
@@ -3820,6 +3831,17 @@ async def execute_workflow_m2_for_session(
         runtime_variables = session_state.get("runtime_variables")
         if not isinstance(runtime_variables, dict):
             runtime_variables = {}
+        if _is_terminal_failure_session_state(session_state):
+            return await _finalize(
+                WorkflowExecutionResult(
+                    True,
+                    0,
+                    "session_already_terminal",
+                    session_state.get("last_card_uuid"),
+                    None,
+                )
+            )
+
         contact_runtime_context = await fetch_contact_runtime_context_for_session(
             db_session,
             flow_uuid=flow_uuid,
@@ -4735,6 +4757,55 @@ async def execute_workflow_m2_for_session(
                     )
             except Exception as exc:
                 if kind == "condition":
+                    if isinstance(exc, WorkflowExecutionError) and exc.code == "condition_branch_not_mapped":
+                        failed_at = datetime.now(timezone.utc)
+                        failed_card_uuid = next_card_uuid
+                        workflow_meta = runtime_variables.get("workflow_v2")
+                        if not isinstance(workflow_meta, dict):
+                            workflow_meta = {}
+                            runtime_variables["workflow_v2"] = workflow_meta
+                        workflow_meta["terminal_failure"] = {
+                            "code": exc.code,
+                            "message": exc.message,
+                            "component_kind": kind,
+                            "component_ref_id": component.get("ref_id"),
+                            "failed_at": failed_at.isoformat(),
+                        }
+                        last_card_uuid = failed_card_uuid
+                        next_card_uuid = None
+                        executed_steps += 1
+                        _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=None)
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=None,
+                            ended_at=failed_at,
+                            state=3,
+                        )
+                        step_finished_at = datetime.now(timezone.utc)
+                        _append_metric(
+                            metric_type="card",
+                            status="error",
+                            started_at=step_started_at,
+                            finished_at=step_finished_at,
+                            latency_ms=(time.perf_counter() - step_started_perf) * 1000,
+                            stopped_reason=exc.code,
+                            step_index=executed_steps,
+                            card_cursor=last_card_uuid,
+                            component_kind_value=kind,
+                            details={"message": exc.message, "terminal": True},
+                        )
+                        return await _finalize(
+                            WorkflowExecutionResult(
+                                True,
+                                executed_steps,
+                                exc.code,
+                                last_card_uuid,
+                                None,
+                            )
+                        )
                     exception_branch = _resolve_component_exception_branch_label(
                         definition=definition,
                         current_card_uuid=next_card_uuid,

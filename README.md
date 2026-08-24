@@ -1,5 +1,7 @@
 # orch
 
+> **Nota de sustentacao (2026-08-24):** este README preserva o historico incremental das fases e contem trechos de planejamento/estado antigo. Para a baseline operacional atual, comece por `PROJECT_BRAIN.md` e `docs/project-knowledge/`; confirme comportamento no codigo e em runtime antes de usar uma regra historica como contrato.
+
 Aplicação de workflow/orquestração orientada a eventos externos (webhooks e payloads diversos), com foco inicial em detecção de origem do payload e controle de sessões no PostgreSQL.
 
 ## Fase 1 — Objetivo

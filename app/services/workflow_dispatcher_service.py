@@ -31,6 +31,10 @@ FINAL_STOP_REASONS = {
     "finished_by_component",
     "end_of_branch",
     "no_next_card",
+    "session_already_terminal",
+}
+TERMINAL_FAILURE_STOP_REASONS = {
+    "condition_branch_not_mapped",
 }
 FATAL_NON_RESUMABLE_STOP_REASONS = {
     "flow_not_found",
@@ -99,6 +103,13 @@ async def advance_session_once(
                     db_session,
                     session_id=session_id,
                 )
+            return stopped_reason
+
+        if stopped_reason in TERMINAL_FAILURE_STOP_REASONS:
+            await mark_session_finished(
+                db_session,
+                session_id=session_id,
+            )
             return stopped_reason
 
         if stopped_reason in RESUMABLE_STOP_REASONS:

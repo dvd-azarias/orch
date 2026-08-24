@@ -1,5 +1,7 @@
 # orch — Regras finais de `state` e `ended_at` (Fase 1)
 
+> Documento historico da Fase 1. Retomadas de WhatsApp/Dialer, callbacks e execucao assincrona evoluiram depois e ja nao obedecem integralmente este mapeamento. Consulte `PROJECT_BRAIN.md` e `docs/project-knowledge/DATA_FLOW.md` antes de diagnosticar o runtime atual.
+
 ## Objetivo
 
 Congelar as regras de transição de estado para manter previsibilidade operacional na fase 1.

@@ -212,6 +212,12 @@ async def _should_discard_whatsapp_event(
 
 
 def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | None:
+    if stopped_reason == "condition_branch_not_mapped":
+        return (
+            "error",
+            "workflow_m2_condition_branch_not_mapped",
+            "Sessão encerrada porque o condition não possui branch compatível nem branch de exception.",
+        )
     if stopped_reason.startswith("component_not_supported"):
         return (
             "warning",
