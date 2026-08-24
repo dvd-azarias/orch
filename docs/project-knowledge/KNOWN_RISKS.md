@@ -4,7 +4,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R1 — Claims do dispatcher sem commit externo
 
-`STATUS`: CONFIRMED STATIC
+`STATUS`: CONFIRMED STATIC / AMPLIFICATION OBSERVED IN RUNTIME
 
 `IMPACT`: high
 
@@ -13,6 +13,8 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `AFFECTED AREA`: Celery workflow / PostgreSQL
 
 `DESCRIPTION`: a task lista workspaces, abre transacao implicita, faz claim em savepoint e publica task, mas fecha a sessao sem commit explicito do outer transaction. Claims e metricas podem ser revertidos enquanto o enqueue permanece.
+
+`RUNTIME EVIDENCE`: em 2026-08-24, o flow `0e378237-4a61-4d5f-89f3-b07b594df38f` mantinha tres sessoes no cursor inicial e acumulava 1.136.779 alarmes de execucao. Falhas permanentes reapareciam aproximadamente no ritmo do dispatcher. A correlacao exata task/worker nao foi preservada, mas o comportamento e compativel com o claim revertido e enqueue externo.
 
 `MITIGATION`: advisory lock no executor limita execucao simultanea; nao elimina enqueue repetido nem perda de metricas.
 
@@ -271,3 +273,83 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `DETECTION`: mais de um mailing/source list para o mesmo `file.id`, tasks concorrentes e nomes incrementais proximos.
 
 `V2`: idempotency key persistente e contrato com Target Core.
+
+## R16 — Definicao invalida pode executar e entrar em retry permanente
+
+`STATUS`: CONFIRMED RUNTIME / INCIDENT CONTAINED / FIX PREPARED
+
+`IMPACT`: critical
+
+`PROBABILITY`: high quando flow invalido possui sessao pendente
+
+`AFFECTED AREA`: workflow validation / dispatcher / executor / observabilidade
+
+`DESCRIPTION`: o runtime aceita flow `draft`, seleciona sua revisao draft e nao valida previamente branches obrigatorias ou configuracao minima de componentes. Excecao permanente na task nao terminaliza nem aplica backoff duravel. Com o comportamento de claim de R1, a mesma sessao pode ser enfileirada continuamente.
+
+`RUNTIME EVIDENCE`: o flow `0e378237-4a61-4d5f-89f3-b07b594df38f` tinha condition sem `false/exception`, duas `api_call` sem URL e sessoes presas no primeiro card. As sessoes `256` e `257`, ainda elegiveis ao dispatcher, foram terminalizadas em 2026-08-24 16:15 BRT. Durante a validacao, um reconciliador local sem escopo reenfileirou a sessao WhatsApp `263`, `state=2`, que falhou em `api_call_missing_url`; ela foi terminalizada as 16:50 BRT. A contagem final estabilizou em 1.154.025 alarmes.
+
+`MITIGATION`: nao publicar/acionar o flow; preservar evidencias e isolar dispatcher/sessoes somente por procedimento aprovado. A correcao preparada terminaliza `condition_branch_not_mapped` com `state=3`, `ended_at`, cursor nulo, metadado de falha e alarme unico; ainda depende de deploy validado para proteger novas sessoes.
+
+`DETECTION`: validar grafo/config antes de publish, agregar alarmes por `flow_uuid/session_id/exception_message` e alertar para repeticao de erro permanente.
+
+`V2`: validacao fail-closed, revisao publicada obrigatoria e politica explicita de terminalizacao/backoff/DLQ.
+
+## R17 — Bloqueio WhatsApp pode virar retry storm silencioso
+
+`STATUS`: CONFIRMED STATIC / AMPLIFICATION OBSERVED IN RUNTIME
+
+`IMPACT`: critical
+
+`PROBABILITY`: high para sessoes pendentes bloqueadas pelo template/interativo
+
+`AFFECTED AREA`: workflow dispatcher / WhatsApp / metricas / broker
+
+`DESCRIPTION`: `send_whatsapp_template` compartilha o caminho de `send_whatsapp_interactive` e persiste `blocked_send_whatsapp_interactive` como sucesso. Esse motivo nao pertence a `BLOCKING_RUNNING_STOP_REASONS`, portanto o dispatcher nao aplica a transicao defensiva para `state=1`. Com o claim nao duravel de R1, a sessao pode permanecer `state=0`, ser selecionada a cada scan e retornar imediatamente o mesmo bloqueio, sem reenviar a mensagem e sem produzir alarme.
+
+`RUNTIME EVIDENCE`: em 2026-08-24 15:28 BRT, o flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` tinha sete sessoes GenericApp `state=0` bloqueadas no card de WhatsApp e 4.389.386 metricas de executor `success/blocked_send_whatsapp_interactive`. O flow nao possuia alarmes. As execucoes continuavam aproximadamente a cada dois segundos.
+
+`MITIGATION`: ate uma correcao aprovada, preservar evidencias e isolar as sessoes/dispatcher somente por procedimento operacional controlado. Nao usar contagem de alarmes como unico detector.
+
+`DETECTION`: agregar `orch_session_metrics` por `flow_uuid`, `session_id`, `stopped_reason` e janela; alertar para repeticao de bloqueio sem evento pendente e para crescimento anormal de metricas.
+
+`V2`: estado de espera explicito, claim duravel, wake-up orientado a evento e observabilidade de loops de sucesso.
+
+## R18 — Componente live sem runtime implantado e implementacao isolada incompleta
+
+`STATUS`: CONFIRMED CODE / CONFIRMED RUNTIME FOR OBSERVED FLOW
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando um flow publicado alcanca `live`
+
+`AFFECTED AREA`: workflow M2 / atendimento humano
+
+`DESCRIPTION`: o branch atual e `main` nao tratam `component_id=live`; o fallback produz `component_not_supported:live` e o dispatcher finaliza a sessao. O commit isolado `bd461a5`, presente apenas em `feat/live-component-orch-runtime`, reconhece o card, mas apenas registra estado local. Ele nao publica handoff nem chama `live_mirror_url`; para payload comum sem tipo `live.*`, retorna branch nula e o resolver segue a primeira edge.
+
+`RUNTIME EVIDENCE`: a sessao `6927` do flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` processou a resposta `confirmar`, concluiu a `api_call` com HTTP 200 e foi finalizada por `component_not_supported:live`. A sessao `6924` teve o mesmo stop. Foram observados 4.876 stops desse tipo no historico do flow, concentrados principalmente em uma sessao antiga.
+
+`MITIGATION`: nao integrar `bd461a5` como correcao pronta. Primeiro confirmar o contrato do sistema Live, side effects, idempotencia, espera/resolucao e retomada; depois validar E2E em filas isoladas.
+
+`DETECTION`: buscar `component_not_supported:live`, sessoes finalizadas apos quick reply e ausencia de handoff no destino Live.
+
+`V2`: contrato versionado de handoff/callback com idempotencia e testes E2E.
+
+## R19 — Escopo do dispatcher nao limita reconciliacao de eventos
+
+`STATUS`: CONFIRMED CODE / OBSERVED IN RUNTIME
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando DEV compartilha DB/broker com outros workspaces
+
+`AFFECTED AREA`: Celery beat / pending channel events / isolamento operacional
+
+`DESCRIPTION`: `CELERY_DISPATCH_WORKSPACE_UUID` filtra apenas `dispatch_pending_sessions`. A task `reconcile_pending_channel_events` usa a chave independente `CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID`; quando ela esta vazia, percorre todos os workspaces concluidos. Filas locais isolam consumidores, mas nao isolam as queries nem os efeitos no DB compartilhado.
+
+`RUNTIME EVIDENCE`: em 2026-08-24, `scripts/dev_phase_stack.sh` foi iniciado com perfil `f5_local` e dispatcher escopado ao workspace de teste. O reconciliador permaneceu global, encontrou a sessao `263` de outro workspace e a reenfileirou periodicamente na fila local, gerando 51 alarmes adicionais ate a stack ser parada e a sessao terminalizada.
+
+`MITIGATION`: em qualquer stack conectada a DB compartilhado, definir tambem `CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID` ou desabilitar explicitamente o reconciliador. Confirmar os dois escopos antes de iniciar beats; fila dedicada sozinha nao e isolamento suficiente.
+
+`DETECTION`: logar e conferir `workspace_scope` de dispatch e reconcile, inspecionar workspaces tocados e interromper imediatamente se aparecer workspace fora do alvo.
+
+`V2`: perfil de ambiente fail-closed que aplique um unico workspace scope a toda rotina de scan, com recusa de startup quando DEV aponta para DB compartilhado sem escopo.

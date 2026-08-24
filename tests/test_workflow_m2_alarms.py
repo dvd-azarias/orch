@@ -170,6 +170,88 @@ async def _count_alarm_by_code(*, flow_uuid: str, code: str) -> int:
 
 
 @pytest.mark.asyncio
+async def test_condition_sem_branch_terminaliza_sessao_como_falha(monkeypatch) -> None:
+    await _ensure_flow_tables()
+    await _ensure_alarms_table()
+
+    flow_uuid = str(uuid4())
+    definition = {
+        "trigger_start_by_ref_id": "condition-1",
+        "components": [
+            {
+                "ref_id": "condition-1",
+                "component_id": "condition",
+                "parameters": {
+                    "conditions": [
+                        {
+                            "variable": "{{input_payload.route}}",
+                            "operator": "equals",
+                            "value": "known",
+                            "branch": "known",
+                        }
+                    ]
+                },
+            },
+            {"ref_id": "finish-1", "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": "condition-1", "to": "finish-1", "branch": "known"},
+        ],
+    }
+
+    inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(flow_uuid=flow_uuid, definition=definition)
+    monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
+    monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=False,
+            orch_default_workspace_uuid=flow_uuid,
+            orch_lab_workspace_uuid=flow_uuid,
+        ),
+    )
+    before = await _count_alarm_by_code(flow_uuid=flow_uuid, code="workflow_m2_condition_branch_not_mapped")
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as db_session:
+            response = await trigger_orch(
+                alias_or_flow_uuid=UUID(flow_uuid),
+                payload={"external_id": f"terminal-{flow_uuid[:8]}", "route": "missing"},
+                db_session=db_session,
+            )
+
+        assert response.workflow_execution is not None
+        assert response.workflow_execution["stopped_reason"] == "condition_branch_not_mapped"
+
+        schema = get_settings().database_schema.replace('"', '""')
+        async with session_factory() as db_session:
+            session_row = (
+                await db_session.execute(
+                    text(
+                        f"""
+                        SELECT state, ended_at, next_card_uuid, runtime_variables
+                        FROM "{schema}".orch_sessions
+                        WHERE id = :session_id
+                        """
+                    ),
+                    {"session_id": response.session_id},
+                )
+            ).mappings().one()
+
+        assert session_row["state"] == 3
+        assert session_row["ended_at"] is not None
+        assert session_row["next_card_uuid"] is None
+        assert session_row["runtime_variables"]["workflow_v2"]["terminal_failure"]["code"] == "condition_branch_not_mapped"
+
+        after = await _count_alarm_by_code(flow_uuid=flow_uuid, code="workflow_m2_condition_branch_not_mapped")
+        assert after == before + 1
+    finally:
+        await _cleanup_flow_with_revision(flow_uuid=inserted_flow_uuid, revision_uuid=revision_uuid)
+
+
+@pytest.mark.asyncio
 async def test_deve_persistir_warning_quando_componente_nao_suportado_no_m2(monkeypatch) -> None:
     await _ensure_flow_tables()
     await _ensure_alarms_table()
