@@ -212,6 +212,18 @@ async def _should_discard_whatsapp_event(
 
 
 def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | None:
+    if stopped_reason == "contact_member_scope_not_found":
+        return (
+            "error",
+            "workflow_m2_contact_member_scope_not_found",
+            "Sessão encerrada porque nenhum membro ativo corresponde ao escopo explícito recebido.",
+        )
+    if stopped_reason == "contact_member_routing_update_failed":
+        return (
+            "error",
+            "workflow_m2_contact_member_routing_update_failed",
+            "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
+        )
     if stopped_reason == "condition_branch_not_mapped":
         return (
             "error",

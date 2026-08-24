@@ -11,6 +11,7 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 ## Workflow
 
 - `WORKFLOW_V2_ENABLED`, `WORKFLOW_V2_EXECUTE_M2`.
+- `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED`: ativa resolucao fail-closed de `contact_list_members` pelo escopo do payload. Default `false`; exige rollout controlado e restart de API/workers.
 - `WORKFLOW_V2_MAX_STEPS`, `WORKFLOW_M2_LOOP_GUARD_REPEAT_THRESHOLD`.
 - `WORKFLOW_DIALER_EVENT_CORRELATION_WINDOW_HOURS`.
 
@@ -61,4 +62,3 @@ Defaults importantes:
 ## Configuracao efetiva
 
 `UNKNOWN`: valores e overrides de producao, secrets manager, flags de beats, profiles e filas instaladas.
-

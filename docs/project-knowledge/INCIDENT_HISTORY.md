@@ -1,5 +1,58 @@
 # Historico de Incidentes
 
+## 2026-08-24 — `linked_actuator` aplicado em membro de outra lista
+
+`STATUS`: CONFIRMED / FIX IMPLEMENTED BEHIND DEFAULT-OFF FLAG / RUNTIME VALIDATION PENDING
+
+`SEVERITY`: critical
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60` (`Highcomm`)
+
+`FLOW`: `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17` (`Demo - Discador Preditivo`)
+
+### Evidencia
+
+- O flow estava ativo e selecionava a revisao publicada v5; o primeiro card era `send_with_dialer`.
+- O contato `30392286855` possuia tres membros ativos em listas diferentes.
+- As sessoes `6928` e `6937` carregavam no payload a lista `dc7dc1c1-2c98-42e9-a788-5d186f458daa` e mailing `1115`.
+- O membro esperado era `10655`, mas o runtime das duas sessoes registrou atribuicao ao membro `10687`, mais novo e pertencente a outra lista/mailing.
+- A metrica de `6937` confirmou `blocked_send_with_dialer`; portanto o card executou. A falha nao foi ausencia de execucao, mas selecao da linha errada.
+- O membro `10687` recebeu `linked_actuator=dialer` e `ani=1147371485`; `10655` permaneceu com ambos nulos.
+
+### Causa
+
+Os tres caminhos de resolucao de contato relevantes usam somente `entity = contact_identifier`, filtram membros ativos e escolhem o mais novo globalmente. O payload preserva `contact_list_id`/`mailing_id`, mas esses campos sao ignorados pelo roteamento e pelo contexto injetado no workflow.
+
+### Blast radius
+
+Uma agregacao read-only encontrou 38 identificadores com mais de um membro ativo, 113 linhas envolvidas e pelo menos 26 sessoes em que a lista do membro roteado divergia da lista declarada no payload. Foram observadas 23 sessoes Dialer e 3 WhatsApp interativo em tres flows. A contagem e conservadora porque exige payload e metadata de routing persistidos.
+
+### Revisao adversarial
+
+A revisao independente confirmou a causa como deterministica e apontou o mesmo defeito em Dialer, WhatsApp e `fetch_contact_runtime_context_for_session`. Recomendou resolucao contextual compartilhada, validacao cruzada dos identificadores e fallback legado somente quando o evento nao trouxer identidade da lista.
+
+### Acoes executadas
+
+- Investigacao de producao permaneceu read-only; nenhuma sessao, membro, flow, fila ou worker foi alterado.
+- Implementada resolucao contextual unica para contexto, Dialer, WhatsApp e WhatsApp interativo.
+- `contact_list_member_id` e o seletor primario; lista e mailing presentes sao validadores cruzados. Lista precede mailing quando o ID do membro esta ausente.
+- Seletor explicito invalido/incompativel encerra a sessao com falha e alarme; update perdido por desatribuicao concorrente tambem terminaliza, em vez de bloquear o card sem efeito externo.
+- Fallback legado permanece somente para payload sem qualquer seletor e a ativacao depende de feature flag default-off.
+- Duas revisoes adversariais encontraram falta de alarme inline, janela concorrente e consulta pouco indexavel; os tres pontos foram corrigidos antes da validacao.
+- Testes unitarios focados: 105 passaram. O teste PostgreSQL com tabelas temporarias passou separadamente. Validacao E2E de stack ainda pendente.
+
+### Incidente durante validacao
+
+A tentativa de stack completa nao conta como validacao da correcao. `dev_phase_stack.sh status` reportava tudo down, mas processos `f5_local` orfaos desde 16:30 BRT continuavam ativos. A nova subida adicionou consumidores e encontrou warnings de hostname duplicado; dispatch, FileApp rescue e generate scan foram processados antes da contencao.
+
+Todos os processos Uvicorn/Celery deste checkout foram encerrados. A porta 7777 e a lista de processos ficaram vazias; nenhum node listado pelo broker permaneceu consumindo filas `f5_local`. As metricas globais continuaram crescendo pelo storm de producao preexistente, portanto nao foram usadas como criterio de contencao local. Nao houve alarme `contact_member_*`. O generate job observado executou `no_rows`, sem envio de linhas. Nenhum smoke HTTP foi disparado.
+
+Esse evento revelou R21 e impede declarar E2E de stack validado. Permanecem validos o teste PostgreSQL com tabelas temporarias e a comprovacao read-only no caso real.
+
+Durante a auditoria do generate job, uma consulta excessivamente ampla exibiu configuracao sensivel no terminal do agente. O valor nao foi persistido na documentacao nem no codigo, mas a credencial SFTP correspondente deve ser rotacionada como follow-up operacional.
+
 ## 2026-08-24 — Retry storm do flow ORQUESTRADOR
 
 `STATUS`: CONTAINED

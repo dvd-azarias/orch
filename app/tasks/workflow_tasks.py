@@ -338,7 +338,7 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
                     db_session,
                     level="error",
                     code=f"workflow_m2_{stopped_reason}",
-                    message="Sessão encerrada por falha determinística na definição do workflow.",
+                    message="Sessão encerrada por falha determinística na execução do workflow.",
                     details={
                         "session_id": session_id,
                         "flow_uuid": flow_uuid,

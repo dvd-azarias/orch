@@ -24,6 +24,7 @@ class Settings:
     database_pool_recycle: int
     workflow_v2_enabled: bool
     workflow_v2_execute_m2: bool
+    workflow_contextual_member_routing_enabled: bool
     workflow_v2_max_steps: int
     workflow_m2_loop_guard_repeat_threshold: int
     workflow_dialer_event_correlation_window_hours: int
@@ -277,6 +278,10 @@ def get_settings() -> Settings:
         database_pool_recycle=_read_env_int("DATABASE_POOL_RECYCLE", 1800),
         workflow_v2_enabled=_read_env_bool("WORKFLOW_V2_ENABLED", False),
         workflow_v2_execute_m2=_read_env_bool("WORKFLOW_V2_EXECUTE_M2", False),
+        workflow_contextual_member_routing_enabled=_read_env_bool(
+            "WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED",
+            False,
+        ),
         workflow_v2_max_steps=_read_env_int("WORKFLOW_V2_MAX_STEPS", 25),
         workflow_m2_loop_guard_repeat_threshold=_read_env_int("WORKFLOW_M2_LOOP_GUARD_REPEAT_THRESHOLD", 300),
         workflow_dialer_event_correlation_window_hours=_read_env_int("WORKFLOW_DIALER_EVENT_CORRELATION_WINDOW_HOURS", 24),

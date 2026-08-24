@@ -146,3 +146,67 @@ Production containment / `ALPHA_FIX_REQUIRED`.
 ### DEPLOYMENT
 
 Nao executado nesta etapa. A contenção de producao esta ativa; a correcao protege novas sessoes somente apos deploy/restart validado.
+
+## 2026-08-24 — Investigacao de `linked_actuator` ausente no flow de Dialer
+
+### REQUEST
+
+Investigar por que o membro da lista `dc7dc1c1-2c98-42e9-a788-5d186f458daa` permanecia sem `linked_actuator=dialer` no flow `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`.
+
+### TASK TYPE
+
+Production diagnosis read-only / `ALPHA_FIX_REQUIRED`.
+
+### EVIDENCE
+
+- Branch `investigate/dialer-linked-actuator` criado de `origin/main` no merge `1dc8494`.
+- Flow ativo, revisao publicada v5 e primeiro card `send_with_dialer` confirmados.
+- Sessao ativa `6937` executou o card e persistiu `blocked_send_with_dialer`.
+- Payload de `6928/6937`: lista `dc7dc1c1-2c98-42e9-a788-5d186f458daa`, mailing `1115`.
+- Runtime de ambas: assignment para membro `10687`, lista `b5521cb2-09a9-4391-8ab5-fea25924e820`, mailing `1114`.
+- O membro esperado `10655` permaneceu nulo; o membro `10687` recebeu `dialer`.
+- Blast radius conservador: 38 identificadores duplicados ativos, 113 linhas e 26 sessoes divergentes em tres flows.
+
+### FINDING
+
+O ORCH nao deixou de setar o actuator. Ele o setou na linha errada porque o seletor ignora a lista/mailing do payload e escolhe o membro ativo mais novo para o mesmo `contact_identifier`. O mesmo padrao existe no roteamento WhatsApp e no carregamento do contexto de contato.
+
+### REVIEW
+
+Revisao adversarial independente confirmou a causa e recomendou resolver o membro por identidade contextual, com fallback legado apenas na ausencia completa de seletores.
+
+### CHANGE
+
+Na etapa inicial, nenhum codigo funcional ou dado de producao foi alterado. Apos aprovacao, foi implementada correcao protegida por feature flag default-off:
+
+- escopo imutavel extraido de `input_payload`;
+- resolucao unica e reutilizada por contexto, Dialer e WhatsApp;
+- seletores combinados validados cruzadamente, sem fallback em conflito;
+- queries especializadas com tipos nativos `uuid`/`bigint`;
+- lock/revalidacao antes do update e falha terminal em corrida;
+- alarmes equivalentes nos caminhos Celery e inline.
+
+### VALIDATION
+
+- tipos reais confirmados read-only no workspace: `contact_list_id=uuid`, `mailing_id=bigint`;
+- `python -m py_compile`: passou nos arquivos alterados;
+- `git diff --check`: passou;
+- testes focados de M2, repositorio e tasks: 105 passaram;
+- duas revisoes adversariais independentes executadas; os achados bloqueantes foram incorporados;
+- runtime isolado e smoke E2E ainda pendentes.
+
+Validacao posterior:
+
+- consulta read-only no caso real confirmou: fallback legado -> membro `10687`; escopo exato/lista+mailing -> `10655`; conflito cruzado -> nenhum membro;
+- teste PostgreSQL com tabelas temporarias executou resolucao, `FOR UPDATE` e updates Dialer/WhatsApp sem tocar tabelas permanentes; 1 passou;
+- a primeira execucao desse teste encontrou parametro asyncpg ambiguo nos atuadores; a query foi especializada e a repeticao passou;
+- tentativa de stack completa invalidada por processos stale nao controlados pelo script; todos os processos locais foram contidos, nenhum consumer `f5_local` permaneceu no broker e R21 foi registrado;
+- nenhum smoke HTTP foi enviado. O E2E de stack permanece pendente.
+- formatos reais agregados no workspace: 59 payloads com `contact_list_member_id` numerico, 437 com `contact_list_id` UUID e 378 com `mailing_id` numerico; nenhum UUID foi observado nos dois campos `BIGINT`;
+- o runbook Supplier exemplificava incorretamente member/mailing como UUID e foi corrigido para refletir o schema e o runtime reais.
+- revisao adversarial final do bundle funcional: `GO`, sem achados criticos, altos ou bloqueantes; risco residual limitado a concorrencia real entre transacoes nao simulada;
+- follow-up de seguranca: rotacionar a credencial SFTP exibida no terminal por uma consulta de auditoria excessivamente ampla; nenhum segredo foi copiado para arquivos versionados.
+
+### ROLLOUT / ROLLBACK
+
+Implantar inicialmente com `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED=false`; validar com filas e workspace isolados usando `true`; somente depois habilitar no ambiente alvo e reiniciar. Rollback operacional: flag `false` + restart. Reparacao historica permanece separada e nao automatizada.

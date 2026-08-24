@@ -1501,6 +1501,7 @@ async def assign_whatsapp_routing_for_session(
     session_id: int,
     numbers: list[str],
     percentual_by_phone: dict[str, int] | None = None,
+    contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
     def _canonical_phone(value: str | None) -> str:
         return str(normalize_phone_to_canonical_ani(value) or "").strip()
@@ -1520,9 +1521,18 @@ async def assign_whatsapp_routing_for_session(
         {"lock_key": lock_key},
     )
 
+    target_parameters: dict[str, Any] = {
+        "flow_uuid": flow_uuid,
+        "session_id": session_id,
+    }
+    member_filter = ""
+    if contact_list_member_id is not None:
+        member_filter = "\n              AND clm.id = :contact_list_member_id"
+        target_parameters["contact_list_member_id"] = contact_list_member_id
+
     target_result = await db_session.execute(
         text(
-            """
+            f"""
             SELECT
                 clm.id,
                 clm.ani AS previous_ani,
@@ -1533,15 +1543,13 @@ async def assign_whatsapp_routing_for_session(
             WHERE os.id = :session_id
               AND os.flow_uuid = CAST(:flow_uuid AS uuid)
               AND os.unassigned_at IS NULL
-              AND clm.unassigned_at IS NULL
+              AND clm.unassigned_at IS NULL{member_filter}
             ORDER BY clm.created_at DESC, clm.id DESC
             LIMIT 1
+            FOR UPDATE OF clm
             """
         ),
-        {
-            "flow_uuid": flow_uuid,
-            "session_id": session_id,
-        },
+        target_parameters,
     )
     target = target_result.mappings().first()
     if target is None:
@@ -1565,10 +1573,23 @@ async def assign_whatsapp_routing_for_session(
                     linked_actuator = 'whatsapp',
                     updated_at = NOW()
                 WHERE id = :member_id
+                  AND unassigned_at IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM orch_sessions os
+                      WHERE os.id = :session_id
+                        AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                        AND os.unassigned_at IS NULL
+                        AND os.entity = contact_list_members.contact_identifier
+                  )
                 RETURNING id, ani, linked_actuator
                 """
             ),
-            {"member_id": member_id},
+            {
+                "member_id": member_id,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
         )
         row = update_result.mappings().first()
         if row is None:
@@ -1714,6 +1735,15 @@ async def assign_whatsapp_routing_for_session(
                     linked_actuator = CAST(:linked_actuator AS linked_actuator_enum),
                     updated_at = NOW()
                 WHERE id = :member_id
+                  AND unassigned_at IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM orch_sessions os
+                      WHERE os.id = :session_id
+                        AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                        AND os.unassigned_at IS NULL
+                        AND os.entity = contact_list_members.contact_identifier
+                  )
                 RETURNING id, ani, linked_actuator
                 """
             ),
@@ -1721,6 +1751,8 @@ async def assign_whatsapp_routing_for_session(
                 "member_id": member_id,
                 "ani": fallback_phone or None,
                 "linked_actuator": limit_exhausted_actuator,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
             },
         )
         row = update_result.mappings().first()
@@ -1745,12 +1777,23 @@ async def assign_whatsapp_routing_for_session(
                 linked_actuator = 'whatsapp',
                 updated_at = NOW()
             WHERE id = :member_id
+              AND unassigned_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM orch_sessions os
+                  WHERE os.id = :session_id
+                    AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND os.unassigned_at IS NULL
+                    AND os.entity = contact_list_members.contact_identifier
+              )
             RETURNING id, ani, linked_actuator
             """
         ),
         {
             "member_id": member_id,
             "ani": chosen_phone,
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
         },
     )
     row = update_result.mappings().first()
@@ -1783,10 +1826,20 @@ async def assign_dialer_routing_for_session(
     *,
     flow_uuid: str,
     session_id: int,
+    contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
+    target_parameters: dict[str, Any] = {
+        "flow_uuid": flow_uuid,
+        "session_id": session_id,
+    }
+    member_filter = ""
+    if contact_list_member_id is not None:
+        member_filter = "\n              AND clm.id = :contact_list_member_id"
+        target_parameters["contact_list_member_id"] = contact_list_member_id
+
     target_result = await db_session.execute(
         text(
-            """
+            f"""
             SELECT
                 clm.id
             FROM contact_list_members clm
@@ -1795,15 +1848,13 @@ async def assign_dialer_routing_for_session(
             WHERE os.id = :session_id
               AND os.flow_uuid = CAST(:flow_uuid AS uuid)
               AND os.unassigned_at IS NULL
-              AND clm.unassigned_at IS NULL
+              AND clm.unassigned_at IS NULL{member_filter}
             ORDER BY clm.created_at DESC, clm.id DESC
             LIMIT 1
+            FOR UPDATE OF clm
             """
         ),
-        {
-            "flow_uuid": flow_uuid,
-            "session_id": session_id,
-        },
+        target_parameters,
     )
     target = target_result.mappings().first()
     if target is None:
@@ -1818,10 +1869,23 @@ async def assign_dialer_routing_for_session(
                 linked_actuator = 'dialer',
                 updated_at = NOW()
             WHERE id = :member_id
+              AND unassigned_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM orch_sessions os
+                  WHERE os.id = :session_id
+                    AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND os.unassigned_at IS NULL
+                    AND os.entity = contact_list_members.contact_identifier
+              )
             RETURNING id, ani, linked_actuator
             """
         ),
-        {"member_id": member_id},
+        {
+            "member_id": member_id,
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+        },
     )
     row = update_result.mappings().first()
     if row is None:
@@ -1841,12 +1905,45 @@ async def fetch_contact_runtime_context_for_session(
     *,
     flow_uuid: str,
     session_id: int,
+    contact_list_member_id: int | None = None,
+    contact_list_id: str | None = None,
+    mailing_id: int | None = None,
 ) -> dict[str, Any] | None:
+    parameters: dict[str, Any] = {
+        "flow_uuid": flow_uuid,
+        "session_id": session_id,
+    }
+    scope_predicates: list[str] = []
+    if contact_list_member_id is not None:
+        scope_predicates.append("clm.id = :contact_list_member_id")
+        parameters["contact_list_member_id"] = contact_list_member_id
+        if contact_list_id is not None:
+            scope_predicates.append("clm.contact_list_id = CAST(:contact_list_id AS uuid)")
+            parameters["contact_list_id"] = contact_list_id
+        if mailing_id is not None:
+            scope_predicates.append("clm.mailing_id = CAST(:mailing_id AS bigint)")
+            parameters["mailing_id"] = mailing_id
+    elif contact_list_id is not None:
+        scope_predicates.append("clm.contact_list_id = CAST(:contact_list_id AS uuid)")
+        parameters["contact_list_id"] = contact_list_id
+        if mailing_id is not None:
+            scope_predicates.append("clm.mailing_id = CAST(:mailing_id AS bigint)")
+            parameters["mailing_id"] = mailing_id
+    elif mailing_id is not None:
+        scope_predicates.append("clm.mailing_id = CAST(:mailing_id AS bigint)")
+        parameters["mailing_id"] = mailing_id
+
+    contextual_filter = ""
+    if scope_predicates:
+        contextual_filter = "\n              AND " + "\n              AND ".join(scope_predicates)
+
     result = await db_session.execute(
         text(
-            """
+            f"""
             SELECT
                 clm.id AS contact_list_member_id,
+                clm.contact_list_id::text AS contact_list_id,
+                clm.mailing_id::text AS mailing_id,
                 clm.contact_identifier,
                 clm.contact_name,
                 clm.contact_full_name,
@@ -1867,15 +1964,12 @@ async def fetch_contact_runtime_context_for_session(
             WHERE os.id = :session_id
               AND os.flow_uuid = CAST(:flow_uuid AS uuid)
               AND os.unassigned_at IS NULL
-              AND clm.unassigned_at IS NULL
+              AND clm.unassigned_at IS NULL{contextual_filter}
             ORDER BY clm.created_at DESC, clm.id DESC
             LIMIT 1
             """
         ),
-        {
-            "flow_uuid": flow_uuid,
-            "session_id": session_id,
-        },
+        parameters,
     )
     row = result.mappings().first()
     return dict(row) if row is not None else None

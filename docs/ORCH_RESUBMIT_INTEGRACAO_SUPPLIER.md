@@ -69,9 +69,9 @@ Campos recomendados:
   "person_uuid": "f6bc7f69-44b9-4bf0-a1f5-6d7ed7d9e123",
   "external_identifier": "ext-123",
   "contact_name": "Nome Contato",
-  "contact_list_member_id": "1aff1a38-d7e7-4aa9-b267-8cfc7ee9d270",
+  "contact_list_member_id": "10655",
   "contact_list_id": "1aff1a38-d7e7-4aa9-b267-8cfc7ee9d270",
-  "mailing_id": "9e5a4f52-3b08-4d8e-a4cf-1a4b8a1d9ef0",
+  "mailing_id": "1115",
   "reason": "resubmit_manual",
   "payload": {
     "supplier_context": "qualquer dado adicional"
@@ -83,6 +83,9 @@ Campos recomendados:
 
 - `event_id` (**obrigatório**): chave de idempotência do evento de resubmit.
 - `contact_channel_address` (**obrigatório**): telefone/endereço do contato.
+- `contact_list_member_id`: ID interno `BIGINT` de `contact_list_members`, serializado como string ou número; não enviar UUID.
+- `contact_list_id`: UUID da lista de contatos.
+- `mailing_id`: ID interno `BIGINT` do mailing, serializado como string ou número; não enviar UUID.
 - Demais campos: opcionais, mas fortemente recomendados para rastreabilidade.
 
 ---
@@ -138,7 +141,7 @@ curl -X POST "https://orch.otima.digital/v1/orch/<workspace_uuid>/<flow_uuid>/re
     "event_id": "9d6f0c3a-5fd6-49b8-8a7a-7c8f4f9e6f90",
     "contact_channel_address": "5511975620806",
     "contact_identifier": "30392286855",
-    "contact_list_member_id": "1aff1a38-d7e7-4aa9-b267-8cfc7ee9d270",
+    "contact_list_member_id": "10655",
     "reason": "resubmit_manual",
     "payload": {
       "source": "supplier"
@@ -161,4 +164,3 @@ curl -X POST "https://orch.otima.digital/v1/orch/<workspace_uuid>/<flow_uuid>/re
 
 O `resubmit` precisa ser um evento explícito para o ORCH, não só uma mudança de estado no Supplier.  
 Com esse endpoint, os dois sistemas passam a compartilhar o mesmo ciclo de sessão e evitam perda de eventos por falta de sessão ativa.
-

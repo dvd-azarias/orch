@@ -353,3 +353,47 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `DETECTION`: logar e conferir `workspace_scope` de dispatch e reconcile, inspecionar workspaces tocados e interromper imediatamente se aparecer workspace fora do alvo.
 
 `V2`: perfil de ambiente fail-closed que aplique um unico workspace scope a toda rotina de scan, com recusa de startup quando DEV aponta para DB compartilhado sem escopo.
+
+## R20 — Roteamento de canal ignora a identidade da lista de origem
+
+`STATUS`: CONFIRMED RUNTIME / FIX IMPLEMENTED BEHIND DEFAULT-OFF FLAG / RUNTIME VALIDATION PENDING
+
+`IMPACT`: critical
+
+`PROBABILITY`: high quando o mesmo `contact_identifier` possui mais de um membro ativo
+
+`AFFECTED AREA`: Dialer / WhatsApp / contexto de contato / `contact_list_members`
+
+`DESCRIPTION`: `assign_dialer_routing_for_session`, `assign_whatsapp_routing_for_session` e `fetch_contact_runtime_context_for_session` relacionam a sessao ao membro somente por `orch_sessions.entity = contact_list_members.contact_identifier`. Em seguida escolhem `ORDER BY clm.created_at DESC, clm.id DESC LIMIT 1`. `contact_list_id`, `mailing_id` e `contact_list_member_id` disponiveis no payload nao participam da selecao. Assim, um membro mais novo de outra lista pode receber `linked_actuator`/`ani`, contabilizar consumo WhatsApp e fornecer dados de contato ao workflow.
+
+`RUNTIME EVIDENCE`: no flow `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`, as sessoes `6928` e `6937` declaravam `contact_list_id=dc7dc1c1-2c98-42e9-a788-5d186f458daa` e `mailing_id=1115`. O membro esperado era `10655`, mas o runtime registrou `contact_list_member_id=10687`, da lista `b5521cb2-09a9-4391-8ab5-fea25924e820`/mailing `1114`, e esse membro recebeu `linked_actuator=dialer`. O membro `10655` permaneceu `NULL`. No workspace havia 38 identificadores com duplicidade ativa, somando 113 linhas; uma agregacao conservadora encontrou 26 sessoes divergentes em tres flows: 23 Dialer e 3 WhatsApp interativo.
+
+`MITIGATION`: a correcao implementada resolve uma vez por `contact_list_member_id`, lista ou mailing, valida cruzadamente os seletores presentes e reutiliza o mesmo membro no contexto e nos atuadores. Conflito explicito ou perda concorrente do membro terminaliza com alarme; fallback global permanece somente quando o evento nao traz escopo. A flag `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED` e default-off e precisa de rollout controlado. Nao corrigir dados em massa sem preservar a relacao sessao/lista e validar ownership externo.
+
+`MINIMUM SAFE CHANGE`: resolver o membro por identidade contextual compartilhada entre Dialer, WhatsApp e carregamento do contato. Priorizar `contact_list_member_id` validado; depois `contact_list_id + contact_identifier`; usar `mailing_id` apenas como qualificador. Manter o fallback legado para o membro mais novo somente quando nenhum seletor contextual foi fornecido. Se houver seletor explicito conflitante, falhar sem atualizar outra lista.
+
+`ROLLBACK`: desligar `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED` e reiniciar API/workers. Dados ja alterados ou sessoes terminalizadas nao sao revertidos automaticamente.
+
+`DETECTION`: comparar `input_payload.contact_list_id` com a lista do `contact_list_member_id` persistido em `send_with_dialer_routing`, `send_with_whatsapp_routing` e `send_whatsapp_interactive_routing`.
+
+`V2`: sessao deve persistir chave estrangeira/identidade imutavel do membro de origem; nao recorrelar por identificador de negocio a cada card.
+
+## R21 — Stack DEV perde controle dos subprocessos e reporta falso down
+
+`STATUS`: CONFIRMED RUNTIME
+
+`IMPACT`: critical em ambiente compartilhado
+
+`PROBABILITY`: high apos start/stop pelo script atual
+
+`AFFECTED AREA`: `scripts/dev_phase_stack.sh` / Celery / isolamento operacional
+
+`DESCRIPTION`: o script grava o PID do wrapper `bash -lc`, mas Uvicorn/Celery criam processos filhos que podem sobreviver ao encerramento do wrapper. `status` consulta somente o pidfile e pode reportar todos os componentes como `down` enquanto API, beats e workers continuam ativos. Uma nova subida reutiliza hostnames, filas e schedule files, misturando processos stale com a stack nova.
+
+`RUNTIME EVIDENCE`: em 2026-08-24, `status` reportou toda a stack down, mas havia API e processos Celery `f5_local` orfaos desde 16:30 BRT. Nova tentativa as 18:11 BRT adicionou consumidores; os processos stale continuaram publicando dispatch, rescue e generate scan. A contencao exigiu encerrar todos os Uvicorn/Celery deste repositorio por command line. A porta 7777 e a lista de processos locais ficaram vazias; `celery inspect active_queues` confirmou nenhum consumer `f5_local`. As metricas globais do workspace continuaram crescendo pelo storm de producao ja conhecido e nao servem como criterio de shutdown local.
+
+`MITIGATION`: antes de qualquer start, nao confiar apenas em pidfiles. Conferir porta 7777 e processos por command line; se houver stale, interromper e confirmar zero processos antes de subir. Nao repetir stack completa neste ambiente ate corrigir gerenciamento de process group, pid real, hostnames unicos e schedule files.
+
+`DETECTION`: comparar `status` com `lsof`/process list e alertar para warning `node name already using this process mailbox`.
+
+`V2`: supervisor unico com lifecycle verificavel, environment manifest efetivo e recusas fail-closed para DB/broker compartilhados.

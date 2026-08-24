@@ -106,6 +106,8 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - O dispatcher publica tasks sem commit explicito da transacao externa que fez o claim.
 - O flow `0e378237-4a61-4d5f-89f3-b07b594df38f` demonstrou em runtime que erro permanente de definicao pode ser reenfileirado indefinidamente. A contenção final terminou em 1.154.025 alarmes; as sessoes `256`, `257` e `263` foram encerradas e a contagem estabilizou.
 - `CELERY_DISPATCH_WORKSPACE_UUID` nao limita o reconciliador de eventos pendentes. Uma stack `f5_local` com dispatcher escopado, mas sem `CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID`, varreu outro workspace no DB compartilhado e reativou a sessao `263`.
+- `scripts/dev_phase_stack.sh status` pode reportar down enquanto subprocessos Uvicorn/Celery sobrevivem ao wrapper registrado no pidfile. Em 2026-08-24 foram encontrados processos `f5_local` stale por quase duas horas; a contencao exigiu encerramento por command line.
+- O seletor legado de Dialer/WhatsApp/contexto escolhe o membro ativo mais novo por `contact_identifier`; em 2026-08-24 foram confirmadas 26 sessoes divergentes no workspace Highcomm. A correcao contextual esta implementada sob `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED`, default-off e ainda pendente de validacao runtime/rollout.
 - O flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` demonstrou a variante silenciosa: 4.389.386 metricas de executor com `blocked_send_whatsapp_interactive`, sete sessoes `state=0` e nenhum alarme do flow na fotografia de 2026-08-24 15:28 BRT.
 - `live` nao e suportado no branch atual nem em `main`; o commit isolado `bd461a5` nao foi integrado e sua implementacao nao executa handoff ou callback externo.
 - O smoke versionado valida aceite HTTP, nao conclusao E2E.
