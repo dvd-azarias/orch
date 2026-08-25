@@ -12,7 +12,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 
 1. Este repositorio e um Alpha em producao. A regra e `STABILITY OVER ELEGANCE` e a mudanca padrao e `MINIMUM SAFE CHANGE`.
 2. A rota canonica e `POST /v1/orch/{workspace_uuid}/{flow_uuid}`. O `workspace_uuid` seleciona o schema `ws_<uuid>` e deve estar ativo/completo.
-3. Nao misture stack manual e `launchd`. Em DEV, use `scripts/dev_phase_stack.sh`; em Linux, os templates ficam em `systemctl/`.
+3. Nao misture stack manual e `launchd`. Em DEV, use `scripts/dev_phase_stack.sh`. Em producao, o host canonico e `10.1.20.237`, com runtime em `/etc/gohp/orch` e 19 units systemd escaladas; acesso, credencial e inventario ficam em `PROJECT_STEWARD.md`. Os templates genericos de `systemctl/` nao representam literalmente essa instalacao.
 4. Filas sao contrato operacional. Use `ORCH_QUEUE_PROFILE` e filas isoladas; nunca reutilize filas de outras aplicacoes sem ordem explicita.
 5. FileApp decide `tipo_1` ou `tipo_2` pela resolucao de `mapping_template`. `tipo_1` delega a importacao ao Target Core; `tipo_2` persiste sessoes no ORCH. O efeito final `persons + orch_sessions` do `tipo_1` ainda exige comprovacao E2E externa.
 6. O codigo atual nao implementa autenticacao para trigger, consultas ou endpoints admin de migration. Protecao externa e `UNKNOWN`.
