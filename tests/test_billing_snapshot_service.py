@@ -209,6 +209,8 @@ async def test_backfill_uses_session_idempotency_and_utc_payload() -> None:
     assert "FOR UPDATE SKIP LOCKED" in statement
     assert "ON CONFLICT (snapshot_id) DO NOTHING" in statement
     assert "AT TIME ZONE 'UTC'" in statement
+    assert "CAST(:workspace_uuid AS text)" in statement
+    assert "CAST(:service_code AS text)" in statement
     assert parameters["workspace_uuid"] == "workspace-1"
     assert parameters["application_code"] == "target"
     assert parameters["service_code"] == "service-orch"
