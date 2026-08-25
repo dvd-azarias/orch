@@ -277,7 +277,7 @@ async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
-    monkeypatch.setattr(channel_event_service, "mark_pending_channel_events_processed", _mark)
+    monkeypatch.setattr(channel_event_service, "mark_channel_event_processed_by_identity", _mark)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
     monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
 
@@ -290,4 +290,12 @@ async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_
     )
 
     assert persisted == 1
-    assert marked == [{"session_id": 6945, "channel": "dialer"}]
+    assert marked == [
+        {
+            "session_id": 6945,
+            "channel": "dialer",
+            "event_type": "busy",
+            "event_id": "GW01-446.1",
+            "discard_reason": "finish_flow_webhook_already_succeeded",
+        }
+    ]

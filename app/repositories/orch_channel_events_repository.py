@@ -154,6 +154,137 @@ async def claim_next_pending_channel_event(
         return None
 
 
+async def fetch_next_pending_channel_event(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    channel: str,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                channel,
+                event_type,
+                event_id,
+                event_ts,
+                payload
+            FROM orch_channel_events
+            WHERE session_id = :session_id
+              AND channel = :channel
+              AND processed_at IS NULL
+            ORDER BY COALESCE(event_ts, received_at), id
+            LIMIT 1
+            """
+        ),
+        {"session_id": session_id, "channel": channel},
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
+async def fetch_channel_event_by_identity(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    channel: str,
+    event_id: str,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                channel,
+                event_type,
+                event_id,
+                event_ts,
+                payload,
+                processed_at
+            FROM orch_channel_events
+            WHERE session_id = :session_id
+              AND channel = :channel
+              AND event_id = :event_id
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "session_id": session_id,
+            "channel": channel,
+            "event_id": event_id,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
+async def mark_channel_event_processed(
+    db_session: AsyncSession,
+    *,
+    event_row_id: int,
+    session_id: int,
+    channel: str,
+    discard_reason: str | None = None,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_channel_events
+            SET
+                processed_at = NOW(),
+                discard_reason = COALESCE(:discard_reason, discard_reason)
+            WHERE id = :event_row_id
+              AND session_id = :session_id
+              AND channel = :channel
+              AND processed_at IS NULL
+            """
+        ),
+        {
+            "event_row_id": event_row_id,
+            "session_id": session_id,
+            "channel": channel,
+            "discard_reason": discard_reason,
+        },
+    )
+    return int(result.rowcount or 0)
+
+
+async def mark_channel_event_processed_by_identity(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    channel: str,
+    event_type: str,
+    event_id: str,
+    discard_reason: str | None = None,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_channel_events
+            SET
+                processed_at = NOW(),
+                discard_reason = COALESCE(:discard_reason, discard_reason)
+            WHERE session_id = :session_id
+              AND channel = :channel
+              AND event_type = :event_type
+              AND event_id = :event_id
+              AND processed_at IS NULL
+            """
+        ),
+        {
+            "session_id": session_id,
+            "channel": channel,
+            "event_type": event_type,
+            "event_id": event_id,
+            "discard_reason": discard_reason,
+        },
+    )
+    return int(result.rowcount or 0)
+
+
 async def mark_pending_channel_events_processed(
     db_session: AsyncSession,
     *,

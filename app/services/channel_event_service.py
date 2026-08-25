@@ -14,7 +14,7 @@ from app.core.workspace import get_current_workspace_schema
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_channel_events_repository import (
     insert_channel_event,
-    mark_pending_channel_events_processed,
+    mark_channel_event_processed_by_identity,
 )
 from app.repositories.orch_sessions_repository import set_session_cdr
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
@@ -237,11 +237,14 @@ async def persist_channel_events(
                             session_id=session_id,
                             cdr=event.payload,
                         )
-                        if not cdr_stored:
-                            await mark_pending_channel_events_processed(
+                        if not cdr_stored and event.event_id is not None:
+                            await mark_channel_event_processed_by_identity(
                                 db_session,
                                 session_id=session_id,
                                 channel="dialer",
+                                event_type=event.event_type,
+                                event_id=event.event_id,
+                                discard_reason="finish_flow_webhook_already_succeeded",
                             )
                     persisted += 1
     except Exception:

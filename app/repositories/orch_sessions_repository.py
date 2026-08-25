@@ -1137,6 +1137,10 @@ async def persist_run_flow_event_for_recent_entity_address(
                     AND entity_address = :entity_address
                     AND unassigned_at IS NULL
                     AND created_at >= NOW() - make_interval(hours => CAST(:window_hours AS int))
+                    AND COALESCE(
+                        runtime_variables->'finish_flow_webhook'->>'success',
+                        'false'
+                    ) <> 'true'
                 ORDER BY created_at DESC
                 LIMIT 1
             )

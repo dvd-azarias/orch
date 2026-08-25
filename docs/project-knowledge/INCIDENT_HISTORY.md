@@ -166,7 +166,7 @@ A analise do commit `bd461a5` refutou a hipotese de que bastaria integra-lo: par
 
 ## 2026-08-25 — Payload duplicado e eventos Dialer pendentes no `finish_flow`
 
-`STATUS`: PATCH PREPARED
+`STATUS`: PATCH REVISED / LOCAL VALIDATION PASSED
 
 `SEVERITY`: high
 
@@ -176,7 +176,7 @@ A analise do commit `bd461a5` refutou a hipotese de que bastaria integra-lo: par
 
 `FLOW`: `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`
 
-`SESSION`: `6945` / `1d4ae14d-a25b-437d-a84a-2454c00c6a37`
+`SESSIONS`: `6945` / `1d4ae14d-a25b-437d-a84a-2454c00c6a37` e `6946` / `d17715b5-cac2-446b-bdcb-6f478c6b1442`
 
 ### Evidencia confirmada
 
@@ -184,16 +184,19 @@ A analise do commit `bd461a5` refutou a hipotese de que bastaria integra-lo: par
 - A mesma sessao recebeu dois eventos Dialer com `uniqueid` e `DialerActionID` distintos em oito segundos, apesar do contrato funcional de uma chamada/desfecho por sessao.
 - Houve dois envios do webhook terminal para a sessao: o segundo body continha o resultado do primeiro dispatch e `cdr=null`.
 - Os eventos `13902` e `13903` permaneceram com `processed_at=NULL`; o reconciliador continuou acionando a sessao terminal com `no_next_card`.
+- Depois do primeiro patch de higienizacao, a sessao `6946` recebeu os eventos `13904` e `13905`. O primeiro POST foi confirmado sem CDR; o segundo `finish_flow` foi suprimido pelo sucesso ja persistido.
+- O evento `13904` foi recebido as `10:07:18.905 UTC`, processado as `10:07:18.927 UTC` e o webhook saiu as `10:07:18.961 UTC`. O codigo relia a sessao, mas continuava buscando CDR no runtime local e substituia o JSONB completo antes do dispatch.
 
 ### Correcao preparada
 
-- Remover `runtime_variables` do contrato externo e manter somente sessao persistida, `result` e um `cdr`.
-- Fazer o primeiro `2xx` persistido vencer, sem novo POST em reexecucao normal.
-- Baixar eventos Dialer pendentes apos sucesso e tratar eventos tardios como processados sem recriar CDR.
+- Contrato explicito `session` + `cdr`, com contato normalizado uma vez dentro de `session` e sem `runtime_variables`.
+- Usar o payload cru de um unico registro pendente de `orch_channel_events`; fluxo Dialer sem CDR nao envia `null`.
+- Depois de `2xx`, processar somente o evento utilizado. Evento tardio e auditado individualmente e sessao com webhook confirmado nao pode ser reaberta pelo fallback temporal.
+- Nenhuma migration, fila, beat ou worker adicional.
 
 ### Risco residual
 
-O envio permanece best-effort dentro da transacao. Crash entre o `2xx` externo e o commit local ainda pode repetir o POST; o destino deve continuar idempotente.
+O envio permanece best-effort dentro da transacao. Crash entre o `2xx` externo e o commit local ainda pode repetir o POST; o destino deve continuar idempotente. A semantica upstream dos dois `DialerActionID` distintos observados na mesma sessao permanece desconhecida.
 
 ### Acao recomendada
 

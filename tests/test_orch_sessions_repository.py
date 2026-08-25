@@ -11,6 +11,7 @@ from app.repositories.orch_sessions_repository import (
     _derive_state_update,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
+    persist_run_flow_event_for_recent_entity_address,
     set_session_cdr,
 )
 
@@ -78,9 +79,9 @@ class _RecordingSession:
         self.statement = ""
         self.parameters: dict = {}
 
-    async def execute(self, statement, parameters) -> _MappingsResult:  # noqa: ANN001
+    async def execute(self, statement, parameters=None) -> _MappingsResult:  # noqa: ANN001
         self.statement = str(statement)
-        self.parameters = parameters
+        self.parameters = parameters or {}
         return _MappingsResult(self.row)
 
 
@@ -161,3 +162,25 @@ async def test_fetch_session_webhook_snapshot_uses_complete_database_row() -> No
 
     assert "to_jsonb(session_row)" in session.statement
     assert snapshot == {"id": 6941, "entity_address": "5511975620806"}
+
+
+@pytest.mark.asyncio
+async def test_recent_dialer_event_does_not_reopen_successful_finish_webhook_session() -> None:
+    session = _RecordingSession(None)
+
+    result = await persist_run_flow_event_for_recent_entity_address(
+        session,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        entity_address="5511975620806",
+        payload={"uniqueid": "GW01-late.1"},
+        extracted={"entity": "action-late"},
+        event_name="hangup",
+        event_result="hangup",
+        resume_card_uuid="3fcb8a0e-cd5f-4a9d-a941-e04951882bce",
+        correlation_window_hours=36,
+    )
+
+    assert result is None
+    assert "runtime_variables->'finish_flow_webhook'->>'success'" in session.statement
+    assert "<> 'true'" in session.statement

@@ -452,6 +452,6 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: o webhook terminal usa uma chamada HTTP com timeout de 5 segundos durante a transacao do workflow. A chamada roda em thread para nao bloquear o event loop, mas a conexao e o advisory lock permanecem retidos. Nao existe outbox nem retry automatico. Uma falha mantem o CDR para diagnostico, mas a sessao termina sem nova tentativa automatica; uma interrupcao entre a resposta externa e o commit local ainda pode produzir divergencia ou repeticao, pois o guard de primeiro sucesso depende do commit local.
 
-`MITIGATION`: manter o destino rapido e idempotente, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR e um unico objeto por sessao e so e removido apos `2xx`; depois do sucesso, o ORCH nao repete o POST em reexecucoes normais e baixa eventos Dialer excedentes.
+`MITIGATION`: manter o destino rapido e respeitar a `Idempotency-Key` enviada pelo ORCH, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR e um unico objeto por sessao, selecionado no ledger e removido da memoria somente apos `2xx`; depois do sucesso, o ORCH nao repete o POST, processa somente o evento utilizado e impede reabertura por callback tardio.
 
 `V2`: avaliar entrega transacional/idempotente fora do caminho critico caso a garantia operacional passe a exigir retry.

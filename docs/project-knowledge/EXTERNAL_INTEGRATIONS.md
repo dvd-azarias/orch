@@ -46,9 +46,9 @@ Validacao so e considerada completa quando o POST externo e observado no destino
 
 ## Webhook de `finish_flow`
 
-Quando `finish_flow.parameters.webhook` contem uma URL, o executor primeiro persiste o estado terminal, rele a sessao e envia um unico `POST` com os campos persistidos publicos, `result` e o unico objeto `cdr` do Dialer. `runtime_variables` e estado interno e nao integra o body. No recebimento do evento, a revisao selecionada do flow e consultada; o CDR so e copiado quando ela contem o webhook.
+Quando `finish_flow.parameters.webhook` contem uma URL, o executor envia um unico `POST` no formato `{"session": {..., "contact": {...}}, "cdr": {...}}`. `session` contem os campos persistidos publicos e o `result`; `contact` aparece uma vez e `cdr` e o payload cru do evento Dialer selecionado em `orch_channel_events`. `runtime_variables` e estado interno e nao integra o body.
 
-O envio usa timeout de 5 segundos e roda fora do event loop, mas ainda durante a transacao do workflow. Nao possui outbox, task dedicada ou retry automatico. Em falha, a sessao ainda termina e conserva o CDR e o resultado do dispatch para diagnostico. Apos o primeiro `2xx`, novas execucoes nao reenviam o webhook, o CDR e removido e eventos Dialer excedentes sao marcados como processados; eventos tardios tambem nao recriam o CDR confirmado.
+O envio usa timeout de 5 segundos, inclui `Idempotency-Key` deterministica por sessao/evento e roda fora do event loop, mas ainda durante a transacao do workflow. Nao possui outbox ou task dedicada. Fluxo Dialer sem linha correspondente no ledger nao envia body incompleto: registra dispatch adiado e deixa o evento elegivel para retomada. Em falha HTTP, conserva a copia do CDR e o resultado para diagnostico. Apos o primeiro `2xx`, novas execucoes nao reenviam, somente o evento utilizado e processado e callbacks tardios nao reabrem a sessao confirmada.
 
 ## SFTP
 
