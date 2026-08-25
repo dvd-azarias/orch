@@ -30,7 +30,11 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
-from app.repositories.orch_channel_events_repository import claim_next_pending_channel_event, has_pending_channel_events
+from app.repositories.orch_channel_events_repository import (
+    claim_next_pending_channel_event,
+    has_pending_channel_events,
+    mark_pending_channel_events_processed,
+)
 from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
@@ -3615,9 +3619,12 @@ async def _dispatch_finish_flow_webhook(
     if not isinstance(webhook, str) or not webhook.strip():
         return None
 
+    previous_result = runtime_variables.get("finish_flow_webhook")
+    if isinstance(previous_result, dict) and previous_result.get("success") is True:
+        runtime_variables.pop("cdr", None)
+        return {**copy.deepcopy(previous_result), "skipped": True}
+
     cdr = copy.deepcopy(runtime_variables.get("cdr"))
-    payload_runtime_variables = copy.deepcopy(runtime_variables)
-    payload_runtime_variables.pop("cdr", None)
     session_payload = {
         key: copy.deepcopy(value)
         for key, value in session_state.items()
@@ -3629,7 +3636,6 @@ async def _dispatch_finish_flow_webhook(
             "ended_at": finished_at,
             "last_card_uuid": component.get("uuid") or component.get("ref_id"),
             "next_card_uuid": None,
-            "runtime_variables": payload_runtime_variables,
             "result": params.get("result"),
             "cdr": cdr,
         }
@@ -5013,6 +5019,12 @@ async def execute_workflow_m2_for_session(
                             runtime_variables=runtime_variables,
                             finished_at=finished_at,
                         )
+                        if finish_flow_webhook_result and finish_flow_webhook_result.get("success") is True:
+                            await mark_pending_channel_events_processed(
+                                db_session,
+                                session_id=session_id,
+                                channel="dialer",
+                            )
                         await replace_session_workflow_state(
                             db_session,
                             session_id=session_id,

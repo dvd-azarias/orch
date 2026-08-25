@@ -306,4 +306,37 @@ Suportar os novos campos do card `finish_flow` da revisao publicada do flow `3d2
 - Smoke HTTP real em destino loopback observou um unico `POST`, um unico campo `cdr` e limpeza em memoria apos `204`.
 - As revisoes adversariais encontraram dependencia temporal da flag, snapshot parcial, CDR duplicado e leitura anterior a terminalizacao; os quatro achados foram removidos antes do fechamento.
 - A revisao final confirmou esses quatro pontos e levantou somente o risco preexistente `R7`: publicacao entre recebimento e execucao pode trocar a revisao relida pelo M2. Pinagem global de revisao foi mantida fora do escopo para nao ampliar o blast radius desta mudanca.
-- Observacao do POST em destino real e smoke E2E permanecem pendentes.
+- O POST em destino real foi observado em 2026-08-25; a entrega funcionou e revelou o payload inflado, o reenvio e o ledger pendente registrados na manutencao seguinte.
+
+## 2026-08-25 — Higienizacao e unicidade do webhook `finish_flow`
+
+### REQUEST
+
+Remover repeticoes do payload observado em producao e garantir a paridade entre uma sessao de voz, seu unico CDR e um unico webhook terminal confirmado.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_REQUIRED` — o primeiro teste real enviou estado interno volumoso, repetiu o POST para a mesma sessao e deixou eventos Dialer pendentes sendo reconciliados continuamente.
+
+### RUNTIME EVIDENCE
+
+- A sessao `6945`, workspace `ba7eb0ec-e565-447c-8c11-8f870cf72a60`, flow `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`, entregou o webhook com `runtime_variables` inteiro e varias copias do mesmo callback.
+- Dois eventos Dialer distintos (`GW02-1787649908.293874` e `GW01-1787649921.293865`) chegaram para a mesma sessao, contrariando o contrato funcional de uma chamada/desfecho por sessao.
+- O runtime anterior enviou dois webhooks `200` e deixou os dois registros do ledger com `processed_at=NULL`; o reconciliador continuou executando a sessao terminal.
+
+### CHANGE
+
+- O body passa a conter somente campos persistidos da sessao fora de `runtime_variables`, mais `result` e o unico `cdr` persistido.
+- O primeiro resultado `2xx` persistido impede novos POSTs da mesma sessao e remove o CDR.
+- O sucesso baixa todos os eventos Dialer excedentes ainda pendentes. Evento tardio apos sucesso e preservado no ledger, mas marcado processado e impedido de recriar o CDR.
+- Nenhuma migration, fila, beat, worker ou armazenamento novo foi criado.
+
+### VALIDATION
+
+- Suite focada e ampliada: 132 testes passaram, incluindo payload sem runtime interno, paridade do CDR persistido, supressao de reenvio, limpeza de backlog e tratamento de evento tardio.
+- `compileall` e `git diff --check` passaram.
+- Smoke HTTP loopback observou exatamente um POST, sem `runtime_variables`, com um CDR; a segunda execucao foi suprimida.
+- PostgreSQL real com tabelas temporarias e rollback confirmou CDR unico, bloqueio de ressurgimento apos sucesso e baixa de dois eventos Dialer sem afetar evento WhatsApp.
+- A stack local iniciou API, tres workers e dois beats; API e tasks responderam. O runbook abortou e limpou os processos porque `scripts/dev_phase_stack.sh` passa simultaneamente `--hostname` e `-n`: o nome efetivo nao casa com o regex de readiness. O gap e preexistente e ficou fora do patch funcional.
+- Duas revisoes adversariais inicialmente deram `NO-GO`; a implementacao foi simplificada para remover fallback de CDR divergente e claim antecipado no `send_with_dialer`. O risco residual best-effort entre `2xx` e commit permanece documentado em R24.
+- Deploy e validacao E2E no host `10.1.20.237` permanecem pendentes.

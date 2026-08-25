@@ -164,6 +164,37 @@ A revisao independente confirmou a cadeia `state=0 -> scan -> claim sem commit -
 
 A analise do commit `bd461a5` refutou a hipotese de que bastaria integra-lo: para eventos comuns ele retorna branch nula, nao envia handoff e nao chama destino externo; como o resolver usa a primeira edge, este grafo tenderia a finalizar sem atendimento.
 
+## 2026-08-25 — Payload duplicado e eventos Dialer pendentes no `finish_flow`
+
+`STATUS`: PATCH PREPARED
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60`
+
+`FLOW`: `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`
+
+`SESSION`: `6945` / `1d4ae14d-a25b-437d-a84a-2454c00c6a37`
+
+### Evidencia confirmada
+
+- O webhook funcional chegou ao destino com HTTP 200, mas carregou `runtime_variables` inteiro e repetiu callback/payload em varios niveis.
+- A mesma sessao recebeu dois eventos Dialer com `uniqueid` e `DialerActionID` distintos em oito segundos, apesar do contrato funcional de uma chamada/desfecho por sessao.
+- Houve dois envios do webhook terminal para a sessao: o segundo body continha o resultado do primeiro dispatch e `cdr=null`.
+- Os eventos `13902` e `13903` permaneceram com `processed_at=NULL`; o reconciliador continuou acionando a sessao terminal com `no_next_card`.
+
+### Correcao preparada
+
+- Remover `runtime_variables` do contrato externo e manter somente sessao persistida, `result` e um `cdr`.
+- Fazer o primeiro `2xx` persistido vencer, sem novo POST em reexecucao normal.
+- Baixar eventos Dialer pendentes apos sucesso e tratar eventos tardios como processados sem recriar CDR.
+
+### Risco residual
+
+O envio permanece best-effort dentro da transacao. Crash entre o `2xx` externo e o commit local ainda pode repetir o POST; o destino deve continuar idempotente.
+
 ### Acao recomendada
 
 1. Preservar contagens, task IDs, hostnames, commits e logs antes de intervir.

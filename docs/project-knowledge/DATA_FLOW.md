@@ -46,7 +46,7 @@ flow_v2 + flow_v2_revision
 
 Paradas relevantes:
 
-- `finish_flow`: persiste o estado terminal; quando `parameters.webhook` esta configurado, rele a linha completa e a envia por HTTP `POST` com `result` e o unico objeto `cdr` recebido do Dialer. O CDR aparece uma vez no corpo, fora de `runtime_variables`. Resposta `2xx` remove o CDR do runtime; falha mantem o objeto para diagnostico.
+- `finish_flow`: persiste o estado terminal; quando `parameters.webhook` esta configurado, rele a sessao e envia por HTTP `POST` seus campos persistidos, exceto `runtime_variables`, acrescidos de `result` e do unico objeto `cdr` recebido do Dialer. Resposta `2xx` remove o CDR, registra o sucesso e marca eventos Dialer ainda pendentes como processados; execucoes posteriores nao repetem o POST confirmado. Falha mantem o objeto para diagnostico.
 - `wait/scheduling_moment`: `frozen_until`, retorna a pending quando elegivel.
 - cards de canal e `run_flow`: mantem contexto bloqueante.
 - componente desconhecido: caminho Celery pode classificar como fatal e finalizar.
