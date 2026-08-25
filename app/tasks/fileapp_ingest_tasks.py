@@ -388,6 +388,25 @@ def _try_acquire_fileapp_post_process_lock(
 ) -> bool:
     if redis_client is None:
         return True
+    try:
+        return bool(
+            redis_client.set(
+                _fileapp_post_process_lock_key(workspace_uuid=workspace_uuid, source_list_id=source_list_id),
+                "1",
+                ex=max(1, int(cooldown_seconds)),
+                nx=True,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "fileapp.post_process_reconcile.lock_failed",
+            extra={
+                "event": "orch.fileapp.post_process_reconcile.lock_failed",
+                "workspace_uuid": workspace_uuid,
+                "source_list_id": source_list_id,
+            },
+        )
+        return True
 
 
 def _try_acquire_fileapp_post_process_file_lock(
@@ -415,25 +434,6 @@ def _try_acquire_fileapp_post_process_file_lock(
                 "event": "orch.fileapp.post_process_reconcile.file_lock_failed",
                 "workspace_uuid": workspace_uuid,
                 "file_id": file_id,
-            },
-        )
-        return True
-    try:
-        return bool(
-            redis_client.set(
-                _fileapp_post_process_lock_key(workspace_uuid=workspace_uuid, source_list_id=source_list_id),
-                "1",
-                ex=max(1, int(cooldown_seconds)),
-                nx=True,
-            )
-        )
-    except Exception:
-        logger.exception(
-            "fileapp.post_process_reconcile.lock_failed",
-            extra={
-                "event": "orch.fileapp.post_process_reconcile.lock_failed",
-                "workspace_uuid": workspace_uuid,
-                "source_list_id": source_list_id,
             },
         )
         return True
@@ -706,7 +706,21 @@ def _try_mark_fileapp_entrada_rescue_flow_in_flight(
         file_id=file_id,
     )
     try:
-        return bool(redis_client.set(key, "in_flight", ex=max(60, int(ttl_seconds)), nx=True))
+        return bool(
+            redis_client.eval(
+                """
+                local current = redis.call('GET', KEYS[1])
+                if not current or current == 'failed' then
+                    redis.call('SET', KEYS[1], 'in_flight', 'EX', ARGV[1])
+                    return 1
+                end
+                return 0
+                """,
+                1,
+                key,
+                max(60, int(ttl_seconds)),
+            )
+        )
     except Exception:
         logger.exception(
             "fileapp.entrada_rescue.flow_state_in_flight_failed",

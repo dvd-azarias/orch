@@ -168,3 +168,38 @@ async def test_hygiene_quarantines_exhausted_no_source_list(monkeypatch) -> None
     result = await tasks._reconcile_fileapp_entrada_hygiene_task()
     assert result["quarantined_to_falha"] == 1
     assert result["resubmitted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_hygiene_resubmits_terminal_failed_no_source_list(monkeypatch) -> None:
+    _wire_common(monkeypatch)
+    monkeypatch.setattr(
+        tasks,
+        "_list_files_in_folder",
+        AsyncMock(
+            return_value=[
+                {
+                    "id": "file-4",
+                    "original_name": "failed.csv",
+                    "folder_path": "ACAN_CONTATOS/entrada",
+                    "url": "https://sync-core-api.otima.io/files/v1/files/content/file-4",
+                    "created_at": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(tasks, "_fetch_fileapp_source_list_state", AsyncMock(return_value=None))
+    monkeypatch.setattr(tasks, "_get_fileapp_entrada_rescue_flow_state", lambda *_args, **_kwargs: "failed")
+    monkeypatch.setattr(tasks, "_get_fileapp_entrada_hygiene_resubmit_attempts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(tasks, "_set_fileapp_entrada_hygiene_resubmit_attempts", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tasks, "resolve_mapping_template_uuid", AsyncMock(return_value="tmpl-1"))
+    monkeypatch.setattr(tasks, "_try_mark_fileapp_entrada_rescue_flow_in_flight", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.ingest_fileapp_tipo1_event_task.apply_async",
+        lambda **_kwargs: SimpleNamespace(id="ingest-456"),
+    )
+
+    result = await tasks._reconcile_fileapp_entrada_hygiene_task()
+
+    assert result["quarantined_to_falha"] == 0
+    assert result["resubmitted"] == 1
