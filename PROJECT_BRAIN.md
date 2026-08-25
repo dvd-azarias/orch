@@ -88,6 +88,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `entity_origin_app` e origem historica; o evento corrente esta em `runtime_variables.source_app` e snapshots.
 - `unassigned_at IS NOT NULL` impede reuso normal.
 - `finish_flow` deve deixar `state=3`, `ended_at` preenchido e `next_card_uuid=NULL`.
+- Quando `finish_flow.parameters.webhook` esta configurado, a sessao guarda no maximo um objeto `cdr` do Dialer, envia o snapshot terminal ao webhook e remove o CDR somente apos resposta `2xx`.
 - Cursores `last_card_uuid`/`next_card_uuid` e runtime precisam permanecer coerentes.
 - FileApp nao cria rota paralela; entra na rota canonica.
 - `source_list_members` nao e manipulado pelo FileApp local.

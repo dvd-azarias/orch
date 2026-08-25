@@ -44,6 +44,12 @@ Cards podem chamar URL HTTP arbitraria, com headers/query/body renderizados, tim
 
 Validacao so e considerada completa quando o POST externo e observado no destino.
 
+## Webhook de `finish_flow`
+
+Quando `finish_flow.parameters.webhook` contem uma URL, o executor primeiro persiste o estado terminal, rele a linha completa e envia um unico `POST` com essa linha acrescida de `result` e do unico objeto `cdr` do Dialer. O CDR nao e duplicado dentro de `runtime_variables`. No recebimento do evento, a revisao selecionada do flow e consultada; o CDR so e copiado quando ela contem o webhook.
+
+O envio usa timeout de 5 segundos e roda fora do event loop, mas ainda durante a transacao do workflow. Nao possui outbox, task dedicada ou retry automatico. Em falha, a sessao ainda termina e conserva o CDR e o resultado do dispatch para diagnostico.
+
 ## SFTP
 
 `generate_file` usa Paramiko e configuracao do card/runtime. O envio e auditado em `orch_generate_file_dispatch_audit`.
@@ -53,4 +59,3 @@ Risco: crash apos upload e antes de commit pode repetir o arquivo.
 ## Supplier
 
 `POST /v1/orch/{workspace_uuid}/{flow_uuid}/resubmit` e a unica rota com autenticacao propria identificada. Usa pares de client id/secret e `event_id` para idempotencia.
-

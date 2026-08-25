@@ -1309,6 +1309,28 @@ async def fetch_session_workflow_state(
     return dict(row) if row is not None else None
 
 
+async def fetch_session_webhook_snapshot(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT to_jsonb(session_row) AS session_data
+            FROM orch_sessions AS session_row
+            WHERE id = :session_id
+            LIMIT 1
+            """
+        ),
+        {"session_id": session_id},
+    )
+    row = result.mappings().first()
+    if row is None or not isinstance(row.get("session_data"), dict):
+        return None
+    return dict(row["session_data"])
+
+
 async def replace_session_workflow_state(
     db_session: AsyncSession,
     *,
@@ -1343,6 +1365,34 @@ async def replace_session_workflow_state(
             "frozen_until": frozen_until,
             "ended_at": ended_at,
             "state": state,
+        },
+    )
+
+
+async def set_session_cdr(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    cdr: dict[str, Any],
+) -> None:
+    await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = jsonb_set(
+                    COALESCE(runtime_variables, '{}'::jsonb),
+                    '{cdr}',
+                    CAST(:cdr AS jsonb),
+                    true
+                ),
+                updated_at = NOW()
+            WHERE id = :session_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "cdr": json.dumps(cdr, ensure_ascii=False),
         },
     )
 

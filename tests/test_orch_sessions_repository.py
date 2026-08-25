@@ -10,6 +10,8 @@ from app.repositories.orch_sessions_repository import (
     _compute_effective_whatsapp_limit,
     _derive_state_update,
     fetch_contact_runtime_context_for_session,
+    fetch_session_webhook_snapshot,
+    set_session_cdr,
 )
 
 
@@ -134,3 +136,25 @@ async def test_fetch_contact_context_without_scope_preserves_legacy_query() -> N
     assert "clm.id = :contact_list_member_id" not in session.statement
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" not in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" not in session.statement
+
+
+@pytest.mark.asyncio
+async def test_set_session_cdr_overwrites_with_single_object() -> None:
+    session = _RecordingSession(None)
+    cdr = {"hangup": {"Disposition": "ANSWERED"}}
+
+    await set_session_cdr(session, session_id=6941, cdr=cdr)
+
+    assert "jsonb_set" in session.statement
+    assert "||" not in session.statement
+    assert session.parameters["cdr"] == '{"hangup": {"Disposition": "ANSWERED"}}'
+
+
+@pytest.mark.asyncio
+async def test_fetch_session_webhook_snapshot_uses_complete_database_row() -> None:
+    session = _RecordingSession({"session_data": {"id": 6941, "entity_address": "5511975620806"}})
+
+    snapshot = await fetch_session_webhook_snapshot(session, session_id=6941)
+
+    assert "to_jsonb(session_row)" in session.statement
+    assert snapshot == {"id": 6941, "entity_address": "5511975620806"}

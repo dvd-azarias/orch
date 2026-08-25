@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.services.channel_event_service import extract_channel_events
+import pytest
+
+import app.services.channel_event_service as channel_event_service
+from app.services.channel_event_service import extract_channel_events, persist_channel_events
 
 
 def test_extract_channel_events_returns_whatsapp_status_items() -> None:
@@ -112,3 +115,121 @@ def test_extract_channel_events_returns_dialer_item() -> None:
     assert events[0].channel == "dialer"
     assert events[0].event_type == "busy"
     assert events[0].event_id == "GW01-444.1"
+
+
+class _Transaction:
+    async def __aenter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+        return False
+
+
+class _Session:
+    def in_transaction(self) -> bool:
+        return False
+
+    def begin(self) -> _Transaction:
+        return _Transaction()
+
+    async def execute(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+
+@pytest.mark.asyncio
+async def test_persist_dialer_event_sets_single_session_cdr_after_ledger_insert(monkeypatch) -> None:
+    payload = {
+        "uniqueid": "GW01-444.1",
+        "hangup": {
+            "Event": "Hangup",
+            "Disposition": "BUSY",
+            "Cause": "486",
+            "Uniqueid": "GW01-444.1",
+        },
+    }
+    stored: list[dict] = []
+
+    async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        return True
+
+    async def _set_cdr(*_args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        stored.append(kwargs["cdr"])
+
+    async def _fetch_flow(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
+
+    async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {
+            "definition": {
+                "components": [
+                    {
+                        "component_id": "finish_flow",
+                        "parameters": {"webhook": "https://example.test/hook"},
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
+    monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
+    monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
+
+    persisted = await persist_channel_events(
+        _Session(),
+        session_id=6941,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        payload=payload,
+    )
+
+    assert persisted == 1
+    assert stored == [payload]
+
+
+@pytest.mark.asyncio
+async def test_persist_dialer_event_does_not_set_cdr_without_finish_webhook(monkeypatch) -> None:
+    payload = {
+        "uniqueid": "GW01-445.1",
+        "hangup": {
+            "Event": "Hangup",
+            "Disposition": "BUSY",
+            "Cause": "486",
+            "Uniqueid": "GW01-445.1",
+        },
+    }
+    stored: list[dict] = []
+
+    async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        return True
+
+    async def _set_cdr(*_args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        stored.append(kwargs["cdr"])
+
+    async def _fetch_flow(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
+
+    async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {
+            "definition": {
+                "components": [
+                    {"component_id": "finish_flow", "parameters": {"webhook": None}}
+                ]
+            }
+        }
+
+    monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
+    monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
+    monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
+
+    persisted = await persist_channel_events(
+        _Session(),
+        session_id=6942,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        payload=payload,
+    )
+
+    assert persisted == 1
+    assert stored == []

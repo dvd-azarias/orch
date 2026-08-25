@@ -103,6 +103,20 @@ def component_kind(component: dict[str, Any]) -> str:
     return ""
 
 
+def definition_has_finish_flow_webhook(definition: dict[str, Any]) -> bool:
+    components = definition.get("components")
+    if not isinstance(components, list):
+        return False
+    for component in components:
+        if not isinstance(component, dict) or component_kind(component) not in {"finish_flow", "finish-flow"}:
+            continue
+        parameters = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+        webhook = parameters.get("webhook")
+        if isinstance(webhook, str) and webhook.strip():
+            return True
+    return False
+
+
 def _extract_edge(branch: Any) -> tuple[str | None, str | None]:
     if not isinstance(branch, dict):
         return None, None
