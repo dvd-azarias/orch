@@ -328,6 +328,7 @@ async def process_single_payload(
                         event_result="hangup",
                         resume_card_uuid=resume_card_uuid,
                         correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
+                        allow_confirmed_finish_flow_webhook=True,
                         event_data={
                             "uniqueid": payload.get("uniqueid"),
                             "hangup": payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {},

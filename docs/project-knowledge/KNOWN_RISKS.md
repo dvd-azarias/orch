@@ -450,8 +450,8 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `AFFECTED AREA`: executor M2 / `finish_flow` / integracao HTTP
 
-`DESCRIPTION`: o webhook terminal usa uma chamada HTTP com timeout de 5 segundos durante a transacao do workflow. A chamada roda em thread para nao bloquear o event loop, mas a conexao e o advisory lock permanecem retidos. Nao existe outbox nem retry automatico. Uma falha mantem o CDR para diagnostico, mas a sessao termina sem nova tentativa automatica; uma interrupcao entre a resposta externa e o commit local ainda pode produzir divergencia ou repeticao, pois o guard de primeiro sucesso depende do commit local.
+`DESCRIPTION`: o webhook terminal usa uma chamada HTTP com timeout de 5 segundos durante a transacao do workflow. A chamada roda em thread para nao bloquear o event loop, mas a conexao e o advisory lock permanecem retidos. Nao existe outbox nem retry automatico. Uma falha mantem o CDR para diagnostico, mas a sessao termina sem nova tentativa automatica; uma interrupcao entre a resposta externa e o commit local ainda pode produzir divergencia ou repeticao, pois a marca de entrega por evento depende do commit local.
 
-`MITIGATION`: manter o destino rapido e respeitar a `Idempotency-Key` enviada pelo ORCH, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR e um unico objeto por sessao, selecionado no ledger e removido da memoria somente apos `2xx`; depois do sucesso, o ORCH nao repete o POST, processa somente o evento utilizado e impede reabertura por callback tardio.
+`MITIGATION`: manter o destino rapido e respeitar a `Idempotency-Key` enviada pelo ORCH, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR permanece um objeto transitorio por vez na sessao, selecionado no ledger e removido da memoria somente apos `2xx`; uma sessao Dialer pode emitir um POST por CDR distinto, enquanto o marcador do ledger impede replay do mesmo evento.
 
 `V2`: avaliar entrega transacional/idempotente fora do caminho critico caso a garantia operacional passe a exigir retry.

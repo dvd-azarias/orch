@@ -1078,6 +1078,7 @@ async def persist_run_flow_event_for_recent_entity_address(
     event_result: str,
     resume_card_uuid: str,
     correlation_window_hours: int,
+    allow_confirmed_finish_flow_webhook: bool = False,
     event_data: dict[str, Any] | None = None,
 ) -> PersistResult | None:
     lock_key = f"run_flow_event_recent|{flow_uuid}|{entity_address}|{event_name}|{event_result}"
@@ -1137,10 +1138,13 @@ async def persist_run_flow_event_for_recent_entity_address(
                     AND entity_address = :entity_address
                     AND unassigned_at IS NULL
                     AND created_at >= NOW() - make_interval(hours => CAST(:window_hours AS int))
-                    AND COALESCE(
-                        runtime_variables->'finish_flow_webhook'->>'success',
-                        'false'
-                    ) <> 'true'
+                    AND (
+                        :allow_confirmed_finish_flow_webhook
+                        OR COALESCE(
+                            runtime_variables->'finish_flow_webhook'->>'success',
+                            'false'
+                        ) <> 'true'
+                    )
                 ORDER BY created_at DESC
                 LIMIT 1
             )
@@ -1154,6 +1158,7 @@ async def persist_run_flow_event_for_recent_entity_address(
             "callback_payload": callback_payload_json,
             "resume_card_uuid": resume_card_uuid,
             "window_hours": safe_window_hours,
+            "allow_confirmed_finish_flow_webhook": allow_confirmed_finish_flow_webhook,
             "state_finished": SESSION_STATE_FINISHED,
         },
     )
@@ -1392,10 +1397,6 @@ async def set_session_cdr(
                 ),
                 updated_at = NOW()
             WHERE id = :session_id
-              AND COALESCE(
-                  runtime_variables->'finish_flow_webhook'->>'success',
-                  'false'
-              ) <> 'true'
             RETURNING id
             """
         ),

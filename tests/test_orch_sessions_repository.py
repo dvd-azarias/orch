@@ -149,7 +149,7 @@ async def test_set_session_cdr_overwrites_with_single_object() -> None:
     assert stored is False
     assert "jsonb_set" in session.statement
     assert "||" not in session.statement
-    assert "runtime_variables->'finish_flow_webhook'->>'success'" in session.statement
+    assert "runtime_variables->'finish_flow_webhook'->>'success'" not in session.statement
     assert "RETURNING id" in session.statement
     assert session.parameters["cdr"] == '{"hangup": {"Disposition": "ANSWERED"}}'
 
@@ -165,7 +165,7 @@ async def test_fetch_session_webhook_snapshot_uses_complete_database_row() -> No
 
 
 @pytest.mark.asyncio
-async def test_recent_dialer_event_does_not_reopen_successful_finish_webhook_session() -> None:
+async def test_recent_event_does_not_reopen_successful_finish_webhook_session_by_default() -> None:
     session = _RecordingSession(None)
 
     result = await persist_run_flow_event_for_recent_entity_address(
@@ -184,3 +184,27 @@ async def test_recent_dialer_event_does_not_reopen_successful_finish_webhook_ses
     assert result is None
     assert "runtime_variables->'finish_flow_webhook'->>'success'" in session.statement
     assert "<> 'true'" in session.statement
+    assert session.parameters["allow_confirmed_finish_flow_webhook"] is False
+
+
+@pytest.mark.asyncio
+async def test_recent_dialer_event_reopens_successful_finish_webhook_session_when_explicit() -> None:
+    session = _RecordingSession(None)
+
+    result = await persist_run_flow_event_for_recent_entity_address(
+        session,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        entity_address="5511975620806",
+        payload={"uniqueid": "GW01-retry.1"},
+        extracted={"entity": "action-retry"},
+        event_name="hangup",
+        event_result="hangup",
+        resume_card_uuid="3fcb8a0e-cd5f-4a9d-a941-e04951882bce",
+        correlation_window_hours=36,
+        allow_confirmed_finish_flow_webhook=True,
+    )
+
+    assert result is None
+    assert ":allow_confirmed_finish_flow_webhook" in session.statement
+    assert session.parameters["allow_confirmed_finish_flow_webhook"] is True

@@ -46,7 +46,7 @@ flow_v2 + flow_v2_revision
 
 Paradas relevantes:
 
-- `finish_flow`: persiste o estado terminal; quando `parameters.webhook` esta configurado, envia `session` com campos persistidos, `result` e contato normalizado, mais `cdr` com o payload cru do unico evento Dialer selecionado no ledger. `runtime_variables` nao sai. Em fluxo Dialer, a ausencia de CDR adia o POST em vez de enviar `null`; `2xx` remove a copia transitoria e processa somente o evento utilizado. Falha mantem CDR/evento para diagnostico e retomada.
+- `finish_flow`: persiste o estado terminal; quando `parameters.webhook` esta configurado, envia `session` com campos persistidos, `result` e contato normalizado, mais `cdr` com o payload cru do evento Dialer selecionado no ledger. `runtime_variables` nao sai. Em fluxo Dialer, a ausencia de CDR adia o POST em vez de enviar `null`; cada CDR distinto da mesma sessao pode disparar um POST, e o `2xx` marca somente aquele evento como entregue. Falha mantem CDR/evento para diagnostico e retomada.
 - `wait/scheduling_moment`: `frozen_until`, retorna a pending quando elegivel.
 - cards de canal e `run_flow`: mantem contexto bloqueante.
 - componente desconhecido: caminho Celery pode classificar como fatal e finalizar.
