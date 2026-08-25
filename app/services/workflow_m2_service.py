@@ -32,8 +32,10 @@ from app.core.workspace import get_current_workspace_schema, get_current_workspa
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_channel_events_repository import (
     claim_next_pending_channel_event,
+    fetch_channel_event_by_identity,
+    fetch_next_pending_channel_event,
     has_pending_channel_events,
-    mark_pending_channel_events_processed,
+    mark_channel_event_processed,
 )
 from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
@@ -3607,12 +3609,76 @@ def _finish_flow_json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _finish_flow_contact_payload(contact_state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(contact_state, dict):
+        return None
+    return {
+        "id": contact_state.get("contact_list_member_id"),
+        "contact_list_id": contact_state.get("contact_list_id"),
+        "mailing_id": contact_state.get("mailing_id"),
+        "identifier": contact_state.get("contact_identifier"),
+        "name": contact_state.get("contact_name"),
+        "full_name": contact_state.get("contact_full_name"),
+        "gender": contact_state.get("contact_gender"),
+        "country": contact_state.get("contact_country"),
+        "province": contact_state.get("contact_province"),
+        "city": contact_state.get("contact_city"),
+        "birth_date": contact_state.get("contact_birth_date"),
+        "age": contact_state.get("contact_age"),
+        "person_uuid": contact_state.get("person_uuid"),
+        "channel": {
+            "type": contact_state.get("contact_channel_type"),
+            "label": contact_state.get("contact_channel_label"),
+            "address": contact_state.get("contact_channel_address"),
+        },
+        "extra": _normalize_contact_extra_data(contact_state.get("contact_channel_extra_data")),
+    }
+
+
+def _finish_flow_requires_dialer_cdr(
+    *,
+    runtime_variables: dict[str, Any],
+    cdr_event: dict[str, Any] | None,
+) -> bool:
+    if isinstance(cdr_event, dict):
+        return True
+    if str(runtime_variables.get("source_app") or "").strip() == "DialerApp":
+        return True
+    routing = runtime_variables.get("send_with_dialer_routing")
+    assignment = routing.get("assignment") if isinstance(routing, dict) else None
+    if not isinstance(assignment, dict):
+        return False
+    return (
+        str(assignment.get("mode") or "").strip().lower() == "dialer"
+        or str(assignment.get("linked_actuator") or "").strip().lower() == "dialer"
+    )
+
+
+def _finish_flow_dialer_event_id(runtime_variables: dict[str, Any]) -> str | None:
+    payload = runtime_variables.get("last_payload")
+    if not isinstance(payload, dict):
+        return None
+    hangup = payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {}
+    makecall = payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {}
+    event_id = (
+        str(payload.get("uniqueid") or "").strip()
+        or str(hangup.get("Uniqueid") or "").strip()
+        or str(hangup.get("Linkedid") or "").strip()
+        or str(makecall.get("DestUniqueid") or "").strip()
+    )
+    return event_id or None
+
+
 async def _dispatch_finish_flow_webhook(
     *,
     component: dict[str, Any],
     session_state: dict[str, Any],
     runtime_variables: dict[str, Any],
     finished_at: datetime,
+    contact_state: dict[str, Any] | None = None,
+    cdr: dict[str, Any] | None = None,
+    cdr_required: bool = False,
+    cdr_event_id: int | str | None = None,
 ) -> dict[str, Any] | None:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     webhook = params.get("webhook")
@@ -3624,7 +3690,19 @@ async def _dispatch_finish_flow_webhook(
         runtime_variables.pop("cdr", None)
         return {**copy.deepcopy(previous_result), "skipped": True}
 
-    cdr = copy.deepcopy(runtime_variables.get("cdr"))
+    resolved_cdr = copy.deepcopy(cdr) if isinstance(cdr, dict) else None
+    if cdr_required and not isinstance(resolved_cdr, dict):
+        result = {
+            "success": False,
+            "status_code": None,
+            "error": "dialer_cdr_not_available",
+            "url": webhook.strip(),
+            "dispatched_at": None,
+            "deferred": True,
+        }
+        runtime_variables["finish_flow_webhook"] = result
+        return result
+
     session_payload = {
         key: copy.deepcopy(value)
         for key, value in session_state.items()
@@ -3637,16 +3715,25 @@ async def _dispatch_finish_flow_webhook(
             "last_card_uuid": component.get("uuid") or component.get("ref_id"),
             "next_card_uuid": None,
             "result": params.get("result"),
-            "cdr": cdr,
+            "contact": _finish_flow_contact_payload(contact_state),
         }
     )
-    payload = _finish_flow_json_safe(session_payload)
+    payload = _finish_flow_json_safe(
+        {
+            "session": session_payload,
+            "cdr": resolved_cdr,
+        }
+    )
     try:
+        headers = {"Content-Type": "application/json"}
+        session_uuid = str(session_state.get("uuid") or session_state.get("id") or "unknown")
+        finish_identity = str(cdr_event_id or component.get("uuid") or component.get("ref_id") or "finish")
+        headers["Idempotency-Key"] = f"orch-finish-flow:{session_uuid}:{finish_identity}"
         req = request.Request(
             url=webhook.strip(),
             method="POST",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         status_code, _headers, _body, error = await asyncio.to_thread(
             _http_execute,
@@ -5006,6 +5093,31 @@ async def execute_workflow_m2_for_session(
                     )
                     finish_flow_webhook = finish_flow_params.get("webhook")
                     if isinstance(finish_flow_webhook, str) and finish_flow_webhook.strip():
+                        finish_flow_cdr_event = await fetch_next_pending_channel_event(
+                            db_session,
+                            session_id=session_id,
+                            channel="dialer",
+                        )
+                        if finish_flow_cdr_event is None:
+                            current_dialer_event_id = _finish_flow_dialer_event_id(runtime_variables)
+                            if current_dialer_event_id is not None:
+                                finish_flow_cdr_event = await fetch_channel_event_by_identity(
+                                    db_session,
+                                    session_id=session_id,
+                                    channel="dialer",
+                                    event_id=current_dialer_event_id,
+                                )
+                        pending_cdr = (
+                            finish_flow_cdr_event.get("payload")
+                            if isinstance(finish_flow_cdr_event, dict)
+                            else None
+                        )
+                        if isinstance(pending_cdr, dict):
+                            runtime_variables["cdr"] = copy.deepcopy(pending_cdr)
+                        finish_flow_requires_cdr = _finish_flow_requires_dialer_cdr(
+                            runtime_variables=runtime_variables,
+                            cdr_event=finish_flow_cdr_event,
+                        )
                         finish_flow_session_state = (
                             await fetch_session_webhook_snapshot(
                                 db_session,
@@ -5018,10 +5130,24 @@ async def execute_workflow_m2_for_session(
                             session_state=finish_flow_session_state,
                             runtime_variables=runtime_variables,
                             finished_at=finished_at,
+                            contact_state=contact_runtime_context,
+                            cdr=(pending_cdr if isinstance(pending_cdr, dict) else None),
+                            cdr_required=finish_flow_requires_cdr,
+                            cdr_event_id=(
+                                finish_flow_cdr_event.get("id")
+                                if isinstance(finish_flow_cdr_event, dict)
+                                else None
+                            ),
                         )
-                        if finish_flow_webhook_result and finish_flow_webhook_result.get("success") is True:
-                            await mark_pending_channel_events_processed(
+                        if (
+                            finish_flow_webhook_result
+                            and finish_flow_webhook_result.get("success") is True
+                            and isinstance(finish_flow_cdr_event, dict)
+                            and finish_flow_cdr_event.get("id") is not None
+                        ):
+                            await mark_channel_event_processed(
                                 db_session,
+                                event_row_id=int(finish_flow_cdr_event["id"]),
                                 session_id=session_id,
                                 channel="dialer",
                             )

@@ -88,7 +88,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `entity_origin_app` e origem historica; o evento corrente esta em `runtime_variables.source_app` e snapshots.
 - `unassigned_at IS NOT NULL` impede reuso normal.
 - `finish_flow` deve deixar `state=3`, `ended_at` preenchido e `next_card_uuid=NULL`.
-- Quando `finish_flow.parameters.webhook` esta configurado, a sessao guarda no maximo um objeto `cdr` do Dialer e envia somente os campos persistidos publicos da sessao, `result` e esse CDR; `runtime_variables` nunca integra o body. O primeiro `2xx` vence, remove o CDR e baixa eventos Dialer excedentes do ledger.
+- Quando `finish_flow.parameters.webhook` esta configurado, o contrato externo e `session` (campos persistidos, `result` e contato normalizado uma vez) mais `cdr` (payload cru de um unico evento Dialer do ledger). `runtime_variables` nunca integra o body. O primeiro `2xx` vence, remove a copia transitoria do CDR e processa somente o evento utilizado; evento tardio nao pode reabrir sessao ja confirmada.
 - Cursores `last_card_uuid`/`next_card_uuid` e runtime precisam permanecer coerentes.
 - FileApp nao cria rota paralela; entra na rota canonica.
 - `source_list_members` nao e manipulado pelo FileApp local.

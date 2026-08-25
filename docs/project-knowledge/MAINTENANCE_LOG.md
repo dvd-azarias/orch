@@ -340,3 +340,39 @@ Remover repeticoes do payload observado em producao e garantir a paridade entre 
 - A stack local iniciou API, tres workers e dois beats; API e tasks responderam. O runbook abortou e limpou os processos porque `scripts/dev_phase_stack.sh` passa simultaneamente `--hostname` e `-n`: o nome efetivo nao casa com o regex de readiness. O gap e preexistente e ficou fora do patch funcional.
 - Duas revisoes adversariais inicialmente deram `NO-GO`; a implementacao foi simplificada para remover fallback de CDR divergente e claim antecipado no `send_with_dialer`. O risco residual best-effort entre `2xx` e commit permanece documentado em R24.
 - Deploy e validacao E2E no host `10.1.20.237` permanecem pendentes.
+
+## 2026-08-25 — Paridade deterministica entre sessao, contato e CDR
+
+### REQUEST
+
+Corrigir o teste de producao em que o primeiro webhook higienizado saiu sem CDR e a execucao seguinte nao produziu POST, preservando o contrato de uma sessao de voz, um desfecho e um CDR cru.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_REQUIRED` — perda de dado terminal e supressao silenciosa de webhook em producao.
+
+### ROOT CAUSE
+
+- O executor carregava um snapshot terminal, mas `_dispatch_finish_flow_webhook` buscava `cdr` em outro dicionario de runtime potencialmente antigo.
+- `replace_session_workflow_state` substituia o JSONB completo antes do dispatch, ampliando a janela de perda da escrita cirurgica feita no ingresso.
+- O sucesso era por sessao e o codigo baixava todos os eventos Dialer pendentes; o fallback temporal ainda podia reabrir uma sessao ja confirmada.
+- O payload achatava a sessao e removia o unico lugar de onde o contato normalizado era obtido.
+
+### CHANGE
+
+- `orch_channel_events` passa a ser a fonte autoritativa do CDR cru no `finish_flow`; a copia residual em runtime nunca e usada como fallback de envio.
+- O body e `session` (dados persistidos, `result`, `contact`) mais `cdr`; estado interno nao sai.
+- Fluxo Dialer sem CDR adia o POST; `2xx` processa somente o evento selecionado e limpa a copia transitoria.
+- Evento tardio e marcado individualmente e o fallback recente exclui sessao com webhook ja confirmado.
+- Sem migration ou infraestrutura nova.
+
+### VALIDATION
+
+- Suite focada: 31 testes passaram.
+- Regressao relevante de trigger, Dialer, workflow e repositorios: 153 testes passaram.
+- Teste adversarial reproduz runtime local sem CDR e confirma que o payload cru vem do ledger, com o evento exato marcado apos `2xx`.
+- `py_compile` e `git diff --check` passaram.
+- A primeira revisao adversarial recusou a inferencia por grafo e o lock durante HTTP; ambos foram removidos. A segunda recusou fallback pelo runtime; ele tambem foi removido, mantendo o ledger como unica fonte externa do CDR.
+- A revisao adversarial final deu `GO`: confirmou origem exclusiva no ledger, baixa do evento exato, bloqueio de reabertura apos `2xx` e ausencia de `runtime_variables` no contrato externo.
+- Suites integradas antigas ainda falham antes do codigo alterado pela assinatura removida `trigger_orch(flow_uuid=...)`, gap ja documentado na baseline.
+- Deploy e observacao do POST real permanecem pendentes.
