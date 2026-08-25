@@ -195,7 +195,7 @@ def publish_billing_snapshot(*, snapshot: dict[str, Any], settings: Settings) ->
                 message_id=snapshot_id,
                 headers={
                     "messageId": snapshot_id,
-                    "source_application": "orch",
+                    "source_application": settings.orch_billing_application_code,
                     "schema_version": "v1",
                     "workspace_uuid": str(snapshot["workspace_uuid"]),
                 },

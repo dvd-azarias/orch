@@ -149,7 +149,7 @@ def test_publish_uses_persistent_target_routing(monkeypatch) -> None:
     assert published["kwargs"]["delivery_mode"] == 2
     assert published["kwargs"]["serializer"] == "json"
     assert published["kwargs"]["message_id"] == snapshot["snapshot_id"]
-    assert published["kwargs"]["headers"]["source_application"] == "orch"
+    assert published["kwargs"]["headers"]["source_application"] == "target"
 
 
 def test_publish_requires_configured_broker() -> None:
