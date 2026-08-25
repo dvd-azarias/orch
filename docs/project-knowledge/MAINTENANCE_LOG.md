@@ -406,3 +406,24 @@ Preservar a sessao unica de um contato no `send_with_dialer`, mas publicar um we
 - Regressao cobre dois CDRs distintos na mesma sessao gerando dois POSTs e a reentrega de CDR marcado gerando zero POST adicional.
 - Revisao adversarial auxiliar foi iniciada, mas o client local do agente perdeu permissao para inicializar antes de produzir veredito; a revisao estatica final foi feita localmente. A garantia permanece *at-least-once* no limite entre `2xx` externo e commit local, risco ja registrado em `KNOWN_RISKS.md`.
 - Sem migration, filas, beats ou infraestrutura nova.
+
+## 2026-08-25 — Contencao de replay por marcador de CDR
+
+### INCIDENT
+
+O CDR `GW01-1787659477.294612` da sessao `6950` recebeu `2xx`, mas foi reenviado continuamente pelo reconciliador de eventos pendentes.
+
+### ROOT CAUSE
+
+- O SQL de `mark_channel_event_processed` reutilizava `:discard_reason` em `COALESCE` e em `IS NOT NULL` sem tipagem explicita.
+- Com `asyncpg`, PostgreSQL recusou a query com `AmbiguousParameterError`; a transacao foi revertida apos o POST externo e o evento permaneceu pendente.
+
+### CONTAINMENT
+
+- O operador autorizou marcar somente o evento `13908` como `finish_flow_webhook_dispatched` em producao, preservando o CDR distinto `13909` pendente.
+
+### FIX
+
+- Tipar `discard_reason` como `TEXT` em ambos os usos da query para que a marca duravel seja persistida apos `2xx`.
+- Validacao local focada: `48 passed`, `py_compile` e `git diff --check`.
+- Deploy e verificacao de um CDR novo continuam pendentes.

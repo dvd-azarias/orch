@@ -132,7 +132,7 @@ async def test_mark_channel_event_processed_is_scoped_to_exact_row() -> None:
     assert "id = :event_row_id" in session.statement
     assert "session_id = :session_id" in session.statement
     assert "channel = :channel" in session.statement
-    assert ":discard_reason IS NOT NULL" in session.statement
+    assert "CAST(:discard_reason AS TEXT) IS NOT NULL" in session.statement
     assert session.parameters["event_row_id"] == 13904
 
 

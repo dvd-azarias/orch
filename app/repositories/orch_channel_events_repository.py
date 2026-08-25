@@ -264,13 +264,13 @@ async def mark_channel_event_processed(
             UPDATE orch_channel_events
             SET
                 processed_at = NOW(),
-                discard_reason = COALESCE(:discard_reason, discard_reason)
+                discard_reason = COALESCE(CAST(:discard_reason AS TEXT), discard_reason)
             WHERE id = :event_row_id
               AND session_id = :session_id
               AND channel = :channel
               AND (
                   processed_at IS NULL
-                  OR :discard_reason IS NOT NULL
+                  OR CAST(:discard_reason AS TEXT) IS NOT NULL
               )
             """
         ),
