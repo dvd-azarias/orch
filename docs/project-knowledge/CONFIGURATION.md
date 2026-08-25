@@ -17,6 +17,18 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 
 ## Celery e profiles
 
+## Billing por sessao
+
+- `ORCH_BILLING_SNAPSHOT_ENABLED=1`: habilita a outbox e o publicador periodico.
+- `ORCH_BILLING_RABBITMQ_URL`: URL AMQP exclusiva ou fallback do broker Celery; nunca registrar a URL completa.
+- `ORCH_BILLING_EXCHANGE=domain.events`
+- `ORCH_BILLING_ROUTING_KEY=billing.usage.snapshot.v1.target`
+- `ORCH_BILLING_APPLICATION_CODE=orch`
+- `ORCH_BILLING_SERVICE_CODE=service-orch`
+- `ORCH_BILLING_METRIC_CODE=service-orch`
+- `ORCH_BILLING_PUBLISH_TIMEOUT_SECONDS=3`
+- `ORCH_BILLING_PUBLISH_MAX_ATTEMPTS=3`
+
 `ORCH_QUEUE_PROFILE` aceita `auto`, `launchd_local`, `f5_local`, `prod`. `auto` escolhe local no macOS e prod nos demais sistemas.
 
 | Fila logica | prod | launchd_local | f5_local |

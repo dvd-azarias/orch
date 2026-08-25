@@ -72,12 +72,18 @@ if settings.celery_generate_file_enabled and settings.celery_generate_file_scan_
         "schedule": max(5, settings.celery_generate_file_scan_interval_seconds),
         "options": {"queue": settings.celery_generate_file_scan_queue},
     }
+if settings.orch_billing_snapshot_enabled:
+    beat_schedule["orch-billing-publish-pending-snapshots"] = {
+        "task": "app.tasks.billing.publish_pending_snapshots",
+        "schedule": max(5, settings.orch_billing_publish_interval_seconds),
+        "options": {"queue": settings.celery_dispatch_queue},
+    }
 
 celery_app = Celery(
     "orch",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.workflow_tasks", "app.tasks.generate_file_tasks", "app.tasks.fileapp_ingest_tasks"],
+    include=["app.tasks.workflow_tasks", "app.tasks.generate_file_tasks", "app.tasks.fileapp_ingest_tasks", "app.tasks.billing_tasks"],
 )
 
 celery_app.conf.update(
@@ -93,6 +99,7 @@ celery_app.conf.update(
         "app.tasks.workflow.reconcile_pending_channel_events": {"queue": settings.celery_dispatch_queue},
         "app.tasks.workflow.beat_heartbeat": {"queue": settings.celery_heartbeat_queue},
         "app.tasks.workflow.advance_session": {"queue": settings.celery_execute_queue},
+        "app.tasks.billing.publish_pending_snapshots": {"queue": settings.celery_dispatch_queue},
         "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},
         "app.tasks.component_generate_file.run": {"queue": settings.celery_generate_file_run_queue},
         "app.tasks.fileapp.ingest_event": {"queue": settings.celery_s3_files_ingest_queue},

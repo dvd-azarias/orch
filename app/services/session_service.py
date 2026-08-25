@@ -6,8 +6,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.workspace import get_current_workspace_schema
+from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.orch_sessions_repository import PersistResult, upsert_active_session
+from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,13 @@ async def persist_session(
             payload=payload,
             extracted=extracted,
         )
+        if persisted.created:
+            await try_create_billing_snapshot_outbox(
+                db_session,
+                workspace_uuid=get_current_workspace_uuid(),
+                session_id=persisted.id,
+                session_uuid=persisted.uuid,
+            )
 
     return SessionPersistResponse(
         session_id=persisted.id,

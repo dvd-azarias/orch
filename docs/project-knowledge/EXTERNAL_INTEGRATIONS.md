@@ -10,6 +10,10 @@ Risco: ownership parcial e acoplamento de schema. `linked_actuator_enum` e expli
 
 RabbitMQ transporta tasks Celery. Redis e usado como backend opcional, heartbeat do beat e locks/cooldowns de reconciliacao.
 
+## Billing snapshots
+
+Quando `ORCH_BILLING_SNAPSHOT_ENABLED=1`, cada nova sessao local cria uma outbox idempotente por `snapshot_id`. O beat publica o snapshot apos o commit no exchange topic `domain.events`, usando a routing key oficial `billing.usage.snapshot.v1.target`. Falha do broker nao interrompe a criacao da sessao; o item permanece pendente para nova tentativa.
+
 `UNKNOWN`: policies, DLQ, durabilidade, bindings, consumidores e backlogs reais.
 
 ## Target Core — FileApp
