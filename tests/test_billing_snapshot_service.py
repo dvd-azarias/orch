@@ -165,3 +165,72 @@ def test_publish_requires_configured_broker() -> None:
             snapshot=snapshot,
             settings=_settings(orch_billing_rabbitmq_url=None),
         )
+
+
+@pytest.mark.asyncio
+async def test_backfill_requires_billing_to_be_enabled() -> None:
+    db_session = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="ORCH_BILLING_SNAPSHOT_ENABLED"):
+        await billing.backfill_billing_snapshot_outbox_batch(
+            db_session,
+            workspace_uuid="workspace-1",
+            period_start=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            period_end=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            batch_size=500,
+            settings=_settings(orch_billing_snapshot_enabled=False),
+        )
+
+    db_session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_uses_session_idempotency_and_utc_payload() -> None:
+    result = SimpleNamespace(fetchall=lambda: [object(), object()])
+    db_session = AsyncMock()
+    db_session.execute.return_value = result
+    period_start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    inserted = await billing.backfill_billing_snapshot_outbox_batch(
+        db_session,
+        workspace_uuid="workspace-1",
+        period_start=period_start,
+        period_end=period_end,
+        batch_size=500,
+        settings=_settings(),
+    )
+
+    statement = str(db_session.execute.await_args.args[0])
+    parameters = db_session.execute.await_args.args[1]
+    assert inserted == 2
+    assert "NOT EXISTS" in statement
+    assert "snapshot.session_id = session_row.id" in statement
+    assert "FOR UPDATE SKIP LOCKED" in statement
+    assert "ON CONFLICT (snapshot_id) DO NOTHING" in statement
+    assert "AT TIME ZONE 'UTC'" in statement
+    assert parameters["workspace_uuid"] == "workspace-1"
+    assert parameters["application_code"] == "target"
+    assert parameters["service_code"] == "service-orch"
+    assert parameters["metric_code"] == "service-orch"
+
+
+@pytest.mark.asyncio
+async def test_rearm_only_resets_exhausted_unpublished_snapshots() -> None:
+    result = SimpleNamespace(fetchall=lambda: [object()])
+    db_session = AsyncMock()
+    db_session.execute.return_value = result
+
+    rearmed = await billing.rearm_exhausted_billing_snapshots(
+        db_session,
+        period_start=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        period_end=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        max_attempts=3,
+    )
+
+    statement = str(db_session.execute.await_args.args[0])
+    parameters = db_session.execute.await_args.args[1]
+    assert rearmed == 1
+    assert "snapshot.publish_attempts >= :max_attempts" in statement
+    assert "snapshot.published_at IS NULL" in statement
+    assert parameters["max_attempts"] == 3

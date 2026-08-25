@@ -14,6 +14,8 @@ RabbitMQ transporta tasks Celery. Redis e usado como backend opcional, heartbeat
 
 Quando `ORCH_BILLING_SNAPSHOT_ENABLED=1`, cada nova sessao local cria uma outbox idempotente por `snapshot_id`. O beat publica o snapshot apos o commit no exchange topic `domain.events`, usando a routing key oficial `billing.usage.snapshot.v1.target`. Falha do broker nao interrompe a criacao da sessao; o item permanece pendente para nova tentativa.
 
+Para retroativos, usar `python -m app.cli billing-backfill --period YYYY-MM --dry-run` antes de inserir lotes limitados. O comando cria somente sessoes sem registro de outbox no mesmo workspace, deriva o envelope do `created_at` em UTC e usa bloqueio `SKIP LOCKED`; portanto, pode ser repetido sem criar uma segunda cobranca. A opcao `--rearm-exhausted` reabilita apenas snapshots pendentes sem publicacao cujas tentativas ja atingiram o limite configurado.
+
 `UNKNOWN`: policies, DLQ, durabilidade, bindings, consumidores e backlogs reais.
 
 ## Target Core — FileApp
