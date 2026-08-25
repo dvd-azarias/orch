@@ -14,6 +14,136 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
+async def count_missing_billing_snapshots(
+    db_session: AsyncSession,
+    *,
+    period_start: datetime,
+    period_end: datetime,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT COUNT(*)
+            FROM orch_sessions AS session_row
+            WHERE session_row.created_at >= :period_start
+              AND session_row.created_at < :period_end
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM orch_billing_usage_snapshots AS snapshot
+                  WHERE snapshot.session_id = session_row.id
+              )
+            """
+        ),
+        {"period_start": period_start, "period_end": period_end},
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def backfill_billing_snapshot_outbox_batch(
+    db_session: AsyncSession,
+    *,
+    workspace_uuid: str,
+    period_start: datetime,
+    period_end: datetime,
+    batch_size: int,
+    settings: Settings | None = None,
+) -> int:
+    effective_settings = settings or get_settings()
+    if not effective_settings.orch_billing_snapshot_enabled:
+        raise RuntimeError("ORCH_BILLING_SNAPSHOT_ENABLED deve estar ativo para o retroativo.")
+    result = await db_session.execute(
+        text(
+            """
+            WITH candidates AS (
+                SELECT session_row.id, session_row.uuid, session_row.created_at
+                FROM orch_sessions AS session_row
+                WHERE session_row.created_at >= :period_start
+                  AND session_row.created_at < :period_end
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM orch_billing_usage_snapshots AS snapshot
+                      WHERE snapshot.session_id = session_row.id
+                  )
+                ORDER BY session_row.id
+                FOR UPDATE SKIP LOCKED
+                LIMIT :batch_size
+            )
+            INSERT INTO orch_billing_usage_snapshots (
+                snapshot_id, session_id, session_uuid, payload
+            )
+            SELECT
+                'orch_usage_' || to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYYMM') || '_' || candidates.uuid::text,
+                candidates.id,
+                candidates.uuid,
+                jsonb_build_object(
+                    'snapshot_id', 'orch_usage_' || to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYYMM') || '_' || candidates.uuid::text,
+                    'workspace_uuid', :workspace_uuid,
+                    'application_code', :application_code,
+                    'billing_period', to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYY-MM'),
+                    'snapshot_at', to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    'currency', 'BRL',
+                    'correction', false,
+                    'items', jsonb_build_array(jsonb_build_object(
+                        'service_code', :service_code,
+                        'metric_code', :metric_code,
+                        'unit', 'event',
+                        'quantity', 1
+                    ))
+                )
+            FROM candidates
+            ON CONFLICT (snapshot_id) DO NOTHING
+            RETURNING id
+            """
+        ),
+        {
+            "period_start": period_start,
+            "period_end": period_end,
+            "batch_size": max(1, int(batch_size)),
+            "workspace_uuid": workspace_uuid,
+            "application_code": effective_settings.orch_billing_application_code,
+            "service_code": effective_settings.orch_billing_service_code,
+            "metric_code": effective_settings.orch_billing_metric_code,
+        },
+    )
+    return len(result.fetchall())
+
+
+async def rearm_exhausted_billing_snapshots(
+    db_session: AsyncSession,
+    *,
+    period_start: datetime,
+    period_end: datetime,
+    max_attempts: int,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_billing_usage_snapshots AS snapshot
+            SET
+                status = 'pending',
+                publish_attempts = 0,
+                publish_started_at = NULL,
+                last_error = NULL,
+                updated_at = NOW()
+            FROM orch_sessions AS session_row
+            WHERE snapshot.session_id = session_row.id
+              AND session_row.created_at >= :period_start
+              AND session_row.created_at < :period_end
+              AND snapshot.status = 'pending'
+              AND snapshot.publish_attempts >= :max_attempts
+              AND snapshot.published_at IS NULL
+            RETURNING snapshot.id
+            """
+        ),
+        {
+            "period_start": period_start,
+            "period_end": period_end,
+            "max_attempts": max(1, int(max_attempts)),
+        },
+    )
+    return len(result.fetchall())
+
+
 def build_billing_snapshot(
     *,
     workspace_uuid: str,
