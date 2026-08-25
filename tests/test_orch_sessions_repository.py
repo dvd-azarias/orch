@@ -143,10 +143,13 @@ async def test_set_session_cdr_overwrites_with_single_object() -> None:
     session = _RecordingSession(None)
     cdr = {"hangup": {"Disposition": "ANSWERED"}}
 
-    await set_session_cdr(session, session_id=6941, cdr=cdr)
+    stored = await set_session_cdr(session, session_id=6941, cdr=cdr)
 
+    assert stored is False
     assert "jsonb_set" in session.statement
     assert "||" not in session.statement
+    assert "runtime_variables->'finish_flow_webhook'->>'success'" in session.statement
+    assert "RETURNING id" in session.statement
     assert session.parameters["cdr"] == '{"hangup": {"Disposition": "ANSWERED"}}'
 
 

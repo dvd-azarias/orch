@@ -152,8 +152,9 @@ async def test_persist_dialer_event_sets_single_session_cdr_after_ledger_insert(
     async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
         return True
 
-    async def _set_cdr(*_args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+    async def _set_cdr(*_args, **kwargs) -> bool:  # type: ignore[no-untyped-def]
         stored.append(kwargs["cdr"])
+        return True
 
     async def _fetch_flow(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
@@ -203,8 +204,9 @@ async def test_persist_dialer_event_does_not_set_cdr_without_finish_webhook(monk
     async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
         return True
 
-    async def _set_cdr(*_args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+    async def _set_cdr(*_args, **kwargs) -> bool:  # type: ignore[no-untyped-def]
         stored.append(kwargs["cdr"])
+        return True
 
     async def _fetch_flow(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
@@ -233,3 +235,59 @@ async def test_persist_dialer_event_does_not_set_cdr_without_finish_webhook(monk
 
     assert persisted == 1
     assert stored == []
+
+
+@pytest.mark.asyncio
+async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_webhook(monkeypatch) -> None:
+    payload = {
+        "uniqueid": "GW01-446.1",
+        "hangup": {
+            "Event": "Hangup",
+            "Disposition": "BUSY",
+            "Cause": "486",
+            "Uniqueid": "GW01-446.1",
+        },
+    }
+    marked: list[dict] = []
+
+    async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        return True
+
+    async def _set_cdr(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+    async def _mark(*_args, **kwargs) -> int:  # type: ignore[no-untyped-def]
+        marked.append(kwargs)
+        return 1
+
+    async def _fetch_flow(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
+
+    async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return {
+            "definition": {
+                "components": [
+                    {
+                        "component_id": "finish_flow",
+                        "parameters": {"webhook": "https://example.test/hook"},
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
+    monkeypatch.setattr(channel_event_service, "mark_pending_channel_events_processed", _mark)
+    monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
+    monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
+
+    persisted = await persist_channel_events(
+        _Session(),
+        session_id=6945,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        payload=payload,
+    )
+
+    assert persisted == 1
+    assert marked == [{"session_id": 6945, "channel": "dialer"}]

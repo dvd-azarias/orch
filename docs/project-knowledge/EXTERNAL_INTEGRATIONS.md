@@ -46,9 +46,9 @@ Validacao so e considerada completa quando o POST externo e observado no destino
 
 ## Webhook de `finish_flow`
 
-Quando `finish_flow.parameters.webhook` contem uma URL, o executor primeiro persiste o estado terminal, rele a linha completa e envia um unico `POST` com essa linha acrescida de `result` e do unico objeto `cdr` do Dialer. O CDR nao e duplicado dentro de `runtime_variables`. No recebimento do evento, a revisao selecionada do flow e consultada; o CDR so e copiado quando ela contem o webhook.
+Quando `finish_flow.parameters.webhook` contem uma URL, o executor primeiro persiste o estado terminal, rele a sessao e envia um unico `POST` com os campos persistidos publicos, `result` e o unico objeto `cdr` do Dialer. `runtime_variables` e estado interno e nao integra o body. No recebimento do evento, a revisao selecionada do flow e consultada; o CDR so e copiado quando ela contem o webhook.
 
-O envio usa timeout de 5 segundos e roda fora do event loop, mas ainda durante a transacao do workflow. Nao possui outbox, task dedicada ou retry automatico. Em falha, a sessao ainda termina e conserva o CDR e o resultado do dispatch para diagnostico.
+O envio usa timeout de 5 segundos e roda fora do event loop, mas ainda durante a transacao do workflow. Nao possui outbox, task dedicada ou retry automatico. Em falha, a sessao ainda termina e conserva o CDR e o resultado do dispatch para diagnostico. Apos o primeiro `2xx`, novas execucoes nao reenviam o webhook, o CDR e removido e eventos Dialer excedentes sao marcados como processados; eventos tardios tambem nao recriam o CDR confirmado.
 
 ## SFTP
 

@@ -154,6 +154,27 @@ async def claim_next_pending_channel_event(
         return None
 
 
+async def mark_pending_channel_events_processed(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    channel: str,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_channel_events
+            SET processed_at = NOW()
+            WHERE session_id = :session_id
+              AND channel = :channel
+              AND processed_at IS NULL
+            """
+        ),
+        {"session_id": session_id, "channel": channel},
+    )
+    return int(result.rowcount or 0)
+
+
 async def list_stale_pending_channel_event_sessions(
     db_session: AsyncSession,
     *,

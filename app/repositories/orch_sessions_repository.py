@@ -1374,8 +1374,8 @@ async def set_session_cdr(
     *,
     session_id: int,
     cdr: dict[str, Any],
-) -> None:
-    await db_session.execute(
+) -> bool:
+    result = await db_session.execute(
         text(
             """
             UPDATE orch_sessions
@@ -1388,6 +1388,11 @@ async def set_session_cdr(
                 ),
                 updated_at = NOW()
             WHERE id = :session_id
+              AND COALESCE(
+                  runtime_variables->'finish_flow_webhook'->>'success',
+                  'false'
+              ) <> 'true'
+            RETURNING id
             """
         ),
         {
@@ -1395,6 +1400,7 @@ async def set_session_cdr(
             "cdr": json.dumps(cdr, ensure_ascii=False),
         },
     )
+    return result.first() is not None
 
 
 async def claim_pending_sessions_for_dispatch(

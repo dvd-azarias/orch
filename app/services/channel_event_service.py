@@ -12,7 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
-from app.repositories.orch_channel_events_repository import insert_channel_event
+from app.repositories.orch_channel_events_repository import (
+    insert_channel_event,
+    mark_pending_channel_events_processed,
+)
 from app.repositories.orch_sessions_repository import set_session_cdr
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.workflow_engine import definition_has_finish_flow_webhook
@@ -229,11 +232,17 @@ async def persist_channel_events(
                         db_session,
                         flow_uuid=flow_uuid,
                     ):
-                        await set_session_cdr(
+                        cdr_stored = await set_session_cdr(
                             db_session,
                             session_id=session_id,
                             cdr=event.payload,
                         )
+                        if not cdr_stored:
+                            await mark_pending_channel_events_processed(
+                                db_session,
+                                session_id=session_id,
+                                channel="dialer",
+                            )
                     persisted += 1
     except Exception:
         logger.exception(
