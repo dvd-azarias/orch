@@ -35,32 +35,38 @@ scripts/launchd_orch.sh status
 
 Logs: `.runlogs/launchd/`.
 
-## Linux/systemd
+## Linux/systemd — producao `10.1.20.237`
 
-Templates versionados preveem seis units:
+O acesso, as credenciais, o caminho real e o inventario completo das 19 units estao na secao `ACESSO RAPIDO A PRODUCAO — HOST 10.1.20.237` de `PROJECT_STEWARD.md`.
 
-- `orch-api`;
-- `orch-celery-worker`;
-- `orch-celery-fileapp-worker`;
-- `orch-celery-beat`;
-- `orch-celery-generate-file-worker`;
-- `orch-celery-generate-file-beat`.
+Baseline confirmada:
 
-Diagnostico versionado:
+- projeto, virtualenv e `.env`: `/etc/gohp/orch`, `/etc/gohp/orch/venv` e `/etc/gohp/orch/.env`;
+- cinco workers workflow consomem `orch_dispatch`, `orch_execute` e `orch_heartbeat`;
+- cinco workers FileApp consomem tambem `orch_fileapp_mailing_assoc`, alem das filas ingest/process;
+- cinco workers generate-file consomem run/scan;
+- tres beats separados executam workflow, FileApp rescue/higiene e generate-file scan;
+- API FastAPI/Uvicorn executa na porta `7777`.
+
+Os templates em `systemctl/` ainda representam uma topologia generica antiga, com caminhos `/opt/orch`, environment file `/etc/orch/orch.env`, hostnames `136` e units sem escala horizontal. Nao instalar ou copiar esses templates diretamente sobre o `237`.
+
+Diagnosticar pela configuracao efetiva:
 
 ```bash
-sudo systemctl status orch-api orch-celery-worker orch-celery-fileapp-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
-sudo journalctl -u orch-api -f
-sudo journalctl -u orch-celery-worker -f
-sudo journalctl -u orch-celery-fileapp-worker -f
+systemctl list-unit-files 'orch-*.service' --no-pager
+systemctl list-units --type=service --state=running 'orch-*.service' --no-pager
+systemctl show <unit>.service -p ActiveState -p UnitFileState -p MainPID -p EnvironmentFiles -p ExecStart --no-pager
+systemctl cat <unit>.service --no-pager
+journalctl -u <unit>.service --since '15 minutes ago' --no-pager
 ```
 
-Advertencias antes de usar templates:
+Advertencias:
 
-- a unit FileApp nao consome `orch_fileapp_mailing_assoc`;
-- o beat generate-file nao desabilita todos os reconciliadores comuns;
-- `scripts/systemd_orch.sh install` copia o exemplo de env sobre o destino; revisar antes de executar;
-- confirmar se as units instaladas foram alteradas manualmente.
+- `orch-celery-fileapp-worker.service` sem sufixo existe, mas esta desabilitada; a stack usa `_01..05`;
+- os beats compartilham o mesmo `celery_app`; confirmar flags efetivas antes de atribuir um schedule exclusivamente pelo nome da unit;
+- `scripts/systemd_orch.sh install` e os templates versionados nao representam a instalacao escalada atual;
+- a API do `10.1.20.136` permanece ativa temporariamente por dependencia do proxy externo; nao desabilita-la sem confirmacao;
+- preservar `.env`, `venv/` e alteracoes operacionais locais durante pull/troubleshooting.
 
 ## Health
 

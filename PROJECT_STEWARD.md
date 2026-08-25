@@ -1554,7 +1554,108 @@ Nao corrija automaticamente durante a fase inicial de conhecimento, salvo ordem 
 
 ---
 
-# 50. REGRA FINAL
+# 50. ACESSO RAPIDO A PRODUCAO — HOST 10.1.20.237
+
+## Servidor canonico do ORCH
+
+O servidor `10.1.20.237` e o host de producao canonico desta aplicacao ORCH.
+
+Estado confirmado em 2026-08-24:
+
+* hostname: `gohp-event-broker-03.otima.digital.local`;
+* repositorio/runtime: `/etc/gohp/orch`;
+* virtualenv: `/etc/gohp/orch/venv`;
+* configuracao carregada pelas units: `/etc/gohp/orch/.env`;
+* API local: porta `7777`;
+* workers e beats de producao executam no `237`;
+* excecao temporaria: a API do host `10.1.20.136` continua ativa enquanto o proxy externo ainda aponta para ela. Nao desabilitar `orch-api.service` no `136` sem confirmacao de mudanca do proxy. A stack canonica e o destino de consolidacao continuam sendo o `237`.
+
+Nao usar `/etc/goho/orch`, `/opt/orch`, `/etc/orch/orch.env` ou a pasta antiga `orquestrator` para diagnosticar este host. Esses caminhos aparecem em historico/templates, mas nao representam a instalacao efetiva confirmada no `237`.
+
+## SSH e elevacao
+
+Acesso operacional direto:
+
+```bash
+ssh deividazarias@10.1.20.237
+```
+
+Senha SSH:
+
+```text
+Sysdba1982250390080613!!@@##
+```
+
+Para operacoes de `systemctl`, leitura integral das units e acesso ao repositorio pertencente a root:
+
+```bash
+sudo su
+cd /etc/gohp/orch
+```
+
+O `sudo su` utiliza a mesma senha. O usuario `deividazarias` nao possui permissao para executar qualquer comando arbitrario via `sudo <comando>`; elevar primeiro para root evita tentativas e perda de tempo.
+
+Ao entrar no repositorio, preservar `.env`, `venv/` e qualquer estado operacional local. Nunca usar `git clean`, `git reset` ou restaurar `.env` apenas para obter working tree limpa.
+
+## Inventario systemd confirmado
+
+As units efetivamente habilitadas no `237` formam uma stack de 19 servicos:
+
+* `orch-api.service`: API FastAPI/Uvicorn, quatro processos, porta `7777`;
+* `orch-celery-beat.service`: beat principal de workflow;
+* `orch-celery-fileapp-rescue-beat.service`: reconciliacao pos-processamento, rescue e higiene FileApp;
+* `orch-celery-generate-file-beat.service`: scan periodico do componente generate-file;
+* `orch-celery-worker_01.service` ate `orch-celery-worker_05.service`: cinco workers gerais, hostnames `orch-celery-worker@237_01..05`, consumindo `orch_dispatch`, `orch_execute` e `orch_heartbeat`;
+* `orch-celery-fileapp-worker_01.service` ate `orch-celery-fileapp-worker_05.service`: cinco workers FileApp, hostnames `orch-celery-fileapp-worker@237_01..05`, consumindo `orch_fileapp_ingest_events`, `orch_fileapp_source_list_ingest` e `orch_fileapp_mailing_assoc`;
+* `orch-celery-generate-file-worker_01.service` ate `orch-celery-generate-file-worker_05.service`: cinco workers generate-file, hostnames `orch-celery-generate-file-worker@237_01..05`, consumindo `orch_component_generate_file_run` e `orch_component_generate_file_scan`.
+
+A unit sem sufixo `orch-celery-fileapp-worker.service` existe no host, mas esta `disabled`; nao inicia-la como se fizesse parte da stack escalada sem investigar e aprovar a alteracao.
+
+Todas as units acima usam `WorkingDirectory=/etc/gohp/orch`, `EnvironmentFile=/etc/gohp/orch/.env` e binarios de `/etc/gohp/orch/venv/bin/`.
+
+## Comandos de diagnostico rapido
+
+```bash
+# Revisao realmente implantada e alteracoes locais a preservar
+cd /etc/gohp/orch
+git rev-parse --short HEAD
+git log -1 --oneline
+git status --short
+
+# Inventario e estado
+systemctl list-unit-files 'orch-*.service' --no-pager
+systemctl list-units --type=service --state=running 'orch-*.service' --no-pager
+systemctl --failed --no-pager
+
+# Configuracao efetiva; preferir isto a copiar templates do repositorio
+systemctl show <unit>.service -p ActiveState -p UnitFileState -p MainPID -p EnvironmentFiles -p ExecStart --no-pager
+systemctl cat <unit>.service --no-pager
+
+# Logs
+journalctl -u <unit>.service -n 200 --no-pager
+journalctl -u <unit>.service --since '15 minutes ago' --no-pager
+
+# Health local da API
+curl -sS -i http://127.0.0.1:7777/health/ready
+```
+
+## Regra de restart por area
+
+Preservar evidencias antes de reiniciar e reiniciar somente a familia afetada:
+
+* workflow/dispatcher/executor: rolling restart de `orch-celery-worker_01..05.service`;
+* API/rotas/config carregada pela API: `orch-api.service`;
+* FileApp: `orch-celery-fileapp-worker_01..05.service`; incluir `orch-celery-fileapp-rescue-beat.service` apenas quando a mudanca afetar seus schedules;
+* generate-file: `orch-celery-generate-file-worker_01..05.service`; incluir `orch-celery-generate-file-beat.service` quando a mudanca afetar scan/schedule;
+* dispatch, heartbeat ou schedule principal: `orch-celery-beat.service`.
+
+Nao reiniciar automaticamente as 19 units por conveniencia. Depois de qualquer restart, confirmar `active/running`, PID novo, logs sem erro, consumers esperados e comportamento real da fila/sessao afetada.
+
+Este inventario e uma baseline operacional confirmada, nao uma garantia eterna. Em troubleshooting, confrontar sempre com `systemctl show`, pois a configuracao efetiva do host prevalece sobre templates e documentacao.
+
+---
+
+# 51. REGRA FINAL
 
 Cada manutencao deve tentar deixar o ORCH:
 

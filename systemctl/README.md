@@ -3,6 +3,8 @@
 > Observação: estes arquivos são para Linux com `systemd` (`systemctl`).
 > Para macOS, usar `launchd` conforme `launchd/README.md`.
 
+> **ATENCAO — PRODUCAO ATUAL:** o host canonico `10.1.20.237` nao usa estes arquivos literalmente. A instalacao confirmada fica em `/etc/gohp/orch`, usa `/etc/gohp/orch/.env`, workers `_01..05`, hostnames `@237_01..05`, tres beats e 19 units habilitadas. Consulte primeiro a secao `ACESSO RAPIDO A PRODUCAO — HOST 10.1.20.237` de `PROJECT_STEWARD.md`. Nao copie estes templates genericos sobre o `237`.
+
 Arquivos:
 - `systemctl/orch-api.service`
 - `systemctl/orch-celery-worker.service`
