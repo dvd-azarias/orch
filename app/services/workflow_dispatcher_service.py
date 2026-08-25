@@ -22,6 +22,7 @@ RESUMABLE_STOP_REASONS = {
 }
 BLOCKING_RUNNING_STOP_REASONS = {
     "blocked_send_with_whatsapp",
+    "blocked_send_whatsapp_interactive",
     "blocked_process_whatsapp_response",
     "blocked_send_with_dialer",
     "blocked_process_dialer_response",

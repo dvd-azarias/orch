@@ -202,3 +202,7 @@ Somente consultas read-only a PostgreSQL/Celery, leitura de codigo, historico Gi
 ### Acoes executadas
 
 Somente consultas read-only, inspecao de systemd/journal, passive queue declare, leitura de codigo e revisao adversarial. Nenhuma intervencao de runtime ou dado foi realizada.
+
+### Correcao preparada
+
+No branch `fix/blocked-whatsapp-interactive-loop`, o dispatcher passou a tratar `blocked_send_whatsapp_interactive` como bloqueio em execucao e a persistir `state=1`. Teste de regressao e 103 testes focados passaram; revisao independente deu `GO`. O incidente permanece aberto ate deploy e comprovacao de que as sessoes quentes deixam de gerar novas tasks depois da primeira execucao corrigida.

@@ -4,7 +4,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R1 — Claims do dispatcher sem commit externo
 
-`STATUS`: CONFIRMED STATIC / AMPLIFICATION OBSERVED IN RUNTIME
+`STATUS`: FIX IMPLEMENTED / DEPLOY AND RUNTIME VALIDATION PENDING
 
 `IMPACT`: high
 
@@ -306,11 +306,11 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `AFFECTED AREA`: workflow dispatcher / WhatsApp / metricas / broker
 
-`DESCRIPTION`: `send_whatsapp_template` compartilha o caminho de `send_whatsapp_interactive` e persiste `blocked_send_whatsapp_interactive` como sucesso. Esse motivo nao pertence a `BLOCKING_RUNNING_STOP_REASONS`, portanto o dispatcher nao aplica a transicao defensiva para `state=1`. Com o claim nao duravel de R1, a sessao pode permanecer `state=0`, ser selecionada a cada scan e retornar imediatamente o mesmo bloqueio, sem reenviar a mensagem e sem produzir alarme.
+`DESCRIPTION`: `send_whatsapp_template` compartilha o caminho de `send_whatsapp_interactive` e persiste `blocked_send_whatsapp_interactive` como sucesso. O codigo implantado durante o incidente nao reconhecia esse motivo em `BLOCKING_RUNNING_STOP_REASONS`; por isso, o dispatcher nao aplicava a transicao defensiva para `state=1`. Com o claim nao duravel de R1, a sessao podia permanecer `state=0`, ser selecionada a cada scan e retornar imediatamente o mesmo bloqueio, sem reenviar a mensagem e sem produzir alarme.
 
 `RUNTIME EVIDENCE`: em 2026-08-24 15:28 BRT, o flow `4d81d73b-dfee-43b8-9c82-d3c52207941f` tinha sete sessoes GenericApp `state=0` bloqueadas no card de WhatsApp e 4.389.386 metricas de executor `success/blocked_send_whatsapp_interactive`. A auditoria do host `10.1.20.237`, entre 19:22 e aproximadamente 20:32 BRT, confirmou a amplificacao ainda ativa em tres workspaces: mais de 213 mil execucoes de executor e 428 mil metricas novas. As sessoes quentes continuavam `state=0`, `ended_at=NULL`, `unassigned_at=NULL` e com cursor seguinte. O journal recebeu cerca de 1,27 milhao de linhas/234 MB nessa janela. O banco ja armazenava aproximadamente 199,4 milhoes de linhas e mais de 90 GB em `orch_session_metrics` nos doze schemas com dados.
 
-`MITIGATION`: ate uma correcao aprovada, preservar evidencias e isolar as sessoes/dispatcher somente por procedimento operacional controlado. Nao usar contagem de alarmes como unico detector.
+`MITIGATION`: a correcao Alpha adiciona `blocked_send_whatsapp_interactive` ao conjunto bloqueante do dispatcher. A primeira execucao corrigida persiste `state=1`, removendo a sessao dos scans de `state=0`; callbacks e o reconciliador continuam podendo enfileirar a retomada diretamente. Ate o deploy e a validacao em runtime, preservar evidencias e isolar sessoes/dispatcher apenas por procedimento operacional controlado. Nao usar contagem de alarmes como unico detector.
 
 `DETECTION`: agregar `orch_session_metrics` por `flow_uuid`, `session_id`, `stopped_reason` e janela; alertar para repeticao de bloqueio sem evento pendente e para crescimento anormal de metricas.
 

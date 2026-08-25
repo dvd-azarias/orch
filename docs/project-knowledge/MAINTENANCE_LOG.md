@@ -247,3 +247,31 @@ Dois revisores independentes confirmaram: severidade critica para o loop WhatsAp
 ### CHANGE
 
 Somente documentacao de conhecimento. Nenhum codigo funcional, unit, processo, fila, sessao ou dado de producao foi alterado.
+
+## 2026-08-24 — Correcao do loop `blocked_send_whatsapp_interactive`
+
+### REQUEST
+
+Interromper a reexecucao massiva de sessoes WhatsApp bloqueadas sem alterar o contrato de espera por callback.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_REQUIRED` — risco critico de amplificacao operacional e crescimento de metricas/logs.
+
+### ROOT CAUSE
+
+O executor M2 retorna `blocked_send_whatsapp_interactive` como bloqueio valido para template e interativo, mas o dispatcher nao incluia esse motivo em `BLOCKING_RUNNING_STOP_REASONS`. A sessao podia voltar a `state=0` e ser reclamada novamente pelo scan periodico; cada ciclo criava uma nova task Celery com `Retries=0`, mascarando a tempestade como varias execucoes bem-sucedidas independentes.
+
+### CHANGE
+
+- Inclusao cirurgica de `blocked_send_whatsapp_interactive` no conjunto bloqueante do dispatcher.
+- Regressao unitaria exige `state=1`, `only_if_not_finished=True` e ausencia de finalizacao da sessao.
+- Nenhuma sessao, fila, unit ou dado de producao foi alterado nesta etapa.
+
+### VALIDATION
+
+- Teste novo falhou antes da mudanca funcional, comprovando a regressao.
+- Suite focada: 103 testes passaram em `tests/test_workflow_dispatcher_service.py`, `tests/test_workflow_m2_whatsapp_interactive.py`, `tests/test_workflow_m2_service.py` e `tests/test_workflow_tasks.py`.
+- Revisao adversarial independente: `GO`, sem achados bloqueantes; confirmou exclusao dos scans por `state=1` e retomada direta por callback/reconciliador.
+- Limitacao conhecida: falta teste integrado PostgreSQL do ciclo completo `bloqueio -> callback/evento -> retomada`.
+- Deploy e validacao no host `10.1.20.237` permanecem pendentes.
