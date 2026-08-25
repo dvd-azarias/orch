@@ -459,7 +459,7 @@ def get_settings() -> Settings:
             _read_env_optional("ORCH_BILLING_ROUTING_KEY", "billing.usage.snapshot.v1.target")
             or "billing.usage.snapshot.v1.target"
         ),
-        orch_billing_application_code=_read_env_optional("ORCH_BILLING_APPLICATION_CODE", "orch") or "orch",
+        orch_billing_application_code=_read_env_optional("ORCH_BILLING_APPLICATION_CODE", "target") or "target",
         orch_billing_service_code=_read_env_optional("ORCH_BILLING_SERVICE_CODE", "service-orch") or "service-orch",
         orch_billing_metric_code=_read_env_optional("ORCH_BILLING_METRIC_CODE", "service-orch") or "service-orch",
         orch_billing_publish_interval_seconds=_read_env_int("ORCH_BILLING_PUBLISH_INTERVAL_SECONDS", 10),

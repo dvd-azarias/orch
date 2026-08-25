@@ -15,7 +15,7 @@ def _settings(**overrides):  # type: ignore[no-untyped-def]
         "orch_billing_rabbitmq_url": "amqp://billing:secret@rabbitmq//",
         "orch_billing_exchange": "domain.events",
         "orch_billing_routing_key": "billing.usage.snapshot.v1.target",
-        "orch_billing_application_code": "orch",
+        "orch_billing_application_code": "target",
         "orch_billing_service_code": "service-orch",
         "orch_billing_metric_code": "service-orch",
         "orch_billing_publish_timeout_seconds": 3.0,
@@ -36,7 +36,7 @@ def test_build_billing_snapshot_uses_utc_contract() -> None:
     assert snapshot == {
         "snapshot_id": "orch_usage_202608_1fe19d40-2330-4263-9781-1805ece1d816",
         "workspace_uuid": "workspace-1",
-        "application_code": "orch",
+        "application_code": "target",
         "billing_period": "2026-08",
         "snapshot_at": "2026-08-25T15:30:45.123Z",
         "currency": "BRL",

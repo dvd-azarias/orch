@@ -23,7 +23,7 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 - `ORCH_BILLING_RABBITMQ_URL`: URL AMQP exclusiva ou fallback do broker Celery; nunca registrar a URL completa.
 - `ORCH_BILLING_EXCHANGE=domain.events`
 - `ORCH_BILLING_ROUTING_KEY=billing.usage.snapshot.v1.target`
-- `ORCH_BILLING_APPLICATION_CODE=orch`
+- `ORCH_BILLING_APPLICATION_CODE=target`
 - `ORCH_BILLING_SERVICE_CODE=service-orch`
 - `ORCH_BILLING_METRIC_CODE=service-orch`
 - `ORCH_BILLING_PUBLISH_TIMEOUT_SECONDS=3`
