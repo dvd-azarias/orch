@@ -77,15 +77,15 @@ async def backfill_billing_snapshot_outbox_batch(
                 candidates.uuid,
                 jsonb_build_object(
                     'snapshot_id', 'orch_usage_' || to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYYMM') || '_' || candidates.uuid::text,
-                    'workspace_uuid', :workspace_uuid,
-                    'application_code', :application_code,
+                    'workspace_uuid', CAST(:workspace_uuid AS text),
+                    'application_code', CAST(:application_code AS text),
                     'billing_period', to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYY-MM'),
                     'snapshot_at', to_char(candidates.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                     'currency', 'BRL',
                     'correction', false,
                     'items', jsonb_build_array(jsonb_build_object(
-                        'service_code', :service_code,
-                        'metric_code', :metric_code,
+                        'service_code', CAST(:service_code AS text),
+                        'metric_code', CAST(:metric_code AS text),
                         'unit', 'event',
                         'quantity', 1
                     ))
