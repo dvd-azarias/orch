@@ -46,7 +46,7 @@ flow_v2 + flow_v2_revision
 
 Paradas relevantes:
 
-- `finish_flow`: finaliza.
+- `finish_flow`: persiste o estado terminal; quando `parameters.webhook` esta configurado, rele a linha completa e a envia por HTTP `POST` com `result` e o unico objeto `cdr` recebido do Dialer. O CDR aparece uma vez no corpo, fora de `runtime_variables`. Resposta `2xx` remove o CDR do runtime; falha mantem o objeto para diagnostico.
 - `wait/scheduling_moment`: `frozen_until`, retorna a pending quando elegivel.
 - cards de canal e `run_flow`: mantem contexto bloqueante.
 - componente desconhecido: caminho Celery pode classificar como fatal e finalizar.
@@ -126,4 +126,3 @@ O upload SFTP ocorre antes do commit que registra o sucesso; crash nessa janela 
 ## Resubmit Supplier
 
 Endpoint autenticado por par de headers. Usa `event_id` como chave de replay, normaliza endereco, unassign de sessoes anteriores e cria novo ciclo pelo workflow padrao.
-

@@ -439,3 +439,19 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `DETECTION`: alertar para `UnboundLocalError.*stopped_reason`, `WorkerLostError` e SIGTERM de childs; correlacionar com autoscale e limites de recycle.
 
 `V2`: wrapper de task com outcome inicializado e lifecycle/cancelamento explicitamente modelados.
+
+## R24 — Webhook de `finish_flow` e best-effort dentro da transacao
+
+`STATUS`: CONFIRMED CODE
+
+`IMPACT`: medium
+
+`PROBABILITY`: low a medium, conforme disponibilidade e latencia do destino
+
+`AFFECTED AREA`: executor M2 / `finish_flow` / integracao HTTP
+
+`DESCRIPTION`: o webhook terminal usa uma chamada HTTP com timeout de 5 segundos durante a transacao do workflow. A chamada roda em thread para nao bloquear o event loop, mas a conexao e o advisory lock permanecem retidos. Nao existe outbox nem retry automatico. Uma falha mantem o CDR para diagnostico, mas a sessao termina sem nova tentativa automatica; uma interrupcao entre a resposta externa e o commit local tambem pode produzir divergencia entre destino e banco.
+
+`MITIGATION`: manter o destino rapido e idempotente, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR e um unico objeto por sessao e so e removido apos `2xx`.
+
+`V2`: avaliar entrega transacional/idempotente fora do caminho critico caso a garantia operacional passe a exigir retry.

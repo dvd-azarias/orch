@@ -11,8 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema
+from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_channel_events_repository import insert_channel_event
+from app.repositories.orch_sessions_repository import set_session_cdr
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
+from app.services.workflow_engine import definition_has_finish_flow_webhook
 
 logger = get_logger(__name__)
 
@@ -24,6 +27,17 @@ class ChannelEventItem:
     event_id: str | None
     event_ts: datetime | None
     payload: dict[str, Any]
+
+
+async def _flow_has_finish_flow_webhook(db_session: AsyncSession, *, flow_uuid: str) -> bool:
+    flow = await fetch_flow_row(db_session, flow_uuid=flow_uuid)
+    if flow is None:
+        return False
+    revision = await fetch_selected_revision(db_session, flow_id=str(flow["id"]))
+    if revision is None:
+        return False
+    definition = revision.get("definition")
+    return isinstance(definition, dict) and definition_has_finish_flow_webhook(definition)
 
 
 def _parse_unix_timestamp(raw_value: Any) -> datetime | None:
@@ -211,6 +225,15 @@ async def persist_channel_events(
                     payload=event.payload,
                 )
                 if was_inserted:
+                    if event.channel == "dialer" and await _flow_has_finish_flow_webhook(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                    ):
+                        await set_session_cdr(
+                            db_session,
+                            session_id=session_id,
+                            cdr=event.payload,
+                        )
                     persisted += 1
     except Exception:
         logger.exception(

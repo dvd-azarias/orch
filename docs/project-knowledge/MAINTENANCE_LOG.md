@@ -275,3 +275,35 @@ O executor M2 retorna `blocked_send_whatsapp_interactive` como bloqueio valido p
 - Revisao adversarial independente: `GO`, sem achados bloqueantes; confirmou exclusao dos scans por `state=1` e retomada direta por callback/reconciliador.
 - Limitacao conhecida: falta teste integrado PostgreSQL do ciclo completo `bloqueio -> callback/evento -> retomada`.
 - Deploy e validacao no host `10.1.20.237` permanecem pendentes.
+
+## 2026-08-24 — Webhook terminal do `finish_flow`
+
+### REQUEST
+
+Suportar os novos campos do card `finish_flow` da revisao publicada do flow `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`, enviando os dados da sessao ao webhook e incluindo o evento de telefonia quando o fluxo usa Dialer.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_REQUIRED` — o campo ja publicado nao possuia efeito no runtime.
+
+### CONFIRMED CONTRACT
+
+- Existe apenas um evento de telefonia por sessao; `cdr` e um objeto, nunca lista ou acumulador.
+- O payload Dialer e copiado para a sessao dona somente quando a revisao selecionada, consultada no recebimento do evento, possui `finish_flow.parameters.webhook` nao vazio.
+- O `finish_flow` envia uma vez a linha completa da sessao com `result` e `cdr`; o CDR nao e duplicado em `runtime_variables`. Resposta `2xx` remove o CDR, enquanto falha o preserva.
+
+### CHANGE
+
+- Persistencia JSONB cirurgica no `runtime_variables.cdr`, sem migration.
+- Envio direto pelo mecanismo HTTP ja existente, sem outbox, scanner, beat, fila ou worker adicional.
+- Registro do resultado em `runtime_variables.finish_flow_webhook` para diagnostico.
+
+### VALIDATION
+
+- Regressao ampliada: 129 testes passaram; `compileall` e `git diff --check` passaram.
+- Teste de execucao completa confirma que o branch `finish_flow` persiste e rele o snapshot terminal antes do dispatch, e que `2xx` remove o unico CDR na persistencia seguinte.
+- PostgreSQL real validado com tabela temporaria e rollback: JSONB permanece objeto e uma nova escrita substitui, sem acumular; o snapshot completo e retornado por `to_jsonb`.
+- Smoke HTTP real em destino loopback observou um unico `POST`, um unico campo `cdr` e limpeza em memoria apos `204`.
+- As revisoes adversariais encontraram dependencia temporal da flag, snapshot parcial, CDR duplicado e leitura anterior a terminalizacao; os quatro achados foram removidos antes do fechamento.
+- A revisao final confirmou esses quatro pontos e levantou somente o risco preexistente `R7`: publicacao entre recebimento e execucao pode trocar a revisao relida pelo M2. Pinagem global de revisao foi mantida fora do escopo para nao ampliar o blast radius desta mudanca.
+- Observacao do POST em destino real e smoke E2E permanecem pendentes.

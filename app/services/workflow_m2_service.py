@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import copy
 import gzip
@@ -37,6 +38,7 @@ from app.repositories.orch_sessions_repository import (
     ensure_default_source_list_for_create_contact,
     ensure_session_for_created_contact,
     fetch_contact_runtime_context_for_session,
+    fetch_session_webhook_snapshot,
     fetch_session_workflow_state,
     increment_source_list_counters_for_create_contact,
     replace_session_workflow_state,
@@ -3585,6 +3587,83 @@ def _run_api_call(
     return "success" if 200 <= status_code < 300 else "error"
 
 
+def _finish_flow_json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _finish_flow_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_finish_flow_json_safe(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+async def _dispatch_finish_flow_webhook(
+    *,
+    component: dict[str, Any],
+    session_state: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    finished_at: datetime,
+) -> dict[str, Any] | None:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    webhook = params.get("webhook")
+    if not isinstance(webhook, str) or not webhook.strip():
+        return None
+
+    cdr = copy.deepcopy(runtime_variables.get("cdr"))
+    payload_runtime_variables = copy.deepcopy(runtime_variables)
+    payload_runtime_variables.pop("cdr", None)
+    session_payload = {
+        key: copy.deepcopy(value)
+        for key, value in session_state.items()
+        if key != "runtime_variables"
+    }
+    session_payload.update(
+        {
+            "state": 3,
+            "ended_at": finished_at,
+            "last_card_uuid": component.get("uuid") or component.get("ref_id"),
+            "next_card_uuid": None,
+            "runtime_variables": payload_runtime_variables,
+            "result": params.get("result"),
+            "cdr": cdr,
+        }
+    )
+    payload = _finish_flow_json_safe(session_payload)
+    try:
+        req = request.Request(
+            url=webhook.strip(),
+            method="POST",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        status_code, _headers, _body, error = await asyncio.to_thread(
+            _http_execute,
+            req,
+            timeout_seconds=5.0,
+        )
+    except Exception as exc:
+        status_code, error = 599, str(exc)
+
+    success = 200 <= status_code < 300
+    if success:
+        runtime_variables.pop("cdr", None)
+    result = {
+        "success": success,
+        "status_code": status_code,
+        "error": error,
+        "url": webhook.strip(),
+        "dispatched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    runtime_variables["finish_flow_webhook"] = result
+    return result
+
+
 def _resolve_send_whatsapp_interactive_branch_label(
     *,
     component: dict[str, Any],
@@ -4912,6 +4991,37 @@ async def execute_workflow_m2_for_session(
                         ended_at=finished_at,
                         state=3,
                     )
+
+                    finish_flow_webhook_result = None
+                    finish_flow_params = (
+                        component.get("parameters")
+                        if isinstance(component.get("parameters"), dict)
+                        else {}
+                    )
+                    finish_flow_webhook = finish_flow_params.get("webhook")
+                    if isinstance(finish_flow_webhook, str) and finish_flow_webhook.strip():
+                        finish_flow_session_state = (
+                            await fetch_session_webhook_snapshot(
+                                db_session,
+                                session_id=session_id,
+                            )
+                            or session_state
+                        )
+                        finish_flow_webhook_result = await _dispatch_finish_flow_webhook(
+                            component=component,
+                            session_state=finish_flow_session_state,
+                            runtime_variables=runtime_variables,
+                            finished_at=finished_at,
+                        )
+                        await replace_session_workflow_state(
+                            db_session,
+                            session_id=session_id,
+                            runtime_variables=runtime_variables,
+                            last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                            next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                            ended_at=finished_at,
+                            state=3,
+                        )
                     step_finished_at = datetime.now(timezone.utc)
                     _append_metric(
                         metric_type="card",
@@ -4923,6 +5033,7 @@ async def execute_workflow_m2_for_session(
                         step_index=executed_steps,
                         card_cursor=last_card_uuid,
                         component_kind_value=kind,
+                        details={"webhook": finish_flow_webhook_result} if finish_flow_webhook_result else None,
                     )
                     logger.info(
                         "workflow m2 card latency",
