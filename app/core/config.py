@@ -85,6 +85,17 @@ class Settings:
     celery_reconcile_pending_events_batch_size: int
     celery_reconcile_pending_events_stale_seconds: int
     celery_reconcile_pending_events_cooldown_seconds: int
+    orch_billing_snapshot_enabled: bool
+    orch_billing_rabbitmq_url: str | None
+    orch_billing_exchange: str
+    orch_billing_routing_key: str
+    orch_billing_application_code: str
+    orch_billing_service_code: str
+    orch_billing_metric_code: str
+    orch_billing_publish_interval_seconds: int
+    orch_billing_publish_batch_size: int
+    orch_billing_publish_max_attempts: int
+    orch_billing_publish_timeout_seconds: float
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
@@ -441,6 +452,22 @@ def get_settings() -> Settings:
         celery_reconcile_pending_events_batch_size=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_BATCH_SIZE", 200),
         celery_reconcile_pending_events_stale_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_STALE_SECONDS", 30),
         celery_reconcile_pending_events_cooldown_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_COOLDOWN_SECONDS", 30),
+        orch_billing_snapshot_enabled=_read_env_bool("ORCH_BILLING_SNAPSHOT_ENABLED", False),
+        orch_billing_rabbitmq_url=_read_env_optional("ORCH_BILLING_RABBITMQ_URL"),
+        orch_billing_exchange=_read_env_optional("ORCH_BILLING_EXCHANGE", "domain.events") or "domain.events",
+        orch_billing_routing_key=(
+            _read_env_optional("ORCH_BILLING_ROUTING_KEY", "billing.usage.snapshot.v1.target")
+            or "billing.usage.snapshot.v1.target"
+        ),
+        orch_billing_application_code=_read_env_optional("ORCH_BILLING_APPLICATION_CODE", "orch") or "orch",
+        orch_billing_service_code=_read_env_optional("ORCH_BILLING_SERVICE_CODE", "service-orch") or "service-orch",
+        orch_billing_metric_code=_read_env_optional("ORCH_BILLING_METRIC_CODE", "service-orch") or "service-orch",
+        orch_billing_publish_interval_seconds=_read_env_int("ORCH_BILLING_PUBLISH_INTERVAL_SECONDS", 10),
+        orch_billing_publish_batch_size=_read_env_int("ORCH_BILLING_PUBLISH_BATCH_SIZE", 100),
+        orch_billing_publish_max_attempts=_read_env_int("ORCH_BILLING_PUBLISH_MAX_ATTEMPTS", 3),
+        orch_billing_publish_timeout_seconds=float(
+            _read_env_optional("ORCH_BILLING_PUBLISH_TIMEOUT_SECONDS", "3") or "3"
+        ),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
             "ORCH_DEFAULT_WORKSPACE_UUID",

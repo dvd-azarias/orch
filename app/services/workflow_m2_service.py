@@ -52,6 +52,7 @@ from app.repositories.orch_sessions_repository import (
 )
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
+from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
@@ -2813,6 +2814,12 @@ async def _run_create_contact(
         )
         if child_session.get("created"):
             created_sessions += 1
+            await try_create_billing_snapshot_outbox(
+                db_session,
+                workspace_uuid=get_current_workspace_uuid(),
+                session_id=int(child_session["id"]),
+                session_uuid=str(child_session["uuid"]),
+            )
         else:
             reused_sessions += 1
 
