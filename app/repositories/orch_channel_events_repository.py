@@ -64,6 +64,34 @@ async def insert_channel_event(
     return inserted_row is not None
 
 
+async def has_channel_event_identity(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    channel: str,
+    event_id: str,
+) -> bool:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM orch_channel_events
+                WHERE session_id = :session_id
+                  AND channel = :channel
+                  AND event_id = :event_id
+            )
+            """
+        ),
+        {
+            "session_id": session_id,
+            "channel": channel,
+            "event_id": event_id,
+        },
+    )
+    return bool(result.scalar())
+
+
 async def has_pending_channel_events(
     db_session: AsyncSession,
     *,
@@ -169,6 +197,7 @@ async def fetch_next_pending_channel_event(
                 event_type,
                 event_id,
                 event_ts,
+                discard_reason,
                 payload
             FROM orch_channel_events
             WHERE session_id = :session_id
@@ -201,7 +230,8 @@ async def fetch_channel_event_by_identity(
                 event_id,
                 event_ts,
                 payload,
-                processed_at
+                processed_at,
+                discard_reason
             FROM orch_channel_events
             WHERE session_id = :session_id
               AND channel = :channel
@@ -238,7 +268,10 @@ async def mark_channel_event_processed(
             WHERE id = :event_row_id
               AND session_id = :session_id
               AND channel = :channel
-              AND processed_at IS NULL
+              AND (
+                  processed_at IS NULL
+                  OR :discard_reason IS NOT NULL
+              )
             """
         ),
         {

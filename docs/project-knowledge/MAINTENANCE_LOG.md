@@ -376,3 +376,33 @@ Corrigir o teste de producao em que o primeiro webhook higienizado saiu sem CDR 
 - A revisao adversarial final deu `GO`: confirmou origem exclusiva no ledger, baixa do evento exato, bloqueio de reabertura apos `2xx` e ausencia de `runtime_variables` no contrato externo.
 - Suites integradas antigas ainda falham antes do codigo alterado pela assinatura removida `trigger_orch(flow_uuid=...)`, gap ja documentado na baseline.
 - Deploy e observacao do POST real permanecem pendentes.
+
+## 2026-08-25 — Webhook por tentativa Dialer da mesma sessao
+
+### REQUEST
+
+Preservar a sessao unica de um contato no `send_with_dialer`, mas publicar um webhook para cada CDR de tentativa sequencial enquanto o Dialer esgota suas tentativas.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_REQUIRED` — a sessao `6949` recebeu dois CDRs distintos, mas o segundo POST foi suprimido pelo `2xx` do primeiro, apesar de a segunda chamada pertencer a uma nova tentativa valida da mesma sessao.
+
+### ROOT CAUSE
+
+- O bloqueio de sucesso era por sessao, quando a semantica Dialer e por tentativa/CDR.
+- O fallback de hangup recusava retomar uma sessao com webhook confirmado e a persistencia do CDR tambem recusava gravar novo CDR apos esse sucesso.
+
+### CHANGE
+
+- Hangup Dialer pode retomar explicitamente a sessao recente confirmada para processar uma nova tentativa.
+- Cada CDR distinto pode disparar o webhook; o `Idempotency-Key` continua determinado por sessao e evento.
+- O `discard_reason` do registro em `orch_channel_events` recebe `finish_flow_webhook_dispatched` apos `2xx`, tornando o ledger a marca duravel que suprime somente o replay do mesmo CDR.
+- A identidade e o `uniqueid`/`Linkedid` recebido do Dialer; sem ela, o ORCH usa hash deterministico do payload como fallback, sem migration.
+- O body externo e inalterado: `session` limpa mais `cdr` cru, sem `runtime_variables`.
+
+### VALIDATION
+
+- Testes focados e de regressao de workflow, ledger, persistencia, trigger e mapper Dialer: `160 passed`.
+- Regressao cobre dois CDRs distintos na mesma sessao gerando dois POSTs e a reentrega de CDR marcado gerando zero POST adicional.
+- Revisao adversarial auxiliar foi iniciada, mas o client local do agente perdeu permissao para inicializar antes de produzir veredito; a revisao estatica final foi feita localmente. A garantia permanece *at-least-once* no limite entre `2xx` externo e commit local, risco ja registrado em `KNOWN_RISKS.md`.
+- Sem migration, filas, beats ou infraestrutura nova.

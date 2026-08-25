@@ -248,6 +248,115 @@ async def test_finish_flow_does_not_repeat_confirmed_webhook(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_finish_flow_posts_each_distinct_dialer_cdr_for_same_session(monkeypatch) -> None:
+    first_event_identity = "GW02-first.1"
+    second_event_identity = "GW01-retry.2"
+    second_event_row_id = 13907
+    second_cdr = {"uniqueid": "GW01-retry.2", "hangup": {"Disposition": "NO ANSWER"}}
+    runtime_variables = {
+        "finish_flow_webhook": {
+            "success": True,
+            "status_code": 200,
+            "url": "https://example.test/hook",
+            "channel_event_identity": first_event_identity,
+            "channel_event_row_id": 13906,
+        }
+    }
+    captured: dict = {}
+
+    def _http_execute(req, timeout_seconds):  # type: ignore[no-untyped-def]
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        captured["idempotency_key"] = req.get_header("Idempotency-key")
+        return 200, {}, "", None
+
+    monkeypatch.setattr(workflow_m2_service, "_http_execute", _http_execute)
+
+    result = await _dispatch_finish_flow_webhook(
+        component=_component(),
+        session_state=_session_state(runtime_variables),
+        runtime_variables=runtime_variables,
+        finished_at=datetime.now(timezone.utc),
+        cdr=second_cdr,
+        cdr_required=True,
+        cdr_event_id=second_event_identity,
+        cdr_event_row_id=second_event_row_id,
+    )
+
+    assert result is not None and result["success"] is True
+    assert result["channel_event_identity"] == second_event_identity
+    assert result["channel_event_row_id"] == second_event_row_id
+    assert captured["payload"]["cdr"] == second_cdr
+    assert captured["idempotency_key"].endswith(f":{second_event_identity}")
+
+
+@pytest.mark.asyncio
+async def test_finish_flow_does_not_repeat_already_dispatched_dialer_cdr(monkeypatch) -> None:
+    runtime_variables = {
+        "cdr": {"uniqueid": "GW01-duplicate.1"},
+        "finish_flow_webhook": {
+            "success": True,
+            "status_code": 200,
+            "url": "https://example.test/hook",
+            "channel_event_identity": "GW01-duplicate.1",
+            "channel_event_row_id": 13906,
+        },
+    }
+
+    def _unexpected_http_execute(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("CDR já confirmado não pode ser reenviado")
+
+    monkeypatch.setattr(workflow_m2_service, "_http_execute", _unexpected_http_execute)
+
+    result = await _dispatch_finish_flow_webhook(
+        component=_component(),
+        session_state=_session_state(runtime_variables),
+        runtime_variables=runtime_variables,
+        finished_at=datetime.now(timezone.utc),
+        cdr={"uniqueid": "GW01-duplicate.1"},
+        cdr_required=True,
+        cdr_event_id="GW01-duplicate.1",
+        cdr_event_row_id=13906,
+        cdr_event_dispatched=True,
+    )
+
+    assert result is not None and result["skipped"] is True
+    assert result["channel_event_identity"] == "GW01-duplicate.1"
+    assert result["channel_event_row_id"] == 13906
+    assert "cdr" not in runtime_variables
+
+
+@pytest.mark.asyncio
+async def test_finish_flow_keeps_legacy_confirmed_session_one_time(monkeypatch) -> None:
+    runtime_variables = {
+        "cdr": {"uniqueid": "GW01-new.1"},
+        "finish_flow_webhook": {
+            "success": True,
+            "status_code": 200,
+            "url": "https://example.test/hook",
+        },
+    }
+
+    def _unexpected_http_execute(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("sessão legada confirmada não pode ser reenviada sem identidade CDR")
+
+    monkeypatch.setattr(workflow_m2_service, "_http_execute", _unexpected_http_execute)
+
+    result = await _dispatch_finish_flow_webhook(
+        component=_component(),
+        session_state=_session_state(runtime_variables),
+        runtime_variables=runtime_variables,
+        finished_at=datetime.now(timezone.utc),
+        cdr=runtime_variables["cdr"],
+        cdr_required=True,
+        cdr_event_id="GW01-new.1",
+        cdr_event_row_id=13907,
+    )
+
+    assert result is not None and result["skipped"] is True
+    assert "cdr" not in runtime_variables
+
+
+@pytest.mark.asyncio
 async def test_execute_finish_flow_dispatches_persisted_terminal_snapshot(monkeypatch) -> None:
     flow_uuid = "33333333-3333-3333-3333-333333333333"
     finish_ref = "22222222-2222-2222-2222-222222222222"
@@ -385,7 +494,14 @@ async def test_execute_finish_flow_dispatches_persisted_terminal_snapshot(monkey
 
     assert result.stopped_reason == "finished_by_component"
     assert len(dispatched) == 1
-    assert marked_processed == [{"event_row_id": 13904, "session_id": 6941, "channel": "dialer"}]
+    assert marked_processed == [
+        {
+            "event_row_id": 13904,
+            "session_id": 6941,
+            "channel": "dialer",
+            "discard_reason": "finish_flow_webhook_dispatched",
+        }
+    ]
     assert dispatched[0]["cdr"] == ledger_cdr
     assert "runtime_variables" not in dispatched[0]["session"]
     assert dispatched[0]["session"]["state"] == 3

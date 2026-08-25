@@ -117,6 +117,7 @@ DIALER_RESPONSE_BRANCH_BY_STATUS = {
     "failed": "failed",
     "machine": "machine",
 }
+FINISH_FLOW_WEBHOOK_DISPATCHED_REASON = "finish_flow_webhook_dispatched"
 LOOP_GUARD_WORKFLOW_META_KEY = "loop_guard"
 LOOP_GUARD_COUNTER_KEY = "continuous_steps"
 LOOP_GUARD_LAST_TRANSITION_KEY = "last_transition_signature"
@@ -3679,14 +3680,37 @@ async def _dispatch_finish_flow_webhook(
     cdr: dict[str, Any] | None = None,
     cdr_required: bool = False,
     cdr_event_id: int | str | None = None,
+    cdr_event_row_id: int | None = None,
+    cdr_event_dispatched: bool = False,
 ) -> dict[str, Any] | None:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     webhook = params.get("webhook")
     if not isinstance(webhook, str) or not webhook.strip():
         return None
 
+    if cdr_event_dispatched:
+        runtime_variables.pop("cdr", None)
+        return {
+            "success": True,
+            "skipped": True,
+            "channel_event_identity": cdr_event_id,
+            "channel_event_row_id": cdr_event_row_id,
+            "reason": FINISH_FLOW_WEBHOOK_DISPATCHED_REASON,
+        }
+
     previous_result = runtime_variables.get("finish_flow_webhook")
-    if isinstance(previous_result, dict) and previous_result.get("success") is True:
+    previous_event_identity = (
+        previous_result.get("channel_event_identity") if isinstance(previous_result, dict) else None
+    )
+    if (
+        isinstance(previous_result, dict)
+        and previous_result.get("success") is True
+        and (
+            cdr_event_id is None
+            or previous_event_identity is None
+            or str(previous_event_identity) == str(cdr_event_id)
+        )
+    ):
         runtime_variables.pop("cdr", None)
         return {**copy.deepcopy(previous_result), "skipped": True}
 
@@ -3752,6 +3776,8 @@ async def _dispatch_finish_flow_webhook(
         "error": error,
         "url": webhook.strip(),
         "dispatched_at": datetime.now(timezone.utc).isoformat(),
+        "channel_event_identity": cdr_event_id,
+        "channel_event_row_id": cdr_event_row_id,
     }
     runtime_variables["finish_flow_webhook"] = result
     return result
@@ -5134,9 +5160,20 @@ async def execute_workflow_m2_for_session(
                             cdr=(pending_cdr if isinstance(pending_cdr, dict) else None),
                             cdr_required=finish_flow_requires_cdr,
                             cdr_event_id=(
-                                finish_flow_cdr_event.get("id")
+                                finish_flow_cdr_event.get("event_id")
                                 if isinstance(finish_flow_cdr_event, dict)
                                 else None
+                            ),
+                            cdr_event_row_id=(
+                                int(finish_flow_cdr_event["id"])
+                                if isinstance(finish_flow_cdr_event, dict)
+                                and finish_flow_cdr_event.get("id") is not None
+                                else None
+                            ),
+                            cdr_event_dispatched=(
+                                isinstance(finish_flow_cdr_event, dict)
+                                and finish_flow_cdr_event.get("discard_reason")
+                                == FINISH_FLOW_WEBHOOK_DISPATCHED_REASON
                             ),
                         )
                         if (
@@ -5150,6 +5187,7 @@ async def execute_workflow_m2_for_session(
                                 event_row_id=int(finish_flow_cdr_event["id"]),
                                 session_id=session_id,
                                 channel="dialer",
+                                discard_reason=FINISH_FLOW_WEBHOOK_DISPATCHED_REASON,
                             )
                         await replace_session_workflow_state(
                             db_session,

@@ -117,6 +117,22 @@ def test_extract_channel_events_returns_dialer_item() -> None:
     assert events[0].event_id == "GW01-444.1"
 
 
+def test_extract_dialer_event_uses_payload_hash_when_provider_identity_is_missing() -> None:
+    payload = {
+        "hangup": {
+            "Event": "Hangup",
+            "Disposition": "BUSY",
+            "Cause": "486",
+        },
+    }
+
+    events = extract_channel_events("DialerApp", payload)
+
+    assert len(events) == 1
+    assert events[0].event_id is not None
+    assert events[0].event_id.startswith("payload-sha256:")
+
+
 class _Transaction:
     async def __aenter__(self):  # type: ignore[no-untyped-def]
         return self
@@ -134,6 +150,10 @@ class _Session:
 
     async def execute(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
         return None
+
+
+async def _event_identity_absent(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+    return False
 
 
 @pytest.mark.asyncio
@@ -172,6 +192,7 @@ async def test_persist_dialer_event_sets_single_session_cdr_after_ledger_insert(
         }
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_absent)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
     monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
@@ -221,6 +242,7 @@ async def test_persist_dialer_event_does_not_set_cdr_without_finish_webhook(monk
         }
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_absent)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
     monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
@@ -238,7 +260,7 @@ async def test_persist_dialer_event_does_not_set_cdr_without_finish_webhook(monk
 
 
 @pytest.mark.asyncio
-async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_webhook(monkeypatch) -> None:
+async def test_persist_late_dialer_event_keeps_new_cdr_eligible_for_webhook(monkeypatch) -> None:
     payload = {
         "uniqueid": "GW01-446.1",
         "hangup": {
@@ -248,17 +270,14 @@ async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_
             "Uniqueid": "GW01-446.1",
         },
     }
-    marked: list[dict] = []
+    stored: list[dict] = []
 
     async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
         return True
 
-    async def _set_cdr(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
-        return False
-
-    async def _mark(*_args, **kwargs) -> int:  # type: ignore[no-untyped-def]
-        marked.append(kwargs)
-        return 1
+    async def _set_cdr(*_args, **kwargs) -> bool:  # type: ignore[no-untyped-def]
+        stored.append(kwargs["cdr"])
+        return True
 
     async def _fetch_flow(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
@@ -276,8 +295,8 @@ async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_
         }
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_absent)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
-    monkeypatch.setattr(channel_event_service, "mark_channel_event_processed_by_identity", _mark)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
     monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
 
@@ -290,12 +309,35 @@ async def test_persist_late_dialer_event_marks_ledger_processed_after_confirmed_
     )
 
     assert persisted == 1
-    assert marked == [
-        {
-            "session_id": 6945,
-            "channel": "dialer",
-            "event_type": "busy",
-            "event_id": "GW01-446.1",
-            "discard_reason": "finish_flow_webhook_already_succeeded",
-        }
-    ]
+    assert stored == [payload]
+
+
+@pytest.mark.asyncio
+async def test_persist_dialer_duplicate_identity_does_not_create_second_cdr(monkeypatch) -> None:
+    payload = {
+        "uniqueid": "GW01-duplicate.1",
+        "hangup": {"Event": "Hangup", "Disposition": "BUSY"},
+    }
+    inserted = False
+
+    async def _insert(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        nonlocal inserted
+        inserted = True
+        return True
+
+    async def _event_identity_present(*_args, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
+    monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_present)
+
+    persisted = await persist_channel_events(
+        _Session(),
+        session_id=6945,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        payload=payload,
+    )
+
+    assert persisted == 0
+    assert inserted is False

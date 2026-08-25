@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
+from hashlib import sha256
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -13,8 +15,8 @@ from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
 from app.repositories.orch_channel_events_repository import (
+    has_channel_event_identity,
     insert_channel_event,
-    mark_channel_event_processed_by_identity,
 )
 from app.repositories.orch_sessions_repository import set_session_cdr
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
@@ -165,6 +167,24 @@ def _extract_dialer_status(payload: dict[str, Any]) -> str | None:
     return resolve_dialer_status_from_release(payload)
 
 
+def _resolve_dialer_event_identity(
+    payload: dict[str, Any],
+    *,
+    hangup: dict[str, Any],
+    makecall: dict[str, Any],
+) -> str:
+    event_id = (
+        str(payload.get("uniqueid") or "").strip()
+        or str(hangup.get("Uniqueid") or "").strip()
+        or str(hangup.get("Linkedid") or "").strip()
+        or str(makecall.get("DestUniqueid") or "").strip()
+    )
+    if event_id:
+        return event_id
+    canonical_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return f"payload-sha256:{sha256(canonical_payload.encode('utf-8')).hexdigest()}"
+
+
 def _extract_dialer_channel_events(payload: dict[str, Any]) -> list[ChannelEventItem]:
     event_type = _extract_dialer_status(payload)
     if not event_type:
@@ -172,12 +192,10 @@ def _extract_dialer_channel_events(payload: dict[str, Any]) -> list[ChannelEvent
 
     hangup = payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {}
     makecall = payload.get("makecall") if isinstance(payload.get("makecall"), dict) else {}
-    event_id = (
-        str(payload.get("uniqueid") or "").strip()
-        or str(hangup.get("Uniqueid") or "").strip()
-        or str(hangup.get("Linkedid") or "").strip()
-        or str(makecall.get("DestUniqueid") or "").strip()
-        or None
+    event_id = _resolve_dialer_event_identity(
+        payload,
+        hangup=hangup,
+        makecall=makecall,
     )
     return [
         ChannelEventItem(
@@ -217,6 +235,18 @@ async def persist_channel_events(
         async with tx_context:
             await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
             for event in events:
+                if event.channel == "dialer":
+                    await db_session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": f"channel_event|{session_id}|{event.channel}|{event.event_id}"},
+                    )
+                    if await has_channel_event_identity(
+                        db_session,
+                        session_id=session_id,
+                        channel=event.channel,
+                        event_id=str(event.event_id),
+                    ):
+                        continue
                 was_inserted = await insert_channel_event(
                     db_session,
                     session_id=session_id,
@@ -232,20 +262,11 @@ async def persist_channel_events(
                         db_session,
                         flow_uuid=flow_uuid,
                     ):
-                        cdr_stored = await set_session_cdr(
+                        await set_session_cdr(
                             db_session,
                             session_id=session_id,
                             cdr=event.payload,
                         )
-                        if not cdr_stored and event.event_id is not None:
-                            await mark_channel_event_processed_by_identity(
-                                db_session,
-                                session_id=session_id,
-                                channel="dialer",
-                                event_type=event.event_type,
-                                event_id=event.event_id,
-                                discard_reason="finish_flow_webhook_already_succeeded",
-                            )
                     persisted += 1
     except Exception:
         logger.exception(
