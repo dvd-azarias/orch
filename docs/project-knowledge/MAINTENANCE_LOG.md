@@ -17,11 +17,16 @@ Incident remediation / `ALPHA_FIX_REQUIRED` (high risk: FileApp, Celery e migrat
 - O worker Tipo 1 carrega o `receipt_id` e registra `processing`, `completed` ou `failed` em modo best-effort.
 - O rescue reivindica o mesmo recibo antes de publicar; um recibo originado pelo webhook impede reingestão duplicada.
 - O recibo agora expõe explicitamente `should_enqueue`: uma primeira recepção e a retomada de `failed`/`enqueue_failed` publicam uma task; estados ativos ou concluídos permanecem replays idempotentes.
+- A correção residual remove o receipt de entrega Target Core da decisão de “ingestão existente”, recupera `accepted` stale após 60 segundos, registra `task_id` no enqueue do rescue e usa o batch como limite de ações, sem starvation por skips.
 
 ### VALIDATION
 
 - `pytest -q tests/test_fileapp_ingest_tasks.py tests/test_fileapp_entrada_rescue_task.py tests/test_migration_service.py`: 22 passed.
 - Após a correção de retomada: `pytest -q tests/test_fileapp_ingest_receipt_api.py tests/test_fileapp_entrada_rescue_task.py tests/test_fileapp_ingest_tasks.py`: 22 passed; `compileall` dos módulos alterados passou.
+- Runtime de produção após o merge `613ac46`: API `ready=true`; cinco workers FileApp ativos; 15 arquivos reenviados pela rota oficial retornaram `202 queued`, concluíram com receipts `completed` e foram encontrados em `monitoramento/upload/processados`; zero em `falha`, zero ausentes e zero restantes em `monitoramento/upload`.
+- O runtime também confirmou risco residual: `arquivos_s3_events` pode fazer o rescue marcar `done` sem `source_list`, mantendo o arquivo físico e causando starvation com batch `2`; registrado em `KNOWN_RISKS.md` R25.
+- Correção residual: 28 testes passaram; `compileall` passou; claim validado no PostgreSQL real com primeira aceitação, replay fresco bloqueado e reclaim stale permitido, tudo revertido por rollback.
+- Stack local completa subiu com filas `f5_local`, API/workers ficaram prontos e o smoke canônico dos dois flows passou. A stack foi encerrada e não restaram Uvicorn/Celery locais do repositório.
 - Validação de migration em DB real, subida da stack e E2E cruzado com Target Core permanecem pendentes.
 
 ### ROLLBACK

@@ -27,10 +27,19 @@ async def claim_fileapp_ingest_receipt(
             ON CONFLICT (flow_uuid, file_id) DO UPDATE
             SET status = 'accepted',
                 ingest_origin = EXCLUDED.ingest_origin,
+                folder_path = EXCLUDED.folder_path,
+                file_name = EXCLUDED.file_name,
                 accepted_at = NOW(),
+                task_id = NULL,
+                enqueued_at = NULL,
+                completed_at = NULL,
                 last_error = NULL,
                 updated_at = NOW()
             WHERE orch_fileapp_ingest_receipts.status IN ('failed', 'enqueue_failed')
+               OR (
+                    orch_fileapp_ingest_receipts.status = 'accepted'
+                    AND orch_fileapp_ingest_receipts.updated_at < NOW() - INTERVAL '60 seconds'
+                  )
             RETURNING id, status, task_id::text AS task_id, true AS should_enqueue
             """
         ),
