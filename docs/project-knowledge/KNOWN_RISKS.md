@@ -458,7 +458,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R25 — Rescue e higiene FileApp podem deixar arquivos antigos em starvation
 
-`STATUS`: CONFIRMED RUNTIME (2026-08-26)
+`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLEMENTADA, ROLLOUT PENDENTE (2026-08-26)
 
 `IMPACT`: high
 
@@ -466,11 +466,13 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `AFFECTED AREA`: FileApp entrada rescue/hygiene / Arquivos API
 
-`DESCRIPTION`: `_list_files_in_folder` solicita somente a primeira pagina (`offset=0`) e os reconciliadores usam o `*_BATCH_SIZE` como `limit`. A API de Arquivos retorna a pasta em ordem decrescente de criacao. No workspace `253148c7-a85f-42a3-bc8b-5ffd9d885efe`, com ambos os batches configurados em `2`, cada ciclo avaliava apenas os dois itens mais novos. Arquivos antigos do flow `652ee631-888e-46f9-843e-d80543051801` nunca receberam `arquivos_s3_events` ou `source_lists`; logo nao houve ingestao, tentativa ou movimentacao para `processados`/`falha`.
+`DESCRIPTION`: o risco possui dois mecanismos confirmados. O primeiro era a listagem parcial: `_list_files_in_folder` solicitava somente a primeira pagina (`offset=0`) e os reconciliadores usavam o `*_BATCH_SIZE` como `limit`; com a API em ordem decrescente, itens antigos nunca eram avaliados. O segundo permanece no rescue mesmo apos a paginacao: com batch `2`, dois itens antigos em estado Redis `in_flight`/`done` continuam ocupando toda selecao. Alem disso, `_has_fileapp_ingest_evidence` considera a mera existencia de `arquivos_s3_events` como evidencia suficiente e marca o flow como `done`, embora esse recibo possa comprovar somente entrega ao Orch e ainda nao existir `source_list`. O arquivo fisico permanece na entrada e bloqueia os seguintes.
 
 `RUNTIME EVIDENCE`: em 2026-08-26, a pasta `monitoramento/upload` continha 32 arquivos. A primeira pagina trazia `create_customer-5103-5103.csv` e os seguintes mais novos; os mais antigos, `create_customer-4699-4699.csv` e `create_customer-4701-4701.csv`, criados por volta de `09:50 UTC`, permaneciam sem qualquer evidencia no banco. Logs confirmaram repetidamente `files_scanned=2` e `skipped_recent=2`.
 
-`MITIGATION`: elevar provisoriamente o batch apenas apos medir capacidade e corrigir o reconciliador para paginação/seleção que alcance itens antigos. A correção precisa preservar idempotência por arquivo, limitar custo de API e impedir que mais de um beat percorra o mesmo backlog.
+Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na entrada. Os dois mais antigos estavam `accepted + in_flight`, sem atualizacao por mais de duas horas, e causavam starvation. Apos liberar os estados stale e reprocessar, dois itens sem `source_list` foram marcados `done` pelo rescue apenas por evidencia externa. O reenvio pela rota oficial idempotente reclamou os receipts falhos; um lote final de 15 arquivos obteve `202 queued`, terminou com 15 receipts `completed`, 15 arquivos em `processados`, zero em `falha` e zero restante na entrada.
+
+`MITIGATION`: a paginacao/ordenacao pelos mais antigos ja foi corrigida. O patch seguinte remove `arquivos_s3_events` da evidencia de ingestao, reclama `accepted` stale apos 60 segundos, faz o receipt duravel prevalecer sobre o estado Redis e trata o batch como limite de acoes; skips nao impedem a avaliacao dos itens seguintes. O rollout de producao e a validacao com arquivo real ainda estao pendentes. Ate la, a recuperacao controlada deve usar a rota oficial do Orch, que reclama apenas receipts falhos e preserva a idempotencia por `(flow_uuid, file_id)`.
 
 `DETECTION`: alarme quando a idade do arquivo mais antigo de uma pasta monitorada ultrapassar o SLA sem evento/source list; registrar `oldest_created_at`, pagina/offset e contagem de itens elegíveis por ciclo.
 
