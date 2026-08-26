@@ -38,6 +38,11 @@ from app.repositories.orch_flow_aliases_repository import (
     fetch_active_flow_alias,
     fetch_flow_alias_by_workspace_flow,
 )
+from app.repositories.orch_fileapp_ingest_receipts_repository import (
+    claim_fileapp_ingest_receipt,
+    mark_fileapp_ingest_receipt_enqueued,
+    mark_fileapp_ingest_receipt_status,
+)
 from app.repositories.orch_whatsapp_limits_repository import register_whatsapp_limit_event
 from app.repositories.orch_sessions_repository import (
     set_session_assigned_at_default,
@@ -303,16 +308,91 @@ async def _trigger_orch_for_workspace(
         and mapping_template_uuid
     ):
         extracted = extract_session_fields(app_name, payload)
-        task = ingest_fileapp_tipo1_event_task.apply_async(
+        file_payload = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+        file_id = str(file_payload.get("id") or "").strip()
+        folder_path = str(file_payload.get("folder_path") or "").strip().strip("/")
+        file_name = str(file_payload.get("original_name") or file_payload.get("name") or "").strip()
+        receipt: dict[str, Any] | None = None
+        try:
+            UUID(file_id)
+            safe_workspace_schema = workspace_schema.replace('"', '""')
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_workspace_schema}"'))
+            receipt = await claim_fileapp_ingest_receipt(
+                db_session,
+                flow_uuid=str(flow_uuid),
+                file_id=file_id,
+                folder_path=folder_path,
+                file_name=file_name,
+                ingest_origin="webhook",
+            )
+            # The claim must be durable before publishing: a replay may otherwise enqueue twice.
+            await db_session.commit()
+        except Exception:
+            # Receipt telemetry is fail-open: preserve the established immediate 202 path.
+            if db_session.in_transaction():
+                await db_session.rollback()
+            logger.exception(
+                "fileapp tipo1 ingest receipt unavailable",
+                extra={"workspace_uuid": safe_workspace_uuid, "flow_uuid": str(flow_uuid), "file_id": file_id},
+            )
+
+        if receipt is not None and not receipt["created"]:
+            logger.info(
+                "fileapp tipo1 ingest idempotent replay",
+                extra={
+                    "event": "orch.fileapp.tipo1.ingest.idempotent_replay",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": str(flow_uuid),
+                    "file_id": file_id,
+                    "receipt_id": receipt["id"],
+                    "task_id": receipt["task_id"],
+                    "origin": "webhook",
+                    "status": receipt["status"],
+                },
+            )
+            return OrchTriggerAccepted(
+                status="accepted",
+                accepted=True,
+                flow_uuid=str(flow_uuid),
+                app=app_name,
+                persistence="idempotent_replay",
+                extracted=extracted,
+                session_id=0,
+                session_uuid=str(receipt["task_id"] or ""),
+                session_state=0,
+                session_created=False,
+                workflow_execution={"mode": "async", "enqueued": False, "pipeline": "fileapp_tipo1_ingest", "receipt_id": receipt["id"], "task_id": receipt["task_id"]},
+            )
+
+        try:
+            task = ingest_fileapp_tipo1_event_task.apply_async(
             kwargs={
                 "workspace_uuid": safe_workspace_uuid,
                 "flow_uuid": str(flow_uuid),
                 "payload": payload,
                 "mapping_template_uuid": mapping_template_uuid,
+                "receipt_id": receipt["id"] if receipt is not None else None,
+                "ingest_origin": "webhook",
             },
             queue=settings.celery_s3_files_ingest_queue,
             routing_key=settings.celery_s3_files_ingest_queue,
-        )
+            )
+        except Exception:
+            if receipt is not None:
+                try:
+                    await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+                    await mark_fileapp_ingest_receipt_status(db_session, receipt_id=receipt["id"], status="enqueue_failed", error="Celery publish failed")
+                    await db_session.commit()
+                except Exception:
+                    logger.exception("fileapp tipo1 receipt enqueue failure persistence failed", extra={"receipt_id": receipt["id"]})
+            raise
+        if receipt is not None:
+            try:
+                await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+                await mark_fileapp_ingest_receipt_enqueued(db_session, receipt_id=receipt["id"], task_id=str(task.id))
+                await db_session.commit()
+            except Exception:
+                logger.exception("fileapp tipo1 receipt enqueue persistence failed", extra={"receipt_id": receipt["id"], "task_id": task.id})
         logger.info(
             "fileapp tipo1 ingest accepted",
             extra={
@@ -321,6 +401,9 @@ async def _trigger_orch_for_workspace(
                 "flow_uuid": str(flow_uuid),
                 "queue": settings.celery_s3_files_ingest_queue,
                 "task_id": task.id,
+                "file_id": file_id,
+                "receipt_id": receipt["id"] if receipt is not None else None,
+                "origin": "webhook",
                 "mapping_template_uuid": mapping_template_uuid,
             },
         )
