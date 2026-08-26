@@ -89,6 +89,110 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mailing_status", ["INGESTING", "PROCESSED"])
+async def test_run_tipo1_manual_pipeline_accepts_target_auto_ingest_race(
+    monkeypatch,
+    mailing_status: str,
+) -> None:
+    json_calls: list[tuple[str, str]] = []
+
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        return b"CPF,telefone\n20000000000,5521975670000\n"
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        json_calls.append((method, url))
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"is_ignored":false}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, f'{{"data":{{"status":"{mailing_status}"}}}}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                "original_name": "mailing.csv",
+                "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        workspace_api_key=None,
+        defer_step7_link_flow=True,
+    )
+
+    assert result["status"] == "done"
+    assert result["import_task_id"] is None
+    assert len(result["steps"]) == 7
+    assert result["steps"][5] == {
+        "step": "step6_import",
+        "status": "skipped",
+        "reason": "target_core_auto_ingest_active_or_done",
+        "mailing_status": mailing_status,
+    }
+    assert all(not url.endswith("/import") for _, url in json_calls)
+
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_rejects_non_progressing_mapping_status(monkeypatch) -> None:
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        return b"CPF,telefone\n20000000000,5521975670000\n"
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"is_ignored":false}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"PENDING_FIELD_MAPPING"}}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                    "original_name": "mailing.csv",
+                    "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            workspace_api_key=None,
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step5_put_field_mappings"
+    assert exc_info.value.details["mailing_status"] == "PENDING_FIELD_MAPPING"
+
+
+@pytest.mark.asyncio
 async def test_run_tipo1_manual_pipeline_fail_fast_when_template_not_found(monkeypatch) -> None:
     def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
         return b"CPF,telefone\n20000000000,5521975670000\n"

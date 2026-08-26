@@ -1144,11 +1144,12 @@ Headers utilizados:
   3. `GET /v2/mailings/{mailing_id}/field-mappings`
   4. `PATCH /v2/mailings/{mailing_id}` (aplica `mapping_template_id`)
   5. `PUT /v2/mailings/{mailing_id}/field-mappings`
-  6. `POST /v2/mailings/{mailing_id}/import`
+  6. `POST /v2/mailings/{mailing_id}/import`, somente quando o passo 5 ainda responde `READY_TO_INGEST`
   7. `POST /v2/flow/{flow_uuid}/mailings`
 
 Regra crítica:
-- no passo 5, o status precisa chegar em `READY_TO_INGEST` antes de avançar para import/vínculo.
+- o Target Core pode autoenfileirar a ingestão no passo 5 e responder `INGESTING` ou `PROCESSED`; esses estados comprovam avanço e o ORCH não deve publicar um segundo import.
+- estados diferentes de `READY_TO_INGEST`, `INGESTING` ou `PROCESSED` continuam sendo falha do passo 5.
 - no `tipo_1`, o ORCH não deve fazer escrita direta em `orch_sessions`; a carga segue o caminho do Target Core.
 
 ## Fase 12 — `process_whatsapp_response` com desvio de branch
