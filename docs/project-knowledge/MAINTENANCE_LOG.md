@@ -18,6 +18,7 @@ Incident remediation / `ALPHA_FIX_REQUIRED` (high risk: FileApp, Celery e migrat
 - O rescue reivindica o mesmo recibo antes de publicar; um recibo originado pelo webhook impede reingestão duplicada.
 - O recibo agora expõe explicitamente `should_enqueue`: uma primeira recepção e a retomada de `failed`/`enqueue_failed` publicam uma task; estados ativos ou concluídos permanecem replays idempotentes.
 - A correção residual remove o receipt de entrega Target Core da decisão de “ingestão existente”, recupera `accepted` stale após 60 segundos, registra `task_id` no enqueue do rescue e usa o batch como limite de ações, sem starvation por skips.
+- A correção da corrida do step 5 aceita `INGESTING`/`PROCESSED` como auto-ingestão já iniciada/concluída pelo Target Core e não publica um segundo import nesses estados; estados desconhecidos continuam fail-closed.
 
 ### VALIDATION
 
@@ -28,6 +29,7 @@ Incident remediation / `ALPHA_FIX_REQUIRED` (high risk: FileApp, Celery e migrat
 - Correção residual: 28 testes passaram; `compileall` passou; claim validado no PostgreSQL real com primeira aceitação, replay fresco bloqueado e reclaim stale permitido, tudo revertido por rollback.
 - Stack local completa subiu com filas `f5_local`, API/workers ficaram prontos e o smoke canônico dos dois flows passou. A stack foi encerrada e não restaram Uvicorn/Celery locais do repositório.
 - Validação de migration em DB real, subida da stack e E2E cruzado com Target Core permanecem pendentes.
+- Testes focados da corrida do step 5: `12 passed`; regressão FileApp ampliada: `73 passed`, cobrindo `READY_TO_INGEST`, `INGESTING`, `PROCESSED` e rejeição de estado regressivo; `compileall` passou. A stack local completa ficou pronta e o smoke canônico dos dois flows passou; nenhum processo local permaneceu ativo depois da validação.
 
 ### ROLLBACK
 

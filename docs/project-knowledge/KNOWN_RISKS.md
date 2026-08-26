@@ -458,7 +458,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R25 — Rescue e higiene FileApp podem deixar arquivos antigos em starvation
 
-`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLEMENTADA, ROLLOUT PENDENTE (2026-08-26)
+`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLANTADA (2026-08-26)
 
 `IMPACT`: high
 
@@ -472,8 +472,28 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na entrada. Os dois mais antigos estavam `accepted + in_flight`, sem atualizacao por mais de duas horas, e causavam starvation. Apos liberar os estados stale e reprocessar, dois itens sem `source_list` foram marcados `done` pelo rescue apenas por evidencia externa. O reenvio pela rota oficial idempotente reclamou os receipts falhos; um lote final de 15 arquivos obteve `202 queued`, terminou com 15 receipts `completed`, 15 arquivos em `processados`, zero em `falha` e zero restante na entrada.
 
-`MITIGATION`: a paginacao/ordenacao pelos mais antigos ja foi corrigida. O patch seguinte remove `arquivos_s3_events` da evidencia de ingestao, reclama `accepted` stale apos 60 segundos, faz o receipt duravel prevalecer sobre o estado Redis e trata o batch como limite de acoes; skips nao impedem a avaliacao dos itens seguintes. O rollout de producao e a validacao com arquivo real ainda estao pendentes. Ate la, a recuperacao controlada deve usar a rota oficial do Orch, que reclama apenas receipts falhos e preserva a idempotencia por `(flow_uuid, file_id)`.
+`MITIGATION`: a paginacao/ordenacao pelos mais antigos e a correcao residual foram implantadas. O rescue remove `arquivos_s3_events` da evidencia de ingestao, reclama `accepted` stale apos 60 segundos, faz o receipt duravel prevalecer sobre o estado Redis e trata o batch como limite de acoes; skips nao impedem a avaliacao dos itens seguintes. A recuperacao controlada deve usar a rota oficial do Orch, que reclama apenas receipts falhos e preserva a idempotencia por `(flow_uuid, file_id)`.
 
 `DETECTION`: alarme quando a idade do arquivo mais antigo de uma pasta monitorada ultrapassar o SLA sem evento/source list; registrar `oldest_created_at`, pagina/offset e contagem de itens elegíveis por ciclo.
 
 `V2`: claim persistente por arquivo e cursor/paginação durável, desacoplados da ordenação externa da listagem.
+
+## R26 — Corrida no status do mapping produz falso erro Tipo 1
+
+`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLEMENTADA, ROLLOUT PENDENTE (2026-08-26)
+
+`IMPACT`: high
+
+`PROBABILITY`: high sob workers Target Core rápidos
+
+`AFFECTED AREA`: FileApp tipo 1 / Target Core field mappings / pós-processamento
+
+`DESCRIPTION`: o `PUT /v2/mailings/{id}/field-mappings` do Target Core sincroniza os mappings e autoenfileira `source_list.ingest` quando existe template. Antes de o ORCH avaliar a resposta, o mailing pode avançar de `READY_TO_INGEST` para `INGESTING` ou `PROCESSED`. O ORCH exigia igualdade estrita com `READY_TO_INGEST`, registrava receipt `failed` e mantinha o arquivo na entrada até o rescue de 600 segundos, embora a entrega S3 e a ingestão Target já tivessem avançado.
+
+`RUNTIME EVIDENCE`: no workspace `253148c7-a85f-42a3-bc8b-5ffd9d885efe`, arquivos `create_customer-6687-6687.csv`, `create_customer-6763-6763.csv`, `create_customer-6764-6764.csv` e um terceiro arquivo subsequente tiveram callback aceito imediatamente e falharam no step 5 com HTTP 200 mais status `PROCESSED` ou `INGESTING`. O primeiro foi retomado pelo rescue exatamente após o grace e concluído em menos de um segundo.
+
+`MITIGATION`: aceitar somente `READY_TO_INGEST`, `INGESTING` e `PROCESSED` como estados válidos. Para `INGESTING`/`PROCESSED`, não publicar um segundo import; seguir para associação assíncrona, que já possui polling/retry até o estado final. Estados desconhecidos ou regressivos permanecem fail-closed.
+
+`DETECTION`: alertar receipt Tipo 1 `failed` com `reason=step5_put_field_mappings`, HTTP 2xx e mailing status avançado; correlacionar workspace, flow, file e receipt.
+
+`V2`: contrato explícito de ownership do auto-import e máquina de estados compartilhada entre ORCH e Target Core.

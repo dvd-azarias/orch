@@ -40,6 +40,7 @@ class FileAppTipo1ManualPipelineError(Exception):
 
 _FILE_DOWNLOAD_RETRY_ATTEMPTS = 5
 _FILE_DOWNLOAD_RETRY_INTERVAL_SECONDS = 15.0
+_AUTO_INGEST_ACTIVE_OR_DONE_STATUSES = {"INGESTING", "PROCESSED"}
 
 
 def _build_target_core_headers(
@@ -554,47 +555,59 @@ async def run_tipo1_manual_pipeline(
     put_response = _decode_json(body)
     put_data = put_response.get("data") if isinstance(put_response.get("data"), dict) else {}
     put_status = str(put_data.get("status") or "").strip().upper()
-    if status_code >= 400 or put_status != "READY_TO_INGEST":
+    accepted_put_statuses = {"READY_TO_INGEST", *_AUTO_INGEST_ACTIVE_OR_DONE_STATUSES}
+    if status_code >= 400 or put_status not in accepted_put_statuses:
         raise FileAppTipo1ManualPipelineError(
             step="step5_put_field_mappings",
-            message="Mailing não ficou em READY_TO_INGEST após PUT de field-mappings.",
+            message="Mailing não atingiu estado válido de ingestão após PUT de field-mappings.",
             details={"status_code": status_code, "mailing_status": put_status},
         )
     step_results.append({"step": "step5_put_field_mappings", "status_code": status_code, "mailing_status": put_status})
 
     # Step 6
-    import_payload = {
-        "mailing_id": mailing_uuid,
-        "mapping_template_id": mapping_template_uuid,
-        "use_mapping_as_template": False,
-        "mapping_template_name": None,
-    }
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="POST",
-            url=f"{base_url}/v2/mailings/{mailing_uuid}/import",
-            headers=json_headers,
-            payload=import_payload,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
+    import_task_id: str | None = None
+    if put_status in _AUTO_INGEST_ACTIVE_OR_DONE_STATUSES:
+        step_results.append(
+            {
+                "step": "step6_import",
+                "status": "skipped",
+                "reason": "target_core_auto_ingest_active_or_done",
+                "mailing_status": put_status,
+            }
         )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step6_import",
-            message=f"Import do mailing falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail, "mailing_uuid": mailing_uuid},
-        ) from exc
-    import_response = _decode_json(body)
-    import_data = import_response.get("data") if isinstance(import_response.get("data"), dict) else {}
-    import_task_id = str(import_data.get("task_id") or "").strip()
-    if status_code >= 400 or not import_task_id:
-        raise FileAppTipo1ManualPipelineError(
-            step="step6_import",
-            message="Import do mailing não retornou task_id válido.",
-            details={"status_code": status_code, "response_body": body, "mailing_uuid": mailing_uuid},
-        )
-    step_results.append({"step": "step6_import", "status_code": status_code, "import_task_id": import_task_id})
+    else:
+        import_payload = {
+            "mailing_id": mailing_uuid,
+            "mapping_template_id": mapping_template_uuid,
+            "use_mapping_as_template": False,
+            "mapping_template_name": None,
+        }
+        try:
+            status_code, body = await asyncio.to_thread(
+                _json_request,
+                method="POST",
+                url=f"{base_url}/v2/mailings/{mailing_uuid}/import",
+                headers=json_headers,
+                payload=import_payload,
+                timeout_seconds=settings.sync_ws_timeout_seconds,
+            )
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise FileAppTipo1ManualPipelineError(
+                step="step6_import",
+                message=f"Import do mailing falhou (HTTP {int(exc.code)}).",
+                details={"status_code": int(exc.code), "response_body": detail, "mailing_uuid": mailing_uuid},
+            ) from exc
+        import_response = _decode_json(body)
+        import_data = import_response.get("data") if isinstance(import_response.get("data"), dict) else {}
+        import_task_id = str(import_data.get("task_id") or "").strip()
+        if status_code >= 400 or not import_task_id:
+            raise FileAppTipo1ManualPipelineError(
+                step="step6_import",
+                message="Import do mailing não retornou task_id válido.",
+                details={"status_code": status_code, "response_body": body, "mailing_uuid": mailing_uuid},
+            )
+        step_results.append({"step": "step6_import", "status_code": status_code, "import_task_id": import_task_id})
 
     if defer_step7_link_flow:
         step_results.append(

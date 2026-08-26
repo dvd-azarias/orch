@@ -1,5 +1,31 @@
 # Historico de Incidentes
 
+## 2026-08-26 — FileApp aguardava rescue após status avançado no Target Core
+
+`STATUS`: ROOT CAUSE CONFIRMED / FIX IMPLEMENTED / ROLLOUT PENDING
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `253148c7-a85f-42a3-bc8b-5ffd9d885efe`
+
+`FLOW`: `652ee631-888e-46f9-843e-d80543051801`
+
+### Evidencia e causa
+
+Os callbacks S3 foram aceitos e persistidos em cerca de centenas de milissegundos, mas alguns arquivos permaneceram em `monitoramento/upload`. Os workers concluíram o pipeline como falha no `step5_put_field_mappings` em menos de um segundo: o PUT retornou HTTP 200 com mailing `INGESTING` ou `PROCESSED`, enquanto o ORCH exigia exatamente `READY_TO_INGEST`.
+
+O código do Target Core confirmou a corrida: `sync_mapping_status` muda para `READY_TO_INGEST` e publica `source_list.ingest` quando existe template. O worker pode avançar o mailing antes da serialização da resposta. Portanto, `INGESTING`/`PROCESSED` são progresso válido, não falha. O rescue retomava o receipt após 600 segundos e explicava a latência observada.
+
+### Correção
+
+O ORCH passa a aceitar `INGESTING`/`PROCESSED` no passo 5 e omite o POST de import nesses estados para não duplicar a ingestão já iniciada. `READY_TO_INGEST` preserva o caminho anterior; demais estados permanecem falha. A associação assíncrona continua responsável por aguardar o estado final antes do vínculo.
+
+### Validação
+
+Foram adicionados testes de regressão para `INGESTING`, `PROCESSED` e estado regressivo. A regressão FileApp passou com 73 testes; a stack local completa ficou pronta e o smoke canônico dos dois flows passou. Rollout e E2E de produção permanecem pendentes.
+
 ## 2026-08-24 — `linked_actuator` aplicado em membro de outra lista
 
 `STATUS`: CONFIRMED / FIX IMPLEMENTED BEHIND DEFAULT-OFF FLAG / RUNTIME VALIDATION PENDING
