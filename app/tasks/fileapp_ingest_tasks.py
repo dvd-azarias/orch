@@ -839,8 +839,8 @@ async def _list_files_in_folder(
     def _fetch_page(offset: int) -> list[dict[str, Any]]:
         from urllib.parse import urlencode
 
-        bounded_limit = min(100, max(1, int(limit)))
-        params = urlencode({"prefix": f"{folder_path}/", "limit": bounded_limit, "offset": max(0, int(offset))})
+        page_size = 100
+        params = urlencode({"prefix": f"{folder_path}/", "limit": page_size, "offset": max(0, int(offset))})
         request = Request(f"{base_url}/files/list?{params}", headers=headers, method="GET")
         with urlopen(request, timeout=max(2, int(settings.sync_ws_timeout_seconds))) as response:
             body = response.read().decode("utf-8", errors="replace")
@@ -857,7 +857,25 @@ async def _list_files_in_folder(
         return []
 
     try:
-        first_page = await asyncio.to_thread(_fetch_page, 0)
+        listed_files: list[dict[str, Any]] = []
+        seen_file_keys: set[str] = set()
+        offset = 0
+        while True:
+            page = await asyncio.to_thread(_fetch_page, offset)
+            if not page:
+                break
+            new_items = 0
+            for item in page:
+                file_id = str(item.get("id") or item.get("uuid") or "").strip()
+                file_key = file_id or json.dumps(item, sort_keys=True, default=str)
+                if file_key in seen_file_keys:
+                    continue
+                seen_file_keys.add(file_key)
+                listed_files.append(item)
+                new_items += 1
+            if len(page) < 100 or new_items == 0:
+                break
+            offset += len(page)
     except HTTPError as exc:
         error_body = ""
         try:
@@ -889,7 +907,29 @@ async def _list_files_in_folder(
             },
         )
         return []
-    return first_page
+    return listed_files
+
+
+def _select_oldest_files_in_folder(
+    listed_files: list[dict[str, Any]],
+    *,
+    folder_path: str,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    eligible_files: list[tuple[datetime, int, dict[str, Any]]] = []
+    normalized_folder = str(folder_path or "").strip().strip("/")
+    for index, file_item in enumerate(listed_files):
+        file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
+        original_name = str(
+            file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""
+        ).strip()
+        listed_folder = str(file_item.get("folder_path") or file_item.get("path") or normalized_folder).strip().strip("/")
+        created_at = _parse_file_datetime(file_item.get("created_at")) or _parse_file_datetime(file_item.get("updated_at"))
+        if not file_id or not original_name or listed_folder != normalized_folder or created_at is None:
+            continue
+        eligible_files.append((created_at, index, file_item))
+    eligible_files.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in eligible_files[: max(1, int(batch_size))]]
 
 
 async def _fetch_file_metadata_by_id(
@@ -2302,7 +2342,11 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                     workspace_api_key=workspace_api_key,
                     limit=settings.celery_fileapp_entrada_rescue_batch_size,
                 )
-                for file_item in listed_files:
+                for file_item in _select_oldest_files_in_folder(
+                    listed_files,
+                    folder_path=folder_path,
+                    batch_size=settings.celery_fileapp_entrada_rescue_batch_size,
+                ):
                     file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
                     original_name = str(
                         file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""
@@ -2622,7 +2666,11 @@ async def _reconcile_fileapp_entrada_hygiene_task() -> dict[str, int]:
                     workspace_api_key=workspace_api_key,
                     limit=settings.celery_fileapp_entrada_hygiene_batch_size,
                 )
-                for file_item in listed_files:
+                for file_item in _select_oldest_files_in_folder(
+                    listed_files,
+                    folder_path=folder_path,
+                    batch_size=settings.celery_fileapp_entrada_hygiene_batch_size,
+                ):
                     file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
                     original_name = str(
                         file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""

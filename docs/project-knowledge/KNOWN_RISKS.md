@@ -455,3 +455,23 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `MITIGATION`: manter o destino rapido e respeitar a `Idempotency-Key` enviada pelo ORCH, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR permanece um objeto transitorio por vez na sessao, selecionado no ledger e removido da memoria somente apos `2xx`; uma sessao Dialer pode emitir um POST por CDR distinto, enquanto o marcador do ledger impede replay do mesmo evento.
 
 `V2`: avaliar entrega transacional/idempotente fora do caminho critico caso a garantia operacional passe a exigir retry.
+
+## R25 — Rescue e higiene FileApp podem deixar arquivos antigos em starvation
+
+`STATUS`: CONFIRMED RUNTIME (2026-08-26)
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando a pasta recebe arquivos continuamente e o batch e menor que o backlog
+
+`AFFECTED AREA`: FileApp entrada rescue/hygiene / Arquivos API
+
+`DESCRIPTION`: `_list_files_in_folder` solicita somente a primeira pagina (`offset=0`) e os reconciliadores usam o `*_BATCH_SIZE` como `limit`. A API de Arquivos retorna a pasta em ordem decrescente de criacao. No workspace `253148c7-a85f-42a3-bc8b-5ffd9d885efe`, com ambos os batches configurados em `2`, cada ciclo avaliava apenas os dois itens mais novos. Arquivos antigos do flow `652ee631-888e-46f9-843e-d80543051801` nunca receberam `arquivos_s3_events` ou `source_lists`; logo nao houve ingestao, tentativa ou movimentacao para `processados`/`falha`.
+
+`RUNTIME EVIDENCE`: em 2026-08-26, a pasta `monitoramento/upload` continha 32 arquivos. A primeira pagina trazia `create_customer-5103-5103.csv` e os seguintes mais novos; os mais antigos, `create_customer-4699-4699.csv` e `create_customer-4701-4701.csv`, criados por volta de `09:50 UTC`, permaneciam sem qualquer evidencia no banco. Logs confirmaram repetidamente `files_scanned=2` e `skipped_recent=2`.
+
+`MITIGATION`: elevar provisoriamente o batch apenas apos medir capacidade e corrigir o reconciliador para paginação/seleção que alcance itens antigos. A correção precisa preservar idempotência por arquivo, limitar custo de API e impedir que mais de um beat percorra o mesmo backlog.
+
+`DETECTION`: alarme quando a idade do arquivo mais antigo de uma pasta monitorada ultrapassar o SLA sem evento/source list; registrar `oldest_created_at`, pagina/offset e contagem de itens elegíveis por ciclo.
+
+`V2`: claim persistente por arquivo e cursor/paginação durável, desacoplados da ordenação externa da listagem.
