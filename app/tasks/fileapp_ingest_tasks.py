@@ -2593,7 +2593,7 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                             file_name=original_name,
                             ingest_origin="rescue",
                         )
-                        if receipt is not None and not receipt["created"]:
+                        if receipt is not None and not receipt["should_enqueue"]:
                             logger.info(
                                 "fileapp rescue skipped existing receipt",
                                 extra={

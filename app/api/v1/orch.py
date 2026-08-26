@@ -336,7 +336,7 @@ async def _trigger_orch_for_workspace(
                 extra={"workspace_uuid": safe_workspace_uuid, "flow_uuid": str(flow_uuid), "file_id": file_id},
             )
 
-        if receipt is not None and not receipt["created"]:
+        if receipt is not None and not receipt["should_enqueue"]:
             logger.info(
                 "fileapp tipo1 ingest idempotent replay",
                 extra={

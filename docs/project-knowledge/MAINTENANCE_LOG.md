@@ -16,10 +16,12 @@ Incident remediation / `ALPHA_FIX_REQUIRED` (high risk: FileApp, Celery e migrat
 - O trigger Tipo 1 reivindica e confirma o recibo antes de publicar no Celery; replays em estados ativos/terminais retornam `202` idempotente sem novo enqueue.
 - O worker Tipo 1 carrega o `receipt_id` e registra `processing`, `completed` ou `failed` em modo best-effort.
 - O rescue reivindica o mesmo recibo antes de publicar; um recibo originado pelo webhook impede reingestão duplicada.
+- O recibo agora expõe explicitamente `should_enqueue`: uma primeira recepção e a retomada de `failed`/`enqueue_failed` publicam uma task; estados ativos ou concluídos permanecem replays idempotentes.
 
 ### VALIDATION
 
 - `pytest -q tests/test_fileapp_ingest_tasks.py tests/test_fileapp_entrada_rescue_task.py tests/test_migration_service.py`: 22 passed.
+- Após a correção de retomada: `pytest -q tests/test_fileapp_ingest_receipt_api.py tests/test_fileapp_entrada_rescue_task.py tests/test_fileapp_ingest_tasks.py`: 22 passed; `compileall` dos módulos alterados passou.
 - Validação de migration em DB real, subida da stack e E2E cruzado com Target Core permanecem pendentes.
 
 ### ROLLBACK

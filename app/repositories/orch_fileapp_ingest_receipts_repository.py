@@ -31,7 +31,7 @@ async def claim_fileapp_ingest_receipt(
                 last_error = NULL,
                 updated_at = NOW()
             WHERE orch_fileapp_ingest_receipts.status IN ('failed', 'enqueue_failed')
-            RETURNING id, status, task_id::text AS task_id, (xmax = 0) AS created
+            RETURNING id, status, task_id::text AS task_id, true AS should_enqueue
             """
         ),
         {
@@ -49,7 +49,7 @@ async def claim_fileapp_ingest_receipt(
     existing = await db_session.execute(
         text(
             """
-            SELECT id, status, task_id::text AS task_id, false AS created
+            SELECT id, status, task_id::text AS task_id, false AS should_enqueue
             FROM orch_fileapp_ingest_receipts
             WHERE flow_uuid = CAST(:flow_uuid AS uuid)
               AND file_id = CAST(:file_id AS uuid)
