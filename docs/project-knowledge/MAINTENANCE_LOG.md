@@ -1,5 +1,31 @@
 # Maintenance Log
 
+## 2026-08-26 — Recibo idempotente para entrega imediata FileApp
+
+### REQUEST
+
+Eliminar a dependência operacional do rescue de 10 minutos para eventos S3/FileApp do fluxo crítico, mantendo o rescue como rede de segurança.
+
+### TASK TYPE / CLASSIFICATION
+
+Incident remediation / `ALPHA_FIX_REQUIRED` (high risk: FileApp, Celery e migration multi-workspace).
+
+### CHANGE
+
+- A migration `0021_create_fileapp_ingest_receipts` cria um recibo por `(flow_uuid, file_id)` no schema do workspace.
+- O trigger Tipo 1 reivindica e confirma o recibo antes de publicar no Celery; replays em estados ativos/terminais retornam `202` idempotente sem novo enqueue.
+- O worker Tipo 1 carrega o `receipt_id` e registra `processing`, `completed` ou `failed` em modo best-effort.
+- O rescue reivindica o mesmo recibo antes de publicar; um recibo originado pelo webhook impede reingestão duplicada.
+
+### VALIDATION
+
+- `pytest -q tests/test_fileapp_ingest_tasks.py tests/test_fileapp_entrada_rescue_task.py tests/test_migration_service.py`: 22 passed.
+- Validação de migration em DB real, subida da stack e E2E cruzado com Target Core permanecem pendentes.
+
+### ROLLBACK
+
+Desabilitar a migration/código desta entrega antes do rollout; após a migration ser aplicada, preservar a tabela e reverter apenas os consumidores para manter os recibos auditáveis.
+
 ## 2026-08-24 — Primeiro onboarding formal do Project Steward
 
 ### REQUEST

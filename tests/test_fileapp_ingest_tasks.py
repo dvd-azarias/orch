@@ -16,6 +16,7 @@ from app.tasks.fileapp_ingest_tasks import (
     _process_fileapp_tipo1_event_task,
     ingest_fileapp_event_task,
     process_fileapp_tipo1_event_task,
+    ingest_fileapp_tipo1_event_task,
 )
 
 
@@ -88,6 +89,50 @@ def test_ingest_fileapp_event_task_enqueues_processing(monkeypatch) -> None:
     settings = get_settings()
     assert captured["queue"] == settings.celery_source_list_ingest_queue
     assert captured["routing_key"] == settings.celery_source_list_ingest_queue
+
+
+def test_ingest_tipo1_propagates_receipt_to_processing_task(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _QueuedTask:
+        id = "process-123"
+
+    def _fake_apply_async(*, kwargs, queue, routing_key):  # type: ignore[no-untyped-def]
+        captured["kwargs"] = kwargs
+        captured["queue"] = queue
+        captured["routing_key"] = routing_key
+        return _QueuedTask()
+
+    receipt_status = AsyncMock()
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.process_fileapp_tipo1_event_task.apply_async",
+        _fake_apply_async,
+    )
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_status", receipt_status)
+
+    result = ingest_fileapp_tipo1_event_task.run(
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="706c6fef-85f2-4276-bcfd-eb28f75acde2",
+        payload={"file": {"id": "f1", "original_name": "x.csv", "folder_path": "mailings/dev"}},
+        mapping_template_uuid="6fa7bde7-fa2f-49fd-9de8-d1969f6e835b",
+        receipt_id=77,
+        ingest_origin="rescue",
+    )
+
+    assert result["task_id"] == "process-123"
+    assert captured["kwargs"] == {
+        "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        "flow_uuid": "706c6fef-85f2-4276-bcfd-eb28f75acde2",
+        "payload": {"file": {"id": "f1", "original_name": "x.csv", "folder_path": "mailings/dev"}},
+        "mapping_template_uuid": "6fa7bde7-fa2f-49fd-9de8-d1969f6e835b",
+        "receipt_id": 77,
+        "ingest_origin": "rescue",
+    }
+    receipt_status.assert_awaited_once_with(
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        receipt_id=77,
+        status="processing",
+    )
 
 
 @pytest.mark.asyncio
