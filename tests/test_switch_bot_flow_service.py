@@ -131,7 +131,7 @@ def test_deliver_meta_payload_posts_original_json_content(monkeypatch) -> None:
 
     assert captured["method"] == "POST"
     assert captured["payload"] == payload
-    assert captured["url"].endswith("/v5/runner/tokens/runner-token/webhook/session")
+    assert captured["url"].endswith("/v5/runner/tokens/runner-token/whatsapp/session")
     assert result.status_code == 202
     assert result.session_id == "target-session-1"
 

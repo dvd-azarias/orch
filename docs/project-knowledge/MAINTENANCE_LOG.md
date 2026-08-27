@@ -26,6 +26,16 @@ Feature operacional isolada / `ALPHA_FIX_OPTIONAL`; blast radius contido por car
 - Stack local completa subiu com `orch_switch_bot_flow_f5_local`; worker registrou a task e o smoke encadeado dos dois flows retornou aceite.
 - POST real ao Runner, resposta do BOT via Meta e callback terminal permanecem pendentes de canario controlado para evitar mensagem externa acidental.
 
+### CANARIO DE PRODUCAO — 2026-08-27
+
+- O template anterior ao card chegou ao contato, confirmando ausencia de regressao no caminho existente.
+- O POST real ao Runner foi aceito e a engine gerou resposta, mas cada payload criou uma sessao nova porque o token usava `session_key=chat.id` e a entrada foi classificada como provider `webhook`.
+- Todos os dispatches do BOT terminaram em `missing_integration`; nenhuma resposta chegou a Meta.
+- O ORCH detectou a troca de `session_id`, persistiu `switch_bot_flow_runner_session_mismatch` e percorreu o branch de excecao como projetado.
+- Auditoria read-only posterior confirmou que o provider e definido pela URL. O ORCH usou `/webhook/session`, enquanto `/whatsapp/session` ja interpreta o envelope Meta, mantem a identidade pelo `wa_id` e despacha pela API WhatsApp generica configurada nos hosts Target Core; nao foi identificada necessidade de alterar o codigo do Target Core antes do proximo canario.
+- Diagnostico completo em `INCIDENT_HISTORY.md` e risco `R28` em `KNOWN_RISKS.md`. Nenhum ajuste funcional ou de producao foi feito durante a investigacao.
+- Correcao preparada no ORCH: troca cirurgica do provider da URL para `whatsapp`, sem alterar payload, retry, correlacao local ou contratos dos demais cards. Deploy e novo canario permanecem pendentes.
+
 ### ROLLBACK
 
 Definir `SWITCH_BOT_FLOW_ENABLED=false` e reiniciar API/worker. Flows sem o novo card e o comportamento de `run_flow` permanecem inalterados.

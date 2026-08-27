@@ -36,7 +36,7 @@ Autenticacao usa bearer preferencial ou API key do workspace. Segredos nao devem
 
 ## Target Core — Runner v5 / `switch_bot_flow`
 
-O ORCH consulta `GET /v2/flow/{flow_uuid}?compact=true` com bearer e `X-WORKSPACE-UUID`, lê `data.summary.runner_token` e o cacheia por workspace/flow. Cada mensagem de usuario e enviada a `POST /v5/runner/tokens/{runner_token}/webhook/session` com o conteúdo JSON Meta original; o token fica somente na URL e não deve aparecer em logs.
+O ORCH consulta `GET /v2/flow/{flow_uuid}?compact=true` com bearer e `X-WORKSPACE-UUID`, lê `data.summary.runner_token` e o cacheia por workspace/flow. Cada mensagem de usuario e enviada a `POST /v5/runner/tokens/{runner_token}/whatsapp/session` com o conteúdo JSON Meta original; o token fica somente na URL e não deve aparecer em logs. O segmento `whatsapp` e contratual: ele faz o Runner extrair o `wa_id`, manter a identidade da sessao e despachar pela API WhatsApp generica configurada no Target Core, sem exigir integracao ligada ao flow BOT.
 
 O primeiro `202` precisa devolver `session_id`, persistido como identidade da sessao BOT. Mensagens seguintes usam o mesmo endpoint e precisam manter a mesma identidade. O BOT responde diretamente a Meta; o ORCH atua apenas no sentido ORCH -> BOT.
 

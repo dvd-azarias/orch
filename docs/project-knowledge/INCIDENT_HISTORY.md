@@ -266,3 +266,44 @@ Somente consultas read-only, inspecao de systemd/journal, passive queue declare,
 ### Correcao preparada
 
 No branch `fix/blocked-whatsapp-interactive-loop`, o dispatcher passou a tratar `blocked_send_whatsapp_interactive` como bloqueio em execucao e a persistir `state=1`. Teste de regressao e 103 testes focados passaram; revisao independente deu `GO`. O incidente permanece aberto ate deploy e comprovacao de que as sessoes quentes deixam de gerar novas tasks depois da primeira execucao corrigida.
+
+## 2026-08-27 — Canario `switch_bot_flow` fragmentou sessoes no Runner e nao despachou respostas
+
+`STATUS`: ROOT CAUSE CONFIRMED / FIX PREPARED
+
+`SEVERITY`: high para a funcionalidade; sem regressao no envio ORCH existente
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED` para habilitar o novo card
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60`
+
+`ORCH FLOW`: `d3c79b7c-4726-46d0-a787-d99e590242b7`
+
+`BOT FLOW`: `8cbcb24a-975d-42bf-9173-195a2a5a7bde`
+
+`CONTACT`: `5511975620806`
+
+### Evidencia confirmada
+
+- O envio anterior ao handoff nao regrediu: o template ORCH chegou ao contato.
+- As sessoes ORCH `7080` e `7081` alcancaram o card `switch_bot_flow`; o primeiro payload de cada uma recebeu HTTP `202` e persistiu respectivamente os Runner session IDs `4c9ff84e-85f8-4517-867f-18be87f72d72` e `1ef56eee-ba03-46e8-bab9-f0b69ba86816`.
+- O evento seguinte de cada sessao recebeu outro HTTP `202`, mas criou respectivamente `3e78905e-02d8-4062-b30d-b852353d50a4` e `69685851-d266-4a5a-a66d-23eab5508398`.
+- O ORCH detectou corretamente a troca de identidade, persistiu `switch_bot_flow_runner_session_mismatch`, marcou os eventos como `switch_bot_flow_delivery_failed` e seguiu pelo branch `exception_jqghl8z9s` ate `finish_flow`.
+- No Runner v5, as quatro interacoes percorreram ingest, fila e engine. Cada uma gerou a resposta BOT `Olá! Boa tarde! Por favor, responda alguma coisa:`, mas todos os dispatches terminaram em `missing_integration`, sem `provider_msg_id`.
+- O token do BOT estava em `engine_version=v5`, `session_key=chat.id` e possuia referencia de integracao WhatsApp, mas sem token/hash de provider. As sessoes foram classificadas como provider `webhook`, com `external_chat_id` aleatorio e `user_external_id=NULL`.
+
+### Causa raiz
+
+O provider do Runner v5 e selecionado pelo segmento da URL, nao autodetectado pelo corpo. O ORCH chamou `/v5/runner/tokens/{token}/webhook/session`; portanto, mesmo recebendo um payload Meta valido, o Target Core executou deliberadamente o caminho generico `webhook`. Nesse caminho, `chat.id` nao existe no payload, cada POST ganhou um `external_session_id` novo e o dispatch procurou uma integracao webhook do flow, terminando em `missing_integration`.
+
+O caminho ja existente `/v5/runner/tokens/{token}/whatsapp/session` desembrulha o envelope oficial `entry[].changes[].value`, usa `messages[].from`/`contacts[].wa_id` como identidade estavel e extrai `metadata.display_phone_number` ou `metadata.phone_number_id` como numero de origem. Seu dispatch usa a API WhatsApp generica configurada no ambiente, sem exigir integracao WhatsApp ligada ao flow. As configuracoes globais necessarias estao presentes nos hosts Target Core auditados. Assim, a menor correcao indicada e trocar apenas o provider na URL chamada pelo ORCH; nenhuma mudanca no codigo do Target Core foi identificada como necessaria antes do proximo canario.
+
+Remover no ORCH a validacao de `session_id` apenas esconderia a fragmentacao e continua contraindicado.
+
+### Acoes executadas
+
+Somente consultas read-only a `orch_sessions`, `orch_channel_events`, `orch_session_metrics`, `target.runner_v5_interaction_step`, `runner_v5_chat_session` e `runner_v5_chat_message`, seguidas de auditoria read-only do codigo implantado e da presenca das configuracoes WhatsApp nos hosts Target Core. Nenhum dado, flow, token, servico ou fila foi alterado.
+
+### Correcao preparada
+
+No ORCH, o relay passou a chamar `/v5/runner/tokens/{token}/whatsapp/session`; o payload original, cache do token, retries, guard de `session_id` e branch de excecao permaneceram inalterados. A correcao ainda depende de deploy e novo canario E2E.
