@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import app.repositories.orch_sessions_repository as repository
 
 from app.repositories.orch_sessions_repository import (
     DialerStatusTimestamps,
     WhatsappStatusTimestamps,
     _compute_effective_whatsapp_limit,
     _derive_state_update,
+    apply_switch_bot_flow_callback,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
     persist_run_flow_event_for_recent_entity_address,
@@ -162,6 +164,123 @@ async def test_fetch_session_webhook_snapshot_uses_complete_database_row() -> No
 
     assert "to_jsonb(session_row)" in session.statement
     assert snapshot == {"id": 6941, "entity_address": "5511975620806"}
+
+
+class _CallbackResult:
+    def __init__(self, *, scalar_value=None, row=None) -> None:  # noqa: ANN001
+        self.scalar_value = scalar_value
+        self.row = row
+
+    def scalar(self):  # noqa: ANN201
+        return self.scalar_value
+
+    def mappings(self) -> "_CallbackResult":
+        return self
+
+    def first(self):  # noqa: ANN201
+        return self.row
+
+
+class _CallbackSession:
+    def __init__(self, results: list[_CallbackResult]) -> None:
+        self.results = results
+
+    async def execute(self, _statement, _parameters=None) -> _CallbackResult:  # noqa: ANN001
+        return self.results.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_apply_switch_bot_flow_callback_marks_handoff_completed(monkeypatch) -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "switch_bot_flow": {
+                "status": "active",
+                "target_session_id": "target-session-1",
+            }
+        }
+    }
+    session = _CallbackSession(
+        [
+            _CallbackResult(scalar_value=7001),
+            _CallbackResult(),
+            _CallbackResult(
+                row={
+                    "id": 7001,
+                    "uuid": "orch-session-uuid",
+                    "runtime_variables": runtime_variables,
+                    "last_card_uuid": "11111111-1111-1111-1111-111111111111",
+                    "next_card_uuid": "11111111-1111-1111-1111-111111111111",
+                }
+            ),
+        ]
+    )
+    captured: dict = {}
+
+    async def _replace(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+
+    monkeypatch.setattr(repository, "replace_session_workflow_state", _replace)
+    result = await apply_switch_bot_flow_callback(
+        session,  # type: ignore[arg-type]
+        flow_uuid="d3c79b7c-4726-46d0-a787-d99e590242b7",
+        target_session_id="target-session-1",
+        terminal_status="completed",
+        callback_payload={"session_id": "target-session-1", "status": "success"},
+    )
+
+    assert result == {
+        "session_id": 7001,
+        "session_uuid": "orch-session-uuid",
+        "idempotent": False,
+        "status": "completed",
+    }
+    assert captured["runtime_variables"]["workflow_v2"]["switch_bot_flow"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_apply_switch_bot_flow_callback_keeps_first_terminal_status(monkeypatch) -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "switch_bot_flow": {
+                "status": "completed",
+                "target_session_id": "target-session-1",
+            }
+        }
+    }
+    session = _CallbackSession(
+        [
+            _CallbackResult(scalar_value=7001),
+            _CallbackResult(),
+            _CallbackResult(
+                row={
+                    "id": 7001,
+                    "uuid": "orch-session-uuid",
+                    "runtime_variables": runtime_variables,
+                    "last_card_uuid": "11111111-1111-1111-1111-111111111111",
+                    "next_card_uuid": "11111111-1111-1111-1111-111111111111",
+                }
+            ),
+        ]
+    )
+
+    async def _unexpected_replace(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("callback terminal tardio não deve alterar o handoff")
+
+    monkeypatch.setattr(repository, "replace_session_workflow_state", _unexpected_replace)
+    result = await apply_switch_bot_flow_callback(
+        session,  # type: ignore[arg-type]
+        flow_uuid="d3c79b7c-4726-46d0-a787-d99e590242b7",
+        target_session_id="target-session-1",
+        terminal_status="failed",
+        callback_payload={"session_id": "target-session-1", "status": "failed"},
+    )
+
+    assert result == {
+        "session_id": 7001,
+        "session_uuid": "orch-session-uuid",
+        "idempotent": True,
+        "status": "completed",
+    }
 
 
 @pytest.mark.asyncio

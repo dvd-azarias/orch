@@ -35,6 +35,7 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 |---|---|---|---|
 | dispatch | `orch_dispatch` | `orch_dispatch_launchd_local` | `orch_dispatch_f5_local` |
 | execute | `orch_execute` | `orch_execute_launchd_local` | `orch_execute_f5_local` |
+| switch BOT flow | `orch_switch_bot_flow` | `orch_switch_bot_flow_launchd_local` | `orch_switch_bot_flow_f5_local` |
 | heartbeat | `orch_heartbeat` | `orch_heartbeat_launchd_local` | `orch_heartbeat_f5_local` |
 | FileApp ingest | `orch_fileapp_ingest_events` | `orch_fileapp_ingest_launchd_local` | `orch_fileapp_ingest_f5_local` |
 | FileApp process | `orch_fileapp_source_list_ingest` | `orch_fileapp_source_list_launchd_local` | `orch_fileapp_source_list_f5_local` |
@@ -64,6 +65,7 @@ Defaults importantes:
 
 - Files: `ARQUIVOS_*` e `SYNC_WS_*`.
 - Target Core: `SYNC_WEBHOOK_BASE_URL`, bearer configuravel e timeout `SYNC_WS_TIMEOUT_SECONDS`.
+- `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 
 ## Workspace e docs

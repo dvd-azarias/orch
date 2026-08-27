@@ -35,6 +35,7 @@ class Settings:
     celery_dispatch_batch_size: int
     celery_dispatch_queue: str
     celery_execute_queue: str
+    celery_switch_bot_flow_queue: str
     celery_heartbeat_queue: str
     celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
@@ -105,7 +106,12 @@ class Settings:
     arquivos_base_url: str | None
     sync_webhook_base_url: str | None
     sync_ws_timeout_seconds: float
+    target_core_api_base_url: str | None
     target_core_api_bearer_token: str | None
+    switch_bot_flow_enabled: bool
+    switch_bot_flow_http_timeout_seconds: float
+    switch_bot_flow_max_attempts: int
+    switch_bot_flow_retry_backoff_seconds: float
     otima_llm_api_base_url: str | None
     otima_llm_api_gateway: str | None
     otima_llm_api_key: str | None
@@ -216,6 +222,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
     base = {
         "dispatch": "orch_dispatch",
         "execute": "orch_execute",
+        "switch_bot_flow": "orch_switch_bot_flow",
         "heartbeat": "orch_heartbeat",
         "fileapp_ingest": "orch_fileapp_ingest_events",
         "fileapp_process": "orch_fileapp_source_list_ingest",
@@ -231,6 +238,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         mapping = {
             "dispatch": "orch_dispatch_launchd_local",
             "execute": "orch_execute_launchd_local",
+            "switch_bot_flow": "orch_switch_bot_flow_launchd_local",
             "heartbeat": "orch_heartbeat_launchd_local",
             "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
             "fileapp_process": "orch_fileapp_source_list_launchd_local",
@@ -243,6 +251,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         mapping = {
             "dispatch": "orch_dispatch_f5_local",
             "execute": "orch_execute_f5_local",
+            "switch_bot_flow": "orch_switch_bot_flow_f5_local",
             "heartbeat": "orch_heartbeat_f5_local",
             "fileapp_ingest": "orch_fileapp_ingest_f5_local",
             "fileapp_process": "orch_fileapp_source_list_f5_local",
@@ -308,6 +317,13 @@ def get_settings() -> Settings:
         celery_execute_queue=(
             _read_env_optional("CELERY_EXECUTE_QUEUE", _default_queue_by_profile(queue_profile, "execute"))
             or _default_queue_by_profile(queue_profile, "execute")
+        ),
+        celery_switch_bot_flow_queue=(
+            _read_env_optional(
+                "CELERY_SWITCH_BOT_FLOW_QUEUE",
+                _default_queue_by_profile(queue_profile, "switch_bot_flow"),
+            )
+            or _default_queue_by_profile(queue_profile, "switch_bot_flow")
         ),
         celery_heartbeat_queue=(
             _read_env_optional("CELERY_HEARTBEAT_QUEUE", _default_queue_by_profile(queue_profile, "heartbeat"))
@@ -480,9 +496,25 @@ def get_settings() -> Settings:
         arquivos_base_url=_read_env_optional("ARQUIVOS_BASE_URL"),
         sync_webhook_base_url=_read_env_optional("SYNC_WEBHOOK_BASE_URL"),
         sync_ws_timeout_seconds=float(_read_env_optional("SYNC_WS_TIMEOUT_SECONDS", "5") or "5"),
+        target_core_api_base_url=(
+            _read_env_optional("TARGET_CORE_API_BASE_URL")
+            or _read_env_optional("SYNC_WEBHOOK_BASE_URL")
+        ),
         target_core_api_bearer_token=(
             _read_env_optional("TARGET_CORE_API_BEARER_TOKEN")
             or _read_env_optional("SYNC_WEBHOOK_BEARER_TOKEN")
+        ),
+        switch_bot_flow_enabled=_read_env_bool("SWITCH_BOT_FLOW_ENABLED", False),
+        switch_bot_flow_http_timeout_seconds=float(
+            _read_env_optional("SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS", "30") or "30"
+        ),
+        switch_bot_flow_max_attempts=max(
+            1,
+            min(_read_env_int("SWITCH_BOT_FLOW_MAX_ATTEMPTS", 3), 5),
+        ),
+        switch_bot_flow_retry_backoff_seconds=max(
+            0.0,
+            float(_read_env_optional("SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS", "1") or "1"),
         ),
         otima_llm_api_base_url=_read_env_optional("OTIMA_LLM_API_BASE_URL"),
         otima_llm_api_gateway=_read_env_optional("OTIMA_LLM_API_GATEWAY"),
