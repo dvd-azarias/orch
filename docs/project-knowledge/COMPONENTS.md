@@ -21,6 +21,8 @@
 - `app/services/workflow_m2_service.py`: motor e componentes.
 - `app/services/workflow_dispatcher_service.py`: claim e classificacao de parada.
 - `app/tasks/workflow_tasks.py`: dispatch, execute, heartbeat e reconciliacao de eventos.
+- `app/services/switch_bot_flow_service.py`: resolve/cacheia `runner_token`, valida payload Meta e chama o Runner v5.
+- `app/tasks/switch_bot_flow_tasks.py`: relay assincrono e serializado dos eventos de usuario ao BOT.
 - `app/tasks/fileapp_ingest_tasks.py`: pipeline FileApp e reconciliadores.
 - `app/services/fileapp_tipo1_manual_pipeline_service.py`: sete passos Target Core.
 - `app/services/fileapp_mailing_association_service.py`: readiness e vinculo ao flow.
@@ -40,6 +42,6 @@
 
 ## Testes
 
-Existem 37 arquivos e 295 casos coletados. A suite mistura unidade, testes com mocks e integracao real com PostgreSQL. Em 2026-08-24, 270 passaram e 25 falharam primeiro por testes que ainda chamam `trigger_orch(flow_uuid=...)` depois de a assinatura da rota legada ter mudado para aceitar UUID ou alias. Alguns desses testes, especialmente Dialer, tambem parecem carregar expectativas anteriores ao comportamento atual; nao foi provado que apenas renomear o argumento os deixa verdes.
+Em 2026-08-27, a suite coletou 380 casos. Ela mistura unidade, testes com mocks e integracao real com PostgreSQL; 354 passaram e 26 falharam primeiro por testes que ainda chamam `trigger_orch(flow_uuid=...)` depois de a assinatura da rota legada ter mudado para aceitar UUID ou alias. Alguns desses testes, especialmente Dialer, tambem parecem carregar expectativas anteriores ao comportamento atual; nao foi provado que apenas renomear o argumento os deixa verdes.
 
 Nao ha evidencia versionada de uma separacao formal entre suites unitarias e suites DB/E2E.

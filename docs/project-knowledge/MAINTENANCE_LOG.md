@@ -1,5 +1,35 @@
 # Maintenance Log
 
+## 2026-08-27 — Card isolado `switch_bot_flow`
+
+### REQUEST
+
+Criar um card separado de `run_flow` que transforme a sessao ORCH em hub WhatsApp, repassando ao BOT o payload Meta original desde o primeiro evento ate o callback terminal.
+
+### TASK TYPE / CLASSIFICATION
+
+Feature operacional isolada / `ALPHA_FIX_OPTIONAL`; blast radius contido por card, feature flag e fila dedicada. `run_flow` nao foi alterado.
+
+### CHANGE
+
+- M2 reconhece `switch_bot_flow`, persiste estado bloqueante e resolve `success`/`exception_*` somente no terminal.
+- Worker dedicado consulta e cacheia `runner_token`, envia somente mensagens de usuario ao Runner v5 e descarta status WhatsApp do relay.
+- O body do primeiro e dos eventos seguintes preserva o mesmo conteudo JSON recebido da Meta, sem envelope sintetico.
+- `target_session_id` e metadados da revisao ficam persistidos; callback idempotente retoma o M2 e o primeiro terminal vence.
+- Filas isoladas foram adicionadas aos profiles DEV/launchd/prod e aos manifests versionados.
+
+### VALIDATION
+
+- Regressao direcionada final: 135 testes passaram; `compileall`, `git diff --check`, `bash -n` e `plutil -lint` passaram.
+- Suite completa: 354 passaram e 26 falharam em baseline legado, primeiro por `trigger_orch(flow_uuid=...)` desatualizado.
+- Consulta real ao Target Core resolveu um `runner_token` de 64 caracteres sem expor o segredo.
+- Stack local completa subiu com `orch_switch_bot_flow_f5_local`; worker registrou a task e o smoke encadeado dos dois flows retornou aceite.
+- POST real ao Runner, resposta do BOT via Meta e callback terminal permanecem pendentes de canario controlado para evitar mensagem externa acidental.
+
+### ROLLBACK
+
+Definir `SWITCH_BOT_FLOW_ENABLED=false` e reiniciar API/worker. Flows sem o novo card e o comportamento de `run_flow` permanecem inalterados.
+
 ## 2026-08-26 — Recibo idempotente para entrega imediata FileApp
 
 ### REQUEST

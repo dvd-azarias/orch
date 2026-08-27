@@ -26,6 +26,8 @@ from app.schemas.orch import (
     OrchResubmitRequest,
     OrchSessionListResponse,
     OrchSessionSummary,
+    OrchSwitchBotFlowCallbackRequest,
+    OrchSwitchBotFlowCallbackResponse,
     OrchTriggerAccepted,
     OrchUnassignSessionRequest,
     OrchUnassignSessionResponse,
@@ -45,6 +47,7 @@ from app.repositories.orch_fileapp_ingest_receipts_repository import (
 )
 from app.repositories.orch_whatsapp_limits_repository import register_whatsapp_limit_event
 from app.repositories.orch_sessions_repository import (
+    apply_switch_bot_flow_callback,
     set_session_assigned_at_default,
     set_unassigned_at_by_flow_and_entity_address,
 )
@@ -537,6 +540,77 @@ async def trigger_orch_by_workspace(
         flow_uuid=flow_uuid,
         payload=payload,
         db_session=db_session,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/switch-bot-flow/callback",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchSwitchBotFlowCallbackResponse,
+)
+async def callback_switch_bot_flow_by_workspace(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    request: OrchSwitchBotFlowCallbackRequest = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchSwitchBotFlowCallbackResponse:
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+
+    target_session_id = _read_required_text(request.session_id, field_name="session_id")
+    callback_status = _read_required_text(request.status, field_name="status").lower()
+    if callback_status in {"success", "completed", "finished"}:
+        terminal_status = "completed"
+    elif callback_status in {"error", "exception", "failed", "unsuccess"}:
+        terminal_status = "failed"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="status inválido para callback do switch_bot_flow.",
+        )
+
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        persisted = await apply_switch_bot_flow_callback(
+            db_session,
+            flow_uuid=str(flow_uuid),
+            target_session_id=target_session_id,
+            terminal_status=terminal_status,
+            callback_payload=request.model_dump(),
+        )
+    if persisted is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Handoff ativo não encontrado para o session_id informado.",
+        )
+    if db_session.in_transaction():
+        await db_session.commit()
+
+    settings = get_settings()
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            lambda: advance_session_task.apply_async(
+                kwargs={
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": str(flow_uuid),
+                    "session_id": int(persisted["session_id"]),
+                },
+                queue=settings.celery_execute_queue,
+                routing_key=settings.celery_execute_queue,
+            )
+        ),
+        timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+    )
+    return OrchSwitchBotFlowCallbackResponse(
+        status="accepted",
+        accepted=True,
+        flow_uuid=str(flow_uuid),
+        target_session_id=target_session_id,
+        orch_session_id=int(persisted["session_id"]),
+        orch_session_uuid=str(persisted["session_uuid"]),
+        idempotent=bool(persisted["idempotent"]),
     )
 
 

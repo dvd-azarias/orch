@@ -47,6 +47,7 @@ from app.services.workflow_m2_service import (
     _resolved_contact_member_id_for_routing,
     _run_process_dialer_response,
     _run_run_flow,
+    _run_switch_bot_flow,
     _run_process_whatsapp_response,
     _run_set_variables,
     _set_synthetic_whatsapp_status_payload,
@@ -63,6 +64,7 @@ from app.services.workflow_m2_service import (
     _should_preempt_to_whatsapp_resume_cursor,
     _should_resume_dialer_blocking_execution,
     _should_resume_run_flow_blocking_execution,
+    _should_resume_switch_bot_flow_blocking_execution,
     _should_resume_whatsapp_blocking_execution,
     _set_run_flow_waiting,
     execute_workflow_m2_for_session,
@@ -77,6 +79,7 @@ def test_blocking_stop_reason_for_whatsapp_components() -> None:
     assert _blocking_stop_reason_for_component("send_with_dialer") == "blocked_send_with_dialer"
     assert _blocking_stop_reason_for_component("process_dialer_response") == "blocked_process_dialer_response"
     assert _blocking_stop_reason_for_component("run_flow") == "blocked_run_flow"
+    assert _blocking_stop_reason_for_component("switch_bot_flow") == "blocked_switch_bot_flow"
     assert _blocking_stop_reason_for_component("generate_file") is None
 
 
@@ -1082,6 +1085,110 @@ def test_run_run_flow_maps_callback_result_to_branch() -> None:
     branch = _run_run_flow(component={"ref_id": "run-flow-1"}, runtime_variables=runtime_variables)
     assert branch == "unsuccess"
     assert runtime_variables["run_flow_last_callback"]["result"] == "unsuccess"
+
+
+def test_run_switch_bot_flow_snapshots_original_meta_payload(monkeypatch) -> None:
+    class _Settings:
+        switch_bot_flow_enabled = True
+
+    monkeypatch.setattr(workflow_m2_service, "get_settings", lambda: _Settings())
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "id": "wamid.initial",
+                                    "from": "5511975620806",
+                                    "type": "text",
+                                    "text": {"body": "Olá"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    runtime_variables = {"last_payload": payload}
+    definition = {
+        "branches": [
+            {"from": "switch-1", "to": "finish-success", "branch": "success"},
+            {"from": "switch-1", "to": "finish-exception", "branch": "exception_card"},
+        ]
+    }
+    branch = _run_switch_bot_flow(
+        definition=definition,
+        current_card_uuid="switch-1",
+        component={
+            "ref_id": "switch-1",
+            "component_id": "switch_bot_flow",
+            "parameters": {"flow": {"id": "b88c26b2-b5df-4a3d-a9b1-2611c0e3cb31"}},
+        },
+        runtime_variables=runtime_variables,
+    )
+
+    assert branch is None
+    state = runtime_variables["workflow_v2"]["switch_bot_flow"]
+    assert state["status"] == "pending_delivery"
+    assert state["pending_payload"] == payload
+    assert state["pending_payload"] is not payload
+    assert state["pending_message_ids"] == ["wamid.initial"]
+
+
+def test_run_switch_bot_flow_terminal_states_resolve_branches() -> None:
+    definition = {
+        "branches": [
+            {"from": "switch-1", "to": "finish-success", "branch": "success"},
+            {"from": "switch-1", "to": "finish-exception", "branch": "exception_generated"},
+        ]
+    }
+    component = {"ref_id": "switch-1", "component_id": "switch_bot_flow"}
+    completed_runtime = {
+        "workflow_v2": {
+            "switch_bot_flow": {"component_ref_id": "switch-1", "status": "completed"}
+        }
+    }
+    failed_runtime = {
+        "workflow_v2": {
+            "switch_bot_flow": {"component_ref_id": "switch-1", "status": "failed"}
+        }
+    }
+
+    assert (
+        _run_switch_bot_flow(
+            definition=definition,
+            current_card_uuid="switch-1",
+            component=component,
+            runtime_variables=completed_runtime,
+        )
+        == "success"
+    )
+    assert (
+        _run_switch_bot_flow(
+            definition=definition,
+            current_card_uuid="switch-1",
+            component=component,
+            runtime_variables=failed_runtime,
+        )
+        == "exception_generated"
+    )
+
+
+def test_should_resume_switch_bot_flow_only_after_terminal_state() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_switch_bot_flow",
+            "switch_bot_flow": {"component_ref_id": "switch-1", "status": "active"},
+        }
+    }
+    assert _should_resume_switch_bot_flow_blocking_execution(runtime_variables) is False
+    runtime_variables["workflow_v2"]["switch_bot_flow"]["status"] = "completed"
+    assert _should_resume_switch_bot_flow_blocking_execution(runtime_variables) is True
 
 
 def test_run_run_flow_maps_hangup_result_to_branch() -> None:

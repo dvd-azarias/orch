@@ -122,6 +122,25 @@ class OrchUnassignSessionResponse(BaseModel):
     updated_count: int
 
 
+class OrchSwitchBotFlowCallbackRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    session_id: str
+    status: str
+    error: str | None = None
+
+
+class OrchSwitchBotFlowCallbackResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    accepted: bool
+    flow_uuid: str
+    target_session_id: str
+    orch_session_id: int
+    orch_session_uuid: str
+    idempotent: bool
+
+
 class OrchFlowAliasSummary(BaseModel):
     api_version: str = "v1"
     alias: str

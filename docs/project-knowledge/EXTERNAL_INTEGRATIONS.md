@@ -34,6 +34,14 @@ Autenticacao usa bearer preferencial ou API key do workspace. Segredos nao devem
 
 `UNKNOWN`: contrato e efeito atual no destino, inclusive garantia de `persons + orch_sessions`.
 
+## Target Core — Runner v5 / `switch_bot_flow`
+
+O ORCH consulta `GET /v2/flow/{flow_uuid}?compact=true` com bearer e `X-WORKSPACE-UUID`, lê `data.summary.runner_token` e o cacheia por workspace/flow. Cada mensagem de usuario e enviada a `POST /v5/runner/tokens/{runner_token}/webhook/session` com o conteúdo JSON Meta original; o token fica somente na URL e não deve aparecer em logs.
+
+O primeiro `202` precisa devolver `session_id`, persistido como identidade da sessao BOT. Mensagens seguintes usam o mesmo endpoint e precisam manter a mesma identidade. O BOT responde diretamente a Meta; o ORCH atua apenas no sentido ORCH -> BOT.
+
+O encerramento retorna pela rota `POST /v1/orch/{workspace_uuid}/{flow_uuid}/switch-bot-flow/callback`, com `session_id`, `status` e erro opcional. `success/completed/finished` seguem pelo branch `success`; `error/exception/failed/unsuccess` seguem pelo branch `exception_*`. A rota nao possui autenticacao propria nesta primeira entrega; protecao externa e formato configurado no BOT permanecem pendencias de canario/rollout.
+
 ## Files / Arquivos API
 
 Usada para download, metadados, listagem, move e reupload/quarentena. Credenciais sao lidas de `ARQUIVOS_*` com fallback `SYNC_WS_*`.

@@ -497,3 +497,21 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `DETECTION`: alertar receipt Tipo 1 `failed` com `reason=step5_put_field_mappings`, HTTP 2xx e mailing status avançado; correlacionar workspace, flow, file e receipt.
 
 `V2`: contrato explícito de ownership do auto-import e máquina de estados compartilhada entre ORCH e Target Core.
+
+## R27 — Relay BOT possui janela de repeticao entre efeito externo e commit
+
+`STATUS`: CONFIRMED CODE / E2E PENDENTE
+
+`IMPACT`: high
+
+`PROBABILITY`: low a medium em timeout, queda de worker ou resposta perdida
+
+`AFFECTED AREA`: `switch_bot_flow` / Runner v5 / mensagens WhatsApp
+
+`DESCRIPTION`: o worker envia o payload Meta ao Runner enquanto mantem a transacao da sessao. Se o Runner aceitar e a resposta/worker falhar antes do commit que remove `pending_payload` ou marca o evento, uma retomada pode reenviar o mesmo `messages[].id`. Os retries de `408/429/5xx` possuem a mesma janela. O callback terminal tambem nao possui autenticacao propria; sua protecao depende do ingress, ainda `UNKNOWN`.
+
+`MITIGATION`: habilitar inicialmente apenas no flow canario, confirmar deduplicacao do Runner por message id, monitorar `target_session_id`, `last_forwarded_event_id` e callbacks conflitantes. O relay e serializado pelo mesmo advisory lock do M2/callback e o primeiro estado terminal vence.
+
+`DETECTION`: comparar contagem de POSTs por `messages[].id` com ingestões da sessao BOT e alertar para `switch_bot_flow_runner_session_mismatch` ou repeticao de resposta após timeout.
+
+`V2`: outbox/receipt duravel com idempotency key contratual e callback autenticado/versionado.

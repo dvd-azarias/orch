@@ -18,7 +18,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 6. O codigo atual nao implementa autenticacao para trigger, consultas ou endpoints admin de migration. Protecao externa e `UNKNOWN`.
 7. O risco de amplificacao deixou de ser apenas estatico: em 2026-08-24, sessoes invalidas de um flow draft acumularam 1.154.025 falhas. As sessoes `256`, `257` e `263` foram terminalizadas de forma auditada; consulte `docs/project-knowledge/INCIDENT_HISTORY.md` antes de intervir em dispatcher, reconciliador, filas ou sessoes.
 8. Bloqueios considerados sucesso tambem podem ser amplificados sem alarme. A auditoria posterior a migracao dos workers para o host `10.1.20.237` confirmou o loop `blocked_send_whatsapp_interactive` ativo em tres workspaces, mais de 213 mil execucoes de executor e 428 mil metricas em cerca de 70 minutos. A correcao Alpha inclui esse motivo em `BLOCKING_RUNNING_STOP_REASONS`, preservando a sessao em `state=1` ate callback/reconciliacao; implantacao e validacao de runtime ainda estao pendentes.
-9. A suite coleta 295 testes. Em 2026-08-24, 270 passaram e 25 pararam primeiro porque testes antigos chamam a rota legada com o parametro removido `flow_uuid`; corrigir apenas a assinatura pode revelar divergencias semanticas adicionais. Nao trate a suite como verde.
+9. Em 2026-08-27, a suite coletou 380 testes: 354 passaram e 26 falharam primeiro em casos legados que ainda chamam `trigger_orch(flow_uuid=...)`; nao trate a suite completa como verde. A regressao direcionada do `switch_bot_flow` passou integralmente.
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
 
 ## O que e o ORCH
@@ -32,7 +32,7 @@ Aplicacoes detectadas, nesta ordem: `ArquivosApp`, `WhatsApp`, `DialerApp`, `Gen
 | Processo | Papel | Filas logicas |
 |---|---|---|
 | API FastAPI/Uvicorn | health, triggers, consultas, admin e enqueue | publica `execute` e FileApp ingest |
-| Worker workflow | dispatch, execucao e heartbeat | `dispatch`, `execute`, `heartbeat` |
+| Worker workflow | dispatch, execucao, relay BOT e heartbeat | `dispatch`, `execute`, `switch_bot_flow`, `heartbeat` |
 | Beat workflow | dispatch, heartbeat e reconciliacoes | publica nas filas acima e FileApp process |
 | Worker FileApp | ingest, process, associacao e reconciliacao | `fileapp_ingest`, `fileapp_process`, `fileapp_mailing_assoc` |
 | Worker generate_file | scan e envio SFTP | `generate_file_scan`, `generate_file_run` |
@@ -52,6 +52,7 @@ Entrypoints:
 - FileApp `tipo_1`: valida pasta/template -> Celery ingest/process -> Target Core upload/mapping/import -> task de associacao -> pos-processamento do arquivo.
 - FileApp `tipo_2`: persiste sessao do arquivo -> baixa/expande CSV -> processa cada linha pelo trigger comum.
 - Canal/callback: correlaciona sessao ativa ou recente -> registra ledger/runtime -> retoma card bloqueante; sem correlacao, audita descarte.
+- `switch_bot_flow`: bloqueia a sessao ORCH no card, resolve/cacheia o `runner_token` do flow alvo e repassa somente payloads Meta com mensagem de usuario ao Runner v5; callback terminal libera `success` ou `exception_*`.
 - Generate file: card grava job/buffer -> beat scan -> worker produz arquivo SFTP -> auditoria e runtime.
 
 Detalhes: `docs/project-knowledge/DATA_FLOW.md`.
@@ -76,7 +77,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - PostgreSQL/PgBouncer: estado, flows e dados compartilhados.
 - RabbitMQ/Celery: filas e execucao assincrona.
 - Redis: result backend, heartbeat e locks/cooldowns.
-- Target Core: FileApp mailing/import/associacao.
+- Target Core: FileApp mailing/import/associacao e Runner v5 do `switch_bot_flow`.
 - Files/Arquivos API: download, consulta, move/reupload de arquivos.
 - Otima LLM: componente `intelligent_agent`.
 - HTTP arbitrario: componente `api_call`.
@@ -95,6 +96,8 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `call_origin` da associacao FileApp e `file_event`; `linked_by` e o `file.id`.
 - Migrations ORCH usam `orch_alembic_version`, nunca `alembic_version`.
 - Valores de `linked_actuator_enum` pertencem ao Target Core e nao sao migrados pelo ORCH.
+- `switch_bot_flow` envia ao Runner o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`.
+- A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O primeiro estado terminal vence callbacks tardios conflitantes.
 
 ## Estado da baseline
 
@@ -118,6 +121,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Reciclagem SIGTERM de child process expos `UnboundLocalError` em `_advance_session_task`: `stopped_reason` pode ser lido no `finally` antes de ser inicializado, mascarando a excecao original.
 - `live` nao e suportado no branch atual nem em `main`; o commit isolado `bd461a5` nao foi integrado e sua implementacao nao executa handoff ou callback externo.
 - O smoke versionado valida aceite HTTP, nao conclusao E2E.
+- O novo card `switch_bot_flow` e implementado sem alterar `run_flow`; a consulta real do `runner_token`, a fila isolada e a regressao direcionada foram validadas. O POST real ao Runner e o ciclo Meta -> ORCH -> BOT -> Meta ainda dependem de canario controlado.
 
 ### LIKELY
 
@@ -134,6 +138,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Saude funcional atual de Target Core, Files API, LLM e SFTP; a auditoria confirmou apenas conectividade da API com PostgreSQL, RabbitMQ e Redis.
 - Se o Target Core produz `persons + orch_sessions` para todo FileApp `tipo_1`.
 - Ultima evidencia E2E completa de FileApp, `api_call` e `generate_file`.
+- Idempotencia efetiva do Runner v5 por `messages[].id`, formato exato do callback terminal configurado no BOT e protecao de ingress da nova rota de callback.
 
 ## Indice de conhecimento
 

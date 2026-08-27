@@ -339,6 +339,41 @@ async def mark_pending_channel_events_processed(
     return int(result.rowcount or 0)
 
 
+async def mark_whatsapp_messages_processed_by_ids(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    message_ids: list[str],
+    discard_reason: str | None = None,
+) -> int:
+    normalized_ids = [str(item).strip() for item in message_ids if str(item).strip()]
+    if not normalized_ids:
+        return 0
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_channel_events
+            SET
+                processed_at = NOW(),
+                discard_reason = COALESCE(CAST(:discard_reason AS TEXT), discard_reason)
+            WHERE session_id = :session_id
+              AND channel = 'whatsapp'
+              AND event_type LIKE 'message%'
+              AND event_id IN (
+                  SELECT jsonb_array_elements_text(CAST(:message_ids AS jsonb))
+              )
+              AND processed_at IS NULL
+            """
+        ),
+        {
+            "session_id": session_id,
+            "message_ids": json.dumps(normalized_ids, ensure_ascii=False),
+            "discard_reason": discard_reason,
+        },
+    )
+    return int(result.rowcount or 0)
+
+
 async def list_stale_pending_channel_event_sessions(
     db_session: AsyncSession,
     *,

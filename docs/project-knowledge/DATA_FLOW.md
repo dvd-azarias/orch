@@ -107,6 +107,24 @@ WhatsApp e Dialer sao extraidos para `orch_channel_events`. O ledger suporta cla
 
 Existe tambem um guard anterior baseado nos timestamps da sessao; ele pode descartar status repetido antes do ledger. Impacto real permanece `LIKELY`.
 
+## `switch_bot_flow` — hub WhatsApp para BOT
+
+```text
+Meta -> POST canonico do ORCH -> orch_sessions + orch_channel_events
+     -> M2 alcanca switch_bot_flow e bloqueia no proprio card
+     -> worker dedicado resolve/cacheia runner_token do flow alvo
+     -> POST /v5/runner/tokens/{runner_token}/webhook/session
+        body = mesmo conteudo JSON Meta recebido pelo ORCH
+     -> persiste target_session_id e permanece ativo
+     -> novos payloads Meta de usuario repetem o relay pelo mesmo endpoint
+     -> status sent/delivered/read/failed sao consumidos localmente, sem relay
+     -> callback terminal do BOT -> success ou exception_* -> M2 continua
+```
+
+O primeiro POST nao usa payload sintetico: ele repassa o `runtime_variables.last_payload` que levou a sessao ate o card. O `runner_token` e fixado por flow via cache em memoria/Redis e relido apenas quando ausente ou rejeitado com `401/403`. O `run_flow` permanece independente e inalterado.
+
+O contrato e de entrega ao menos uma vez: timeout ou crash entre aceite externo e commit local pode repetir o mesmo payload. A deduplicacao efetiva pelo `messages[].id` no Runner ainda requer comprovacao E2E.
+
 ## Generate file
 
 ```text

@@ -9,6 +9,7 @@ from app.repositories.orch_channel_events_repository import (
     mark_channel_event_processed,
     mark_channel_event_processed_by_identity,
     mark_pending_channel_events_processed,
+    mark_whatsapp_messages_processed_by_ids,
 )
 
 
@@ -153,3 +154,20 @@ async def test_mark_channel_event_processed_by_identity_records_late_reason() ->
     assert "event_type = :event_type" in session.statement
     assert "event_id = :event_id" in session.statement
     assert session.parameters["discard_reason"] == "finish_flow_webhook_already_succeeded"
+
+
+@pytest.mark.asyncio
+async def test_mark_whatsapp_messages_processed_by_ids_only_matches_message_events() -> None:
+    session = _Session()
+
+    updated = await mark_whatsapp_messages_processed_by_ids(
+        session,  # type: ignore[arg-type]
+        session_id=7001,
+        message_ids=["wamid.001", "wamid.002"],
+    )
+
+    assert updated == 2
+    assert "channel = 'whatsapp'" in session.statement
+    assert "event_type LIKE 'message%'" in session.statement
+    assert "jsonb_array_elements_text" in session.statement
+    assert session.parameters["message_ids"] == '["wamid.001", "wamid.002"]'
