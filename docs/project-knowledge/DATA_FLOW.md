@@ -113,7 +113,7 @@ Existe tambem um guard anterior baseado nos timestamps da sessao; ele pode desca
 Meta -> POST canonico do ORCH -> orch_sessions + orch_channel_events
      -> M2 alcanca switch_bot_flow e bloqueia no proprio card
      -> worker dedicado resolve/cacheia runner_token do flow alvo
-     -> POST /v5/runner/tokens/{runner_token}/webhook/session
+     -> POST /v5/runner/tokens/{runner_token}/whatsapp/session
         body = mesmo conteudo JSON Meta recebido pelo ORCH
      -> persiste target_session_id e permanece ativo
      -> novos payloads Meta de usuario repetem o relay pelo mesmo endpoint

@@ -515,3 +515,23 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `DETECTION`: comparar contagem de POSTs por `messages[].id` com ingestões da sessao BOT e alertar para `switch_bot_flow_runner_session_mismatch` ou repeticao de resposta após timeout.
 
 `V2`: outbox/receipt duravel com idempotency key contratual e callback autenticado/versionado.
+
+## R28 — Provider `webhook` fragmenta o handoff WhatsApp no Runner v5
+
+`STATUS`: CONFIRMED RUNTIME
+
+`IMPACT`: high
+
+`PROBABILITY`: high com token `session_key=chat.id` e entrada pelo provider `webhook`
+
+`AFFECTED AREA`: `switch_bot_flow` / Target Core Runner v5 / continuidade de sessao / resposta Meta
+
+`DESCRIPTION`: o canario de 2026-08-27 comprovou que enviar o payload Meta cru a `/v5/runner/tokens/{token}/webhook/session` nao basta para o Runner reconhecer o canal ou manter a sessao. O token BOT usava `session_key=chat.id`, ausente no JSON Meta, e o endpoint classificou os eventos como provider `webhook`. Cada POST recebeu um novo `external_session_id` e um novo Runner session ID. A engine gerou resposta em todas as sessoes, mas o dispatch terminou em `missing_integration` e nenhum `provider_msg_id` foi produzido.
+
+`RUNTIME EVIDENCE`: duas sessoes ORCH (`7080`, `7081`) produziram quatro sessoes Runner distintas em menos de 43 segundos. Todas continham o telefone no request, ficaram abertas com `user_external_id=NULL` e armazenaram a mesma resposta BOT. Os eventos seguintes fizeram o ORCH persistir `switch_bot_flow_runner_session_mismatch` e seguir pelo branch de excecao.
+
+`MITIGATION`: manter o card restrito ao canario e chamar o provider correto em `/v5/runner/tokens/{token}/whatsapp/session`. Esse caminho ja extrai `messages[].from`/`contacts[].wa_id`, resolve o numero de origem por `metadata.display_phone_number` ou `metadata.phone_number_id` e despacha pela API WhatsApp generica configurada no ambiente, sem depender de integracao ligada ao flow. Nao relaxar isoladamente o guard de mismatch no ORCH, pois isso mascara sessoes fragmentadas e torna callback/terminalidade ambiguos.
+
+`DETECTION`: correlacionar `target_session_id` do ORCH com `runner_v5_interaction_step`; alertar para mais de um Runner session ID pelo mesmo contato/handoff e para `dispatch_complete:missing_integration` ou resposta BOT sem `provider_msg_id`.
+
+`V2`: contrato versionado de relay com session key explicita, provider/canal normalizado, receipt de dispatch e identidade estavel obrigatoria.

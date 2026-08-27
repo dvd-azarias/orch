@@ -289,7 +289,7 @@ def deliver_meta_payload(
             "switch_bot_flow requer um payload Meta contendo mensagem de usuário.",
         )
 
-    url = f"{base_url}/v5/runner/tokens/{runner_token}/webhook/session"
+    url = f"{base_url}/v5/runner/tokens/{runner_token}/whatsapp/session"
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     timeout_seconds = max(1.0, resolved_settings.switch_bot_flow_http_timeout_seconds)
     max_attempts = max(1, min(resolved_settings.switch_bot_flow_max_attempts, 5))

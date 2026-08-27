@@ -18,7 +18,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 6. O codigo atual nao implementa autenticacao para trigger, consultas ou endpoints admin de migration. Protecao externa e `UNKNOWN`.
 7. O risco de amplificacao deixou de ser apenas estatico: em 2026-08-24, sessoes invalidas de um flow draft acumularam 1.154.025 falhas. As sessoes `256`, `257` e `263` foram terminalizadas de forma auditada; consulte `docs/project-knowledge/INCIDENT_HISTORY.md` antes de intervir em dispatcher, reconciliador, filas ou sessoes.
 8. Bloqueios considerados sucesso tambem podem ser amplificados sem alarme. A auditoria posterior a migracao dos workers para o host `10.1.20.237` confirmou o loop `blocked_send_whatsapp_interactive` ativo em tres workspaces, mais de 213 mil execucoes de executor e 428 mil metricas em cerca de 70 minutos. A correcao Alpha inclui esse motivo em `BLOCKING_RUNNING_STOP_REASONS`, preservando a sessao em `state=1` ate callback/reconciliacao; implantacao e validacao de runtime ainda estao pendentes.
-9. Em 2026-08-27, a suite coletou 380 testes: 354 passaram e 26 falharam primeiro em casos legados que ainda chamam `trigger_orch(flow_uuid=...)`; nao trate a suite completa como verde. A regressao direcionada do `switch_bot_flow` passou integralmente.
+9. Em 2026-08-27, a suite coletou 383 testes: 356 passaram e 27 falharam; 26 correspondem majoritariamente a casos legados que ainda chamam `trigger_orch(flow_uuid=...)` e uma falha adicional foi `InvalidCachedStatementError` em teste DB com tabela temporaria. Nao trate a suite completa como verde. A regressao direcionada do `switch_bot_flow` passou integralmente com 118 testes.
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
 
 ## O que e o ORCH
@@ -96,7 +96,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `call_origin` da associacao FileApp e `file_event`; `linked_by` e o `file.id`.
 - Migrations ORCH usam `orch_alembic_version`, nunca `alembic_version`.
 - Valores de `linked_actuator_enum` pertencem ao Target Core e nao sao migrados pelo ORCH.
-- `switch_bot_flow` envia ao Runner o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`.
+- `switch_bot_flow` envia ao provider `whatsapp` do Runner v5 o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`. Usar `/webhook/session` fragmenta a identidade e desvia o dispatch para uma integracao webhook do flow.
 - A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O primeiro estado terminal vence callbacks tardios conflitantes.
 
 ## Estado da baseline
