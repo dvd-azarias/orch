@@ -155,6 +155,7 @@ async def test_trigger_orch_resolves_alias_and_calls_workspace_flow(monkeypatch:
     assert response.accepted is True
     assert captured["workspace_uuid"] == "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
     assert str(captured["flow_uuid"]) == "0300054c-5f39-4cda-ae88-fe993fd9044b"
+    assert captured["allow_switch_bot_flow_terminal_signal"] is True
 
 
 @pytest.mark.asyncio

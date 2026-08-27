@@ -97,7 +97,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Migrations ORCH usam `orch_alembic_version`, nunca `alembic_version`.
 - Valores de `linked_actuator_enum` pertencem ao Target Core e nao sao migrados pelo ORCH.
 - `switch_bot_flow` envia ao provider `whatsapp` do Runner v5 o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`. Usar `/webhook/session` fragmenta a identidade e desvia o dispatch para uma integracao webhook do flow.
-- A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O primeiro estado terminal vence callbacks tardios conflitantes.
+- A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O `finish_flow` BOT observado em runtime envia ao alias curto do proprio flow ORCH um envelope `entity + session.id + disposition`; `session.id` coincide com `target_session_id`. Esse envelope deve ser consumido antes do trigger comum para nao criar uma sessao fantasma. O primeiro estado terminal vence callbacks tardios conflitantes.
 
 ## Estado da baseline
 
@@ -121,7 +121,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Reciclagem SIGTERM de child process expos `UnboundLocalError` em `_advance_session_task`: `stopped_reason` pode ser lido no `finally` antes de ser inicializado, mascarando a excecao original.
 - `live` nao e suportado no branch atual nem em `main`; o commit isolado `bd461a5` nao foi integrado e sua implementacao nao executa handoff ou callback externo.
 - O smoke versionado valida aceite HTTP, nao conclusao E2E.
-- O novo card `switch_bot_flow` e implementado sem alterar `run_flow`; a consulta real do `runner_token`, a fila isolada e a regressao direcionada foram validadas. O POST real ao Runner e o ciclo Meta -> ORCH -> BOT -> Meta ainda dependem de canario controlado.
+- O novo card `switch_bot_flow` e implementado sem alterar `run_flow`; consulta do `runner_token`, fila isolada e regressao direcionada foram validadas. O canario real confirmou Meta -> ORCH -> BOT -> Meta com identidade Runner estavel e respostas WhatsApp. O primeiro callback terminal chegou ao alias curto, mas entrou no trigger comum e criou a sessao fantasma `7106`; a correcao Alpha passa a correlaciona-lo por `session.id == target_session_id` antes da persistencia normal.
 
 ### LIKELY
 
@@ -138,7 +138,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Saude funcional atual de Target Core, Files API, LLM e SFTP; a auditoria confirmou apenas conectividade da API com PostgreSQL, RabbitMQ e Redis.
 - Se o Target Core produz `persons + orch_sessions` para todo FileApp `tipo_1`.
 - Ultima evidencia E2E completa de FileApp, `api_call` e `generate_file`.
-- Idempotencia efetiva do Runner v5 por `messages[].id`, formato exato do callback terminal configurado no BOT e protecao de ingress da nova rota de callback.
+- Idempotencia efetiva do Runner v5 por `messages[].id` e protecao de ingress dos callbacks.
 
 ## Indice de conhecimento
 

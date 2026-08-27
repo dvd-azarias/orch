@@ -207,6 +207,7 @@ async def test_apply_switch_bot_flow_callback_marks_handoff_completed(monkeypatc
                 row={
                     "id": 7001,
                     "uuid": "orch-session-uuid",
+                    "state": 1,
                     "runtime_variables": runtime_variables,
                     "last_card_uuid": "11111111-1111-1111-1111-111111111111",
                     "next_card_uuid": "11111111-1111-1111-1111-111111111111",
@@ -231,6 +232,7 @@ async def test_apply_switch_bot_flow_callback_marks_handoff_completed(monkeypatc
     assert result == {
         "session_id": 7001,
         "session_uuid": "orch-session-uuid",
+        "state": 1,
         "idempotent": False,
         "status": "completed",
     }
@@ -255,6 +257,7 @@ async def test_apply_switch_bot_flow_callback_keeps_first_terminal_status(monkey
                 row={
                     "id": 7001,
                     "uuid": "orch-session-uuid",
+                    "state": 3,
                     "runtime_variables": runtime_variables,
                     "last_card_uuid": "11111111-1111-1111-1111-111111111111",
                     "next_card_uuid": "11111111-1111-1111-1111-111111111111",
@@ -278,6 +281,7 @@ async def test_apply_switch_bot_flow_callback_keeps_first_terminal_status(monkey
     assert result == {
         "session_id": 7001,
         "session_uuid": "orch-session-uuid",
+        "state": 3,
         "idempotent": True,
         "status": "completed",
     }
