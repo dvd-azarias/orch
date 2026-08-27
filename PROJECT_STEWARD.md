@@ -1580,11 +1580,11 @@ Acesso operacional direto:
 ssh deividazarias@10.1.20.237
 ```
 
-Senha SSH:
+Autorizacao e credencial:
 
-```text
-Sysdba1982250390080613!!@@##
-```
+* O usuario `deividazarias` possui acesso SSH operacional aos servidores ORCH e pode elevar para root com `sudo su`.
+* Todo acesso remoto, inclusive somente leitura, exige pedido e autorizacao previa do responsavel pelo ambiente.
+* A senha deve ser fornecida apenas por canal/variavel segura no momento da operacao (por exemplo, `ORCH_SSH_PASSWORD`); nao deve ser registrada neste repositorio.
 
 Para operacoes de `systemctl`, leitura integral das units e acesso ao repositorio pertencente a root:
 
@@ -1593,7 +1593,7 @@ sudo su
 cd /etc/gohp/orch
 ```
 
-O `sudo su` utiliza a mesma senha. O usuario `deividazarias` nao possui permissao para executar qualquer comando arbitrario via `sudo <comando>`; elevar primeiro para root evita tentativas e perda de tempo.
+O `sudo su` utiliza a credencial operacional segura. O usuario `deividazarias` nao possui permissao para executar qualquer comando arbitrario via `sudo <comando>`; elevar primeiro para root evita tentativas e perda de tempo.
 
 Ao entrar no repositorio, preservar `.env`, `venv/` e qualquer estado operacional local. Nunca usar `git clean`, `git reset` ou restaurar `.env` apenas para obter working tree limpa.
 

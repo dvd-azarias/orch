@@ -88,6 +88,8 @@ logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
 _SUPPORTED_MANUAL_APPS = {"ArquivosApp", "WhatsApp", "DialerApp", "GenericApp"}
 _FLOW_ALIAS_PATTERN = re.compile(r"^[0-9a-f]{14}$")
+_SWITCH_BOT_FLOW_SUCCESS_STATUSES = {"success", "completed", "finished"}
+_SWITCH_BOT_FLOW_FAILURE_STATUSES = {"error", "exception", "failed", "unsuccess"}
 
 
 def _legacy_workspace_context() -> tuple[str | None, str]:
@@ -139,6 +141,112 @@ def _is_allowed_supplier_client(*, client_id: str | None, client_secret: str | N
     return any(normalized_id == expected_id and normalized_secret == expected_secret for expected_id, expected_secret in accepted_pairs)
 
 
+def _extract_switch_bot_flow_terminal_signal(payload: dict[str, Any]) -> dict[str, str] | None:
+    session = payload.get("session")
+    disposition = payload.get("disposition")
+    if not isinstance(session, dict) or not isinstance(disposition, dict):
+        return None
+
+    target_session_id = str(session.get("id") or "").strip()
+    if not target_session_id:
+        return None
+
+    raw_statuses = [disposition.get("category"), disposition.get("code")]
+    normalized_statuses = [
+        str(value).strip().lower()
+        for value in raw_statuses
+        if value is not None and str(value).strip()
+    ]
+    terminal_status: str | None = None
+    if any(value in _SWITCH_BOT_FLOW_FAILURE_STATUSES for value in normalized_statuses):
+        terminal_status = "failed"
+    elif any(value in _SWITCH_BOT_FLOW_SUCCESS_STATUSES for value in normalized_statuses):
+        terminal_status = "completed"
+    if terminal_status is None:
+        return None
+
+    callback_statuses = (
+        _SWITCH_BOT_FLOW_FAILURE_STATUSES
+        if terminal_status == "failed"
+        else _SWITCH_BOT_FLOW_SUCCESS_STATUSES
+    )
+    callback_status = next(
+        (value for value in normalized_statuses if value in callback_statuses),
+        terminal_status,
+    )
+    description = str(disposition.get("description") or "").strip()
+    signal = {
+        "target_session_id": target_session_id,
+        "terminal_status": terminal_status,
+        "callback_status": callback_status,
+    }
+    if description:
+        signal["error"] = description
+    return signal
+
+
+def _switch_bot_flow_terminal_extraction(
+    payload: dict[str, Any],
+    *,
+    target_session_id: str,
+) -> SessionExtraction:
+    entity = payload.get("entity")
+    entity_block = entity if isinstance(entity, dict) else {}
+    entity_address = str(entity_block.get("address") or target_session_id).strip()
+    entity_identity = str(entity_block.get("identity") or entity_address).strip()
+    entity_type = str(entity_block.get("type") or "session").strip()
+    return SessionExtraction(
+        entity=entity_identity,
+        entity_type=entity_type,
+        entity_address=entity_address,
+        entity_session_id=target_session_id,
+    )
+
+
+async def _persist_and_enqueue_switch_bot_flow_callback(
+    *,
+    workspace_uuid: str,
+    workspace_schema: str,
+    flow_uuid: str,
+    target_session_id: str,
+    terminal_status: str,
+    callback_payload: dict[str, Any],
+    db_session: AsyncSession,
+) -> dict[str, Any] | None:
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        persisted = await apply_switch_bot_flow_callback(
+            db_session,
+            flow_uuid=flow_uuid,
+            target_session_id=target_session_id,
+            terminal_status=terminal_status,
+            callback_payload=callback_payload,
+        )
+    if persisted is None:
+        return None
+    if db_session.in_transaction():
+        await db_session.commit()
+
+    settings = get_settings()
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            lambda: advance_session_task.apply_async(
+                kwargs={
+                    "workspace_uuid": workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "session_id": int(persisted["session_id"]),
+                },
+                queue=settings.celery_execute_queue,
+                routing_key=settings.celery_execute_queue,
+            )
+        ),
+        timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+    )
+    return persisted
+
+
 async def _find_resubmit_session_by_event_id(
     *,
     db_session: AsyncSession,
@@ -177,6 +285,7 @@ async def _trigger_orch_for_workspace(
     db_session: AsyncSession,
     validate_workspace: bool = True,
     schema_override: str | None = None,
+    allow_switch_bot_flow_terminal_signal: bool = False,
 ) -> OrchTriggerAccepted:
     safe_workspace_uuid: str | None = None
     if schema_override is not None:
@@ -205,6 +314,72 @@ async def _trigger_orch_for_workspace(
             db_session,
             workspace_uuid=safe_workspace_uuid,
         )
+
+    if allow_switch_bot_flow_terminal_signal and safe_workspace_uuid is not None:
+        terminal_signal = _extract_switch_bot_flow_terminal_signal(payload)
+        if terminal_signal is not None:
+            target_session_id = terminal_signal["target_session_id"]
+            callback_payload = {
+                "session_id": target_session_id,
+                "status": terminal_signal["callback_status"],
+                "error": terminal_signal.get("error"),
+                "source": "finish_flow_alias",
+            }
+            persisted = await _persist_and_enqueue_switch_bot_flow_callback(
+                workspace_uuid=safe_workspace_uuid,
+                workspace_schema=workspace_schema,
+                flow_uuid=str(flow_uuid),
+                target_session_id=target_session_id,
+                terminal_status=terminal_signal["terminal_status"],
+                callback_payload=callback_payload,
+                db_session=db_session,
+            )
+            if persisted is not None:
+                logger.info(
+                    "switch_bot_flow terminal callback consumed from alias",
+                    extra={
+                        "event": "orch.switch_bot_flow.terminal_callback.alias_consumed",
+                        "workspace_uuid": safe_workspace_uuid,
+                        "flow_uuid": str(flow_uuid),
+                        "target_session_id": target_session_id,
+                        "orch_session_id": int(persisted["session_id"]),
+                        "terminal_status": str(persisted["status"]),
+                        "idempotent": bool(persisted["idempotent"]),
+                    },
+                )
+                return OrchTriggerAccepted(
+                    status="accepted",
+                    accepted=True,
+                    flow_uuid=str(flow_uuid),
+                    app="GenericApp",
+                    persistence="switch_bot_flow_callback",
+                    extracted=_switch_bot_flow_terminal_extraction(
+                        payload,
+                        target_session_id=target_session_id,
+                    ),
+                    session_id=int(persisted["session_id"]),
+                    session_uuid=str(persisted["session_uuid"]),
+                    session_state=int(persisted.get("state") or 1),
+                    session_created=False,
+                    workflow_execution={
+                        "mode": "async",
+                        "enqueued": True,
+                        "dispatcher": "celery",
+                        "reason": "switch_bot_flow_terminal_callback",
+                        "target_session_id": target_session_id,
+                        "terminal_status": str(persisted["status"]),
+                        "idempotent": bool(persisted["idempotent"]),
+                    },
+                )
+            logger.info(
+                "switch_bot_flow terminal-shaped alias payload has no correlated handoff",
+                extra={
+                    "event": "orch.switch_bot_flow.terminal_callback.alias_not_correlated",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": str(flow_uuid),
+                    "target_session_id": target_session_id,
+                },
+            )
 
     app_name = detect_app(payload)
     settings = get_settings()
@@ -559,9 +734,9 @@ async def callback_switch_bot_flow_by_workspace(
 
     target_session_id = _read_required_text(request.session_id, field_name="session_id")
     callback_status = _read_required_text(request.status, field_name="status").lower()
-    if callback_status in {"success", "completed", "finished"}:
+    if callback_status in _SWITCH_BOT_FLOW_SUCCESS_STATUSES:
         terminal_status = "completed"
-    elif callback_status in {"error", "exception", "failed", "unsuccess"}:
+    elif callback_status in _SWITCH_BOT_FLOW_FAILURE_STATUSES:
         terminal_status = "failed"
     else:
         raise HTTPException(
@@ -569,40 +744,20 @@ async def callback_switch_bot_flow_by_workspace(
             detail="status inválido para callback do switch_bot_flow.",
         )
 
-    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
-    async with tx_context:
-        safe_schema = workspace_schema.replace('"', '""')
-        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
-        persisted = await apply_switch_bot_flow_callback(
-            db_session,
-            flow_uuid=str(flow_uuid),
-            target_session_id=target_session_id,
-            terminal_status=terminal_status,
-            callback_payload=request.model_dump(),
-        )
+    persisted = await _persist_and_enqueue_switch_bot_flow_callback(
+        workspace_uuid=safe_workspace_uuid,
+        workspace_schema=workspace_schema,
+        flow_uuid=str(flow_uuid),
+        target_session_id=target_session_id,
+        terminal_status=terminal_status,
+        callback_payload=request.model_dump(),
+        db_session=db_session,
+    )
     if persisted is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Handoff ativo não encontrado para o session_id informado.",
         )
-    if db_session.in_transaction():
-        await db_session.commit()
-
-    settings = get_settings()
-    await asyncio.wait_for(
-        asyncio.to_thread(
-            lambda: advance_session_task.apply_async(
-                kwargs={
-                    "workspace_uuid": safe_workspace_uuid,
-                    "flow_uuid": str(flow_uuid),
-                    "session_id": int(persisted["session_id"]),
-                },
-                queue=settings.celery_execute_queue,
-                routing_key=settings.celery_execute_queue,
-            )
-        ),
-        timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
-    )
     return OrchSwitchBotFlowCallbackResponse(
         status="accepted",
         accepted=True,
@@ -1196,6 +1351,7 @@ async def trigger_orch(
             flow_uuid=UUID(str(row["flow_uuid"])),
             payload=payload,
             db_session=db_session,
+            allow_switch_bot_flow_terminal_signal=True,
         )
 
     try:

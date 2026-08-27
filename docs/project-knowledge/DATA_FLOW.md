@@ -118,10 +118,15 @@ Meta -> POST canonico do ORCH -> orch_sessions + orch_channel_events
      -> persiste target_session_id e permanece ativo
      -> novos payloads Meta de usuario repetem o relay pelo mesmo endpoint
      -> status sent/delivered/read/failed sao consumidos localmente, sem relay
-     -> callback terminal do BOT -> success ou exception_* -> M2 continua
+     -> finish_flow BOT faz POST no alias curto do flow ORCH
+        body = entity + session.id + variables + disposition
+     -> ORCH correlaciona session.id == target_session_id antes do trigger comum
+     -> success ou exception_* -> M2 continua, sem criar nova sessao
 ```
 
 O primeiro POST nao usa payload sintetico: ele repassa o `runtime_variables.last_payload` que levou a sessao ate o card. O `runner_token` e fixado por flow via cache em memoria/Redis e relido apenas quando ausente ou rejeitado com `401/403`. O `run_flow` permanece independente e inalterado.
+
+O canario de 2026-08-27 confirmou o callback nativo do `finish_flow` no alias curto ja configurado (`POST /v1/orch/{alias}`). O envelope observado usa `session.id` como sessao Runner e `disposition.category/code` como resultado terminal. A interceptacao e habilitada apenas no caminho por alias e so consome o evento quando encontra handoff do mesmo flow com `target_session_id` exato; sem correlacao, preserva o trigger legado.
 
 O contrato e de entrega ao menos uma vez: timeout ou crash entre aceite externo e commit local pode repetir o mesmo payload. A deduplicacao efetiva pelo `messages[].id` no Runner ainda requer comprovacao E2E.
 

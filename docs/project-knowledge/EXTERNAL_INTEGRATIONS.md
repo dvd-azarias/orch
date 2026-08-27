@@ -40,7 +40,7 @@ O ORCH consulta `GET /v2/flow/{flow_uuid}?compact=true` com bearer e `X-WORKSPAC
 
 O primeiro `202` precisa devolver `session_id`, persistido como identidade da sessao BOT. Mensagens seguintes usam o mesmo endpoint e precisam manter a mesma identidade. O BOT responde diretamente a Meta; o ORCH atua apenas no sentido ORCH -> BOT.
 
-O encerramento retorna pela rota `POST /v1/orch/{workspace_uuid}/{flow_uuid}/switch-bot-flow/callback`, com `session_id`, `status` e erro opcional. `success/completed/finished` seguem pelo branch `success`; `error/exception/failed/unsuccess` seguem pelo branch `exception_*`. A rota nao possui autenticacao propria nesta primeira entrega; protecao externa e formato configurado no BOT permanecem pendencias de canario/rollout.
+O encerramento possui dois contratos aceitos. A rota explicita `POST /v1/orch/{workspace_uuid}/{flow_uuid}/switch-bot-flow/callback` recebe `session_id`, `status` e erro opcional. O contrato nativo confirmado do `finish_flow` permanece em `POST /v1/orch/{alias}` e envia `entity`, `session.id`, `variables` e `disposition`; o ORCH consome esse envelope antes do trigger comum somente quando `session.id` coincide com o `target_session_id` do handoff. `success/completed/finished` seguem pelo branch `success`; `error/exception/failed/unsuccess` seguem pelo branch `exception_*`. As rotas nao possuem autenticacao propria nesta primeira entrega; a protecao externa permanece pendencia de rollout.
 
 ## Files / Arquivos API
 

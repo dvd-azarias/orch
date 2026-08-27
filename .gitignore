@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 .idea/
 celerybeat-schedule.db
+.runlogs/
+/in_flight

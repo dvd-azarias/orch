@@ -1354,6 +1354,7 @@ async def apply_switch_bot_flow_callback(
             SELECT
                 id,
                 uuid::text AS uuid,
+                state,
                 runtime_variables,
                 last_card_uuid::text AS last_card_uuid,
                 next_card_uuid::text AS next_card_uuid
@@ -1388,6 +1389,7 @@ async def apply_switch_bot_flow_callback(
         handoff["completed_at"] = now_iso
         handoff["target_callback"] = {
             "status": callback_payload.get("status"),
+            "source": callback_payload.get("source") or "explicit_callback",
             "received_at": now_iso,
         }
         if terminal_status == "failed":
@@ -1407,6 +1409,7 @@ async def apply_switch_bot_flow_callback(
     return {
         "session_id": int(row["id"]),
         "session_uuid": str(row["uuid"]),
+        "state": int(row["state"]),
         "idempotent": idempotent,
         "status": previous_status if already_terminal else terminal_status,
     }
