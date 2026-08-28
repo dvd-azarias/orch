@@ -51,6 +51,7 @@ from app.repositories.orch_sessions_repository import (
     upsert_person_for_create_contact,
 )
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
+from app.services.billing_batch_service import try_record_billing_event
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
@@ -2931,12 +2932,21 @@ async def _run_create_contact(
         )
         if child_session.get("created"):
             created_sessions += 1
-            await try_create_billing_snapshot_outbox(
-                db_session,
-                workspace_uuid=get_current_workspace_uuid(),
-                session_id=int(child_session["id"]),
-                session_uuid=str(child_session["uuid"]),
-            )
+            billing_settings = get_settings()
+            if billing_settings.orch_billing_snapshot_enabled:
+                await try_create_billing_snapshot_outbox(
+                    db_session,
+                    workspace_uuid=get_current_workspace_uuid(),
+                    session_id=int(child_session["id"]),
+                    session_uuid=str(child_session["uuid"]),
+                )
+            elif billing_settings.orch_billing_enabled:
+                await try_record_billing_event(
+                    db_session,
+                    workspace_uuid=get_current_workspace_uuid(),
+                    session_id=int(child_session["id"]),
+                    settings=billing_settings,
+                )
         else:
             reused_sessions += 1
 

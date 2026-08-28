@@ -1,5 +1,20 @@
 # Fluxos de Dados
 
+## Billing batch `service-orch`
+
+```text
+orch_sessions INSERT confirmado pela transacao principal
+  -> registro idempotente em orch_billing_events (falha aberta via savepoint)
+  -> reconciliador repara omissoes a partir de orch_sessions
+  -> agregador trava pending com SKIP LOCKED e cria snapshot de ate 200
+  -> eventos ficam batched e ligados ao snapshot na mesma transacao
+  -> publisher adquire lease/claim_token e envia o payload persistido
+  -> confirm + roteamento RabbitMQ: snapshot/eventos sent
+  -> falha transitoria: failed + next_attempt_at; payload invalido: blocked
+```
+
+Reprocessamento mensal cria eventos ausentes pela mesma chave, reenfileira snapshots existentes sem trocar `snapshot_id` e adia o replay quando o lease esta `processing`. Detalhes em `docs/BILLING_BATCH_RUNBOOK.md`.
+
 ## Trigger comum
 
 ```text

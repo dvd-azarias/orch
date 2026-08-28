@@ -20,6 +20,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 8. Bloqueios considerados sucesso tambem podem ser amplificados sem alarme. A auditoria posterior a migracao dos workers para o host `10.1.20.237` confirmou o loop `blocked_send_whatsapp_interactive` ativo em tres workspaces, mais de 213 mil execucoes de executor e 428 mil metricas em cerca de 70 minutos. A correcao Alpha inclui esse motivo em `BLOCKING_RUNNING_STOP_REASONS`, preservando a sessao em `state=1` ate callback/reconciliacao; implantacao e validacao de runtime ainda estao pendentes.
 9. Em 2026-08-27, a suite coletou 383 testes: 356 passaram e 27 falharam; 26 correspondem majoritariamente a casos legados que ainda chamam `trigger_orch(flow_uuid=...)` e uma falha adicional foi `InvalidCachedStatementError` em teste DB com tabela temporaria. Nao trate a suite completa como verde. A regressao direcionada do `switch_bot_flow` passou integralmente com 118 testes.
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
+11. Billing possui dois mecanismos mutuamente exclusivos e desligados por default. `ORCH_BILLING_SNAPSHOT_ENABLED` e legado; `ORCH_BILLING_ENABLED` ativa o batch novo somente apos migration `0022`, worker e Beat dedicados. Nunca reutilizar o backfill legado. Consultar `docs/BILLING_BATCH_RUNBOOK.md`.
 
 ## O que e o ORCH
 
@@ -37,6 +38,8 @@ Aplicacoes detectadas, nesta ordem: `ArquivosApp`, `WhatsApp`, `DialerApp`, `Gen
 | Worker FileApp | ingest, process, associacao e reconciliacao | `fileapp_ingest`, `fileapp_process`, `fileapp_mailing_assoc` |
 | Worker generate_file | scan e envio SFTP | `generate_file_scan`, `generate_file_run` |
 | Beat generate_file | scan periodico | publica `generate_file_scan` |
+| Worker billing | agrega, publica, reconcilia e reprocessa | `orch.billing.outbox` |
+| Beat billing | quatro schedules exclusivos | publica em `orch.billing.outbox` |
 
 Entrypoints:
 
@@ -64,6 +67,7 @@ Objetos ORCH por schema de workspace:
 - `orch_sessions`, `orch_sessions_alarms`, `orch_session_metrics`, `orch_discarded_events`, `orch_channel_events`;
 - `orch_generate_file_job`, `orch_generate_file_row_buffer`, `orch_generate_file_dispatch_audit`;
 - `orch_whatsapp_limits`, `orch_whatsapp_rate_limit_per_flow`;
+- legado `orch_billing_usage_snapshots`; batch `orch_billing_events`, `orch_billing_snapshots`, `orch_billing_reprocess_requests`;
 - `orch_alembic_version`.
 
 Objeto central criado pelo ORCH: `target.orch_flow_aliases`.
@@ -83,6 +87,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - HTTP arbitrario: componente `api_call`.
 - SFTP/Paramiko: `generate_file`.
 - Supplier: endpoint autenticado de `resubmit`.
+- Billing: publisher confirmado no exchange `domain.events`; consumer deduplica por `snapshot_id` (premissa operacional fornecida).
 
 ## Invariantes criticas
 
@@ -96,6 +101,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `call_origin` da associacao FileApp e `file_event`; `linked_by` e o `file.id`.
 - Migrations ORCH usam `orch_alembic_version`, nunca `alembic_version`.
 - Valores de `linked_actuator_enum` pertencem ao Target Core e nao sao migrados pelo ORCH.
+- Billing batch conta a criacao de `orch_sessions`, usa `created_at` UTC e nunca reconstrói o payload durante retry. `sent` significa confirmacao/roteamento do RabbitMQ, nao processamento pelo consumer.
 - `switch_bot_flow` envia ao provider `whatsapp` do Runner v5 o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`. Usar `/webhook/session` fragmenta a identidade e desvia o dispatch para uma integracao webhook do flow.
 - A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O `finish_flow` BOT observado em runtime envia ao alias curto do proprio flow ORCH um envelope `entity + session.id + disposition`; `session.id` coincide com `target_session_id`. Esse envelope deve ser consumido antes do trigger comum para nao criar uma sessao fantasma. O primeiro estado terminal vence callbacks tardios conflitantes.
 
@@ -121,6 +127,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Reciclagem SIGTERM de child process expos `UnboundLocalError` em `_advance_session_task`: `stopped_reason` pode ser lido no `finally` antes de ser inicializado, mascarando a excecao original.
 - `live` nao e suportado no branch atual nem em `main`; o commit isolado `bd461a5` nao foi integrado e sua implementacao nao executa handoff ou callback externo.
 - O smoke versionado valida aceite HTTP, nao conclusao E2E.
+- O billing batch foi validado em PostgreSQL real com tabelas temporarias: 450 sessoes produziram snapshots `200 + 200 + 50`. Reprocessamento mensal usa chunks persistentes de 1000 e retomada por cursor. Broker/consumer alvo, concorrencia multi-transacao e rollout permanecem `UNKNOWN`; a migration `0022` exige medicao do lock do novo indice temporal no LAB.
 - O novo card `switch_bot_flow` e implementado sem alterar `run_flow`; consulta do `runner_token`, fila isolada e regressao direcionada foram validadas. O canario real confirmou Meta -> ORCH -> BOT -> Meta com identidade Runner estavel e respostas WhatsApp. O primeiro callback terminal chegou ao alias curto, mas entrou no trigger comum e criou a sessao fantasma `7106`; a correcao Alpha passa a correlaciona-lo por `session.id == target_session_id` antes da persistencia normal.
 
 ### LIKELY

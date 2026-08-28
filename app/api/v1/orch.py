@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,9 @@ from app.core.workspace import normalize_workspace_uuid, workspace_schema_from_u
 from app.schemas.orch import (
     OrchAlarmListResponse,
     OrchAlarmSummary,
+    OrchBillingReprocessRequest,
+    OrchBillingReprocessResponse,
+    OrchBillingStatusResponse,
     OrchCreateSessionRequest,
     OrchFlowAliasCreateResponse,
     OrchFlowAliasSummary,
@@ -55,6 +59,13 @@ from app.services.alarm_query_service import list_alarms
 from app.services.app_detector import APP_ARQUIVOS
 from app.services.app_detector import detect_app
 from app.services.alarm_service import persist_alarm
+from app.services.billing_batch_service import (
+    BillingIdempotencyConflict,
+    create_billing_reprocess_request,
+    get_billing_status,
+    mark_billing_reprocess_enqueued,
+    parse_billing_period,
+)
 from app.services.discarded_event_service import persist_discarded_event
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_service import (
@@ -81,6 +92,7 @@ from app.services.workspace_service import (
     ensure_workspace_ready_for_orch_migrate,
 )
 from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task, ingest_fileapp_tipo1_event_task
+from app.tasks.billing_batch_tasks import billing_reprocess_task
 from app.tasks.workflow_tasks import advance_session_task
 
 router = APIRouter(prefix="/v1/orch", tags=["orch"])
@@ -139,6 +151,24 @@ def _is_allowed_supplier_client(*, client_id: str | None, client_secret: str | N
     if settings.arquivos_client_id and settings.arquivos_client_secret:
         accepted_pairs.append((str(settings.arquivos_client_id).strip(), str(settings.arquivos_client_secret).strip()))
     return any(normalized_id == expected_id and normalized_secret == expected_secret for expected_id, expected_secret in accepted_pairs)
+
+
+def _require_billing_admin(*, client_id: str | None, client_secret: str | None) -> None:
+    settings = get_settings()
+    expected_id = str(settings.billing_admin_client_id or "").strip()
+    expected_secret = str(settings.billing_admin_client_secret or "").strip()
+    provided_id = str(client_id or "").strip()
+    provided_secret = str(client_secret or "").strip()
+    allowed = bool(
+        expected_id
+        and expected_secret
+        and provided_id
+        and provided_secret
+        and secrets.compare_digest(provided_id, expected_id)
+        and secrets.compare_digest(provided_secret, expected_secret)
+    )
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciais de billing inválidas.")
 
 
 def _extract_switch_bot_flow_terminal_signal(payload: dict[str, Any]) -> dict[str, str] | None:
@@ -1528,6 +1558,119 @@ async def get_alarms(
         items=[OrchAlarmSummary(**item) for item in page.items],
         next_cursor=page.next_cursor,
     )
+
+
+@router.post(
+    "/{workspace_uuid}/billing/service-orch/reprocess",
+    response_model=OrchBillingReprocessResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reprocess_service_orch_billing(
+    workspace_uuid: UUID,
+    request: OrchBillingReprocessRequest = Body(...),
+    idempotency_key: UUID = Header(..., alias="Idempotency-Key"),
+    requested_by: str = Header(..., alias="X-Requested-By"),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchBillingReprocessResponse:
+    _require_billing_admin(client_id=x_client_id, client_secret=x_client_secret)
+    settings = get_settings()
+    if not settings.orch_billing_enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Billing batch está desabilitado.")
+    requester = _read_required_text(requested_by, field_name="X-Requested-By")
+    reason = _read_required_text(request.reason, field_name="reason")
+    parse_billing_period(request.billing_period)
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    safe_schema = workspace_schema.replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    try:
+        persisted = await create_billing_reprocess_request(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            billing_period=request.billing_period,
+            idempotency_key=str(idempotency_key),
+            requested_by=requester,
+            reason=reason,
+        )
+    except BillingIdempotencyConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await db_session.commit()
+
+    enqueued = False
+    if persisted.status == "accepted" and persisted.created:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: billing_reprocess_task.apply_async(
+                        kwargs={"workspace_uuid": safe_workspace_uuid, "request_id": persisted.request_id},
+                        queue=settings.celery_billing_queue,
+                        routing_key=settings.celery_billing_queue,
+                    )
+                ),
+                timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+            )
+            enqueued = True
+            try:
+                await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+                await mark_billing_reprocess_enqueued(
+                    db_session,
+                    request_id=persisted.request_id,
+                )
+                await db_session.commit()
+            except Exception:
+                await db_session.rollback()
+                logger.warning(
+                    "billing reprocess enqueue marker failed",
+                    extra={
+                        "event": "orch.billing.reprocess.enqueue_marker_failed",
+                        "workspace_uuid": safe_workspace_uuid,
+                        "request_id": persisted.request_id,
+                    },
+                )
+        except Exception as exc:
+            logger.warning(
+                "billing reprocess enqueue failed; request remains accepted",
+                extra={
+                    "event": "orch.billing.reprocess.enqueue_failed",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "request_id": persisted.request_id,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+    return OrchBillingReprocessResponse(
+        status=persisted.status,
+        request_id=persisted.request_id,
+        workspace_uuid=safe_workspace_uuid,
+        billing_period=persisted.billing_period,
+        idempotent=not persisted.created,
+        enqueued=enqueued,
+    )
+
+
+@router.get(
+    "/{workspace_uuid}/billing/service-orch/status",
+    response_model=OrchBillingStatusResponse,
+)
+async def get_service_orch_billing_status(
+    workspace_uuid: UUID,
+    billing_period: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchBillingStatusResponse:
+    _require_billing_admin(client_id=x_client_id, client_secret=x_client_secret)
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    safe_schema = workspace_schema.replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    summary = await get_billing_status(
+        db_session,
+        workspace_uuid=safe_workspace_uuid,
+        billing_period=billing_period,
+    )
+    return OrchBillingStatusResponse(**summary)
 
 
 @router.post(

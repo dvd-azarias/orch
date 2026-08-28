@@ -12,6 +12,8 @@ Arquivos:
 - `systemctl/orch-celery-beat.service`
 - `systemctl/orch-celery-generate-file-worker.service`
 - `systemctl/orch-celery-generate-file-beat.service`
+- `systemctl/orch-celery-billing-worker.service`
+- `systemctl/orch-celery-billing-beat.service`
 
 ## Pré-requisitos
 
@@ -32,9 +34,14 @@ sudo cp systemctl/orch-celery-fileapp-worker.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-beat.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-generate-file-worker.service /etc/systemd/system/
 sudo cp systemctl/orch-celery-generate-file-beat.service /etc/systemd/system/
+sudo cp systemctl/orch-celery-billing-worker.service /etc/systemd/system/
+sudo cp systemctl/orch-celery-billing-beat.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now orch-api orch-celery-worker orch-celery-fileapp-worker orch-celery-beat orch-celery-generate-file-worker orch-celery-generate-file-beat
 ```
+
+As units de billing nao entram no `enable --now` generico. Instale-as somente depois da migration `0022`; mantenha
+`ORCH_BILLING_ENABLED=false` ate worker e Beat estarem disponiveis. Deve existir uma unica instancia do Beat de billing.
 
 ## Comandos úteis
 
@@ -57,6 +64,8 @@ sudo systemctl restart orch-api orch-celery-worker orch-celery-fileapp-worker or
 - `orch-celery-beat`: beat do workflow (dispatch/heartbeat).
 - `orch-celery-generate-file-worker`: worker do componente `generate_file`.
 - `orch-celery-generate-file-beat`: beat do `generate_file`.
+- `orch-celery-billing-worker`: agregacao, outbox, reconciliacao e reprocessamento na fila `orch.billing.outbox`.
+- `orch-celery-billing-beat`: scheduler exclusivo de billing; exatamente uma instancia por ambiente.
 
 Essa separação evita competição de consumo com outras aplicações e melhora visibilidade no Flower.
 

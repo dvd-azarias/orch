@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import app.services.workflow_m2_service as workflow_m2_service
@@ -321,6 +323,49 @@ def test_build_create_contact_records_raises_when_required_missing() -> None:
     with pytest.raises(WorkflowExecutionError) as exc:
         _build_create_contact_records(component=component, resolution_scope={})
     assert exc.value.code == "create_contact_missing_required_fields"
+
+
+@pytest.mark.asyncio
+async def test_create_contact_records_new_billing_event_without_legacy_dual_publish(monkeypatch) -> None:
+    child_session_uuid = "55555555-5555-5555-5555-555555555555"
+    batch_event = AsyncMock()
+    legacy_snapshot = AsyncMock()
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: SimpleNamespace(orch_billing_snapshot_enabled=False, orch_billing_enabled=True),
+    )
+    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(workflow_m2_service, "resolve_next_card_uuid_by_branch", lambda *_args, **_kwargs: "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setattr(workflow_m2_service, "ensure_default_source_list_for_create_contact", AsyncMock(return_value={"id": 7, "public_id": "list-7"}))
+    monkeypatch.setattr(workflow_m2_service, "upsert_person_for_create_contact", AsyncMock(return_value={"uuid": "33333333-3333-3333-3333-333333333333"}))
+    monkeypatch.setattr(workflow_m2_service, "ensure_contact_list_member_for_create_contact", AsyncMock(return_value={"id": 8, "created": True}))
+    monkeypatch.setattr(workflow_m2_service, "ensure_session_for_created_contact", AsyncMock(return_value={"id": 9, "uuid": child_session_uuid, "created": True}))
+    monkeypatch.setattr(workflow_m2_service, "increment_source_list_counters_for_create_contact", AsyncMock())
+    monkeypatch.setattr(workflow_m2_service, "try_record_billing_event", batch_event)
+    monkeypatch.setattr(workflow_m2_service, "try_create_billing_snapshot_outbox", legacy_snapshot)
+
+    result = await workflow_m2_service._run_create_contact(
+        db_session=None,
+        flow_uuid="44444444-4444-4444-4444-444444444444",
+        session_id=10,
+        definition={},
+        current_card_uuid="66666666-6666-6666-6666-666666666666",
+        component={
+            "ref_id": "create-1",
+            "parameters": {
+                "mapping": [
+                    {"key": "identifier", "value": "1001"},
+                    {"key": "address", "value": "551190000001"},
+                ]
+            },
+        },
+        runtime_variables={},
+    )
+
+    assert result == "action_after_creating_contact"
+    batch_event.assert_awaited_once()
+    legacy_snapshot.assert_not_awaited()
 
 
 def test_resolve_component_exception_branch_label_returns_exception_alias() -> None:

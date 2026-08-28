@@ -36,6 +36,15 @@ Garantir mudanças de schema com segurança em ambiente multi-workspace (`ws_*`)
   - `orch_generate_file_dispatch_audit`
 - Essas tabelas existem para evitar interferência com tabelas legadas de outras aplicações no mesmo ambiente.
 
+## Nota operacional — billing batch `0022`
+
+- Cria somente objetos `orch_billing_events`, `orch_billing_snapshots` e `orch_billing_reprocess_requests` por workspace.
+- Nao altera nem remove `orch_billing_usage_snapshots` da migration legada `0020`.
+- Aplicar com os dois mecanismos desligados; iniciar worker/Beat dedicados antes de habilitar `ORCH_BILLING_ENABLED`.
+- Nao executar o CLI legado `billing-backfill` para alimentar as tabelas novas.
+- Rollback operacional e por flag, preservando dados; nao fazer `DROP` das tabelas durante incidente.
+- `0022` cria um indice regular em `orch_sessions(created_at, id)`. Como migrations rodam em transacao, medir tamanho/tempo/lock no LAB e definir timeout ou janela antes de `migrate-all`; nao aplicar cegamente em workspace volumoso.
+
 ## Fluxo obrigatório para criar/alterar tabelas
 
 1. Criar novo arquivo SQL em `sql/` com próximo número sequencial (`006_...sql`, `007_...sql`, etc.).

@@ -1,0 +1,42 @@
+[Unit]
+Description=Orch Billing Celery Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orch
+Group=orch
+WorkingDirectory=/opt/orch
+
+EnvironmentFile=/etc/orch/orch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/orch
+Environment=ORCH_QUEUE_PROFILE=prod
+Environment=CELERY_BILLING_QUEUE=orch.billing.outbox
+
+ExecStart=/opt/orch/.venv/bin/celery -A app.core.billing_celery_app:billing_celery_app worker \
+  --hostname=orch-celery-billing-worker@136_01 \
+  --loglevel=INFO \
+  --pool=prefork \
+  --queues=orch.billing.outbox \
+  --concurrency=2 \
+  --prefetch-multiplier=1 \
+  -Ofair \
+  --max-tasks-per-child=1000 \
+  --without-gossip \
+  --without-mingle
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=330
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -10,13 +10,23 @@ Risco: ownership parcial e acoplamento de schema. `linked_actuator_enum` e expli
 
 RabbitMQ transporta tasks Celery. Redis e usado como backend opcional, heartbeat do beat e locks/cooldowns de reconciliacao.
 
-## Billing snapshots
+## Billing snapshots legados
 
 Quando `ORCH_BILLING_SNAPSHOT_ENABLED=1`, cada nova sessao local cria uma outbox idempotente por `snapshot_id`. O beat publica o snapshot apos o commit no exchange topic `domain.events`, usando a routing key oficial `billing.usage.snapshot.v1.target`. Falha do broker nao interrompe a criacao da sessao; o item permanece pendente para nova tentativa.
 
 Para retroativos, usar `python -m app.cli billing-backfill --period YYYY-MM --dry-run` antes de inserir lotes limitados. O comando cria somente sessoes sem registro de outbox no mesmo workspace, deriva o envelope do `created_at` em UTC e usa bloqueio `SKIP LOCKED`; portanto, pode ser repetido sem criar uma segunda cobranca. A opcao `--rearm-exhausted` reabilita apenas snapshots pendentes sem publicacao cujas tentativas ja atingiram o limite configurado.
 
 `UNKNOWN`: policies, DLQ, durabilidade, bindings, consumidores e backlogs reais.
+
+## Billing batch `service-orch`
+
+O mecanismo novo nasce desligado em `ORCH_BILLING_ENABLED=false` e nao compartilha tabelas nem backfill com o legado. `orch_sessions` e a fonte canonica; eventos idempotentes sao agregados em payload imutavel de ate 200 unidades e publicados pela aplicacao Celery dedicada.
+
+A publicacao usa exchange topic durable, mensagem persistente, `mandatory`, publisher confirm, `message_id/header messageId = snapshot_id` e headers de origem/schema/workspace. Somente o confirm roteado permite `sent`; falha depois do envio e antes do commit causa reentrega at-least-once com o mesmo `snapshot_id`.
+
+Retry e leases sao persistentes e indefinidos. Payload invalido fica `blocked`. Operacao, deploy e rollback: `docs/BILLING_BATCH_RUNBOOK.md`.
+
+`UNKNOWN`: confirm/retorno mandatory, binding, consumer e deduplicacao observados no ambiente alvo.
 
 ## Target Core — FileApp
 

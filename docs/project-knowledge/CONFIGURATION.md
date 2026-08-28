@@ -17,9 +17,9 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 
 ## Celery e profiles
 
-## Billing por sessao
+## Billing legado por sessao
 
-- `ORCH_BILLING_SNAPSHOT_ENABLED=1`: habilita a outbox e o publicador periodico.
+- `ORCH_BILLING_SNAPSHOT_ENABLED=1`: habilita a outbox/publicador legado; default `false` e nao deve ser combinado com o batch novo.
 - `ORCH_BILLING_RABBITMQ_URL`: URL AMQP exclusiva ou fallback do broker Celery; nunca registrar a URL completa.
 - `ORCH_BILLING_EXCHANGE=domain.events`
 - `ORCH_BILLING_ROUTING_KEY=billing.usage.snapshot.v1.target`
@@ -28,6 +28,22 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 - `ORCH_BILLING_METRIC_CODE=service-orch`
 - `ORCH_BILLING_PUBLISH_TIMEOUT_SECONDS=3`
 - `ORCH_BILLING_PUBLISH_MAX_ATTEMPTS=3`
+
+## Billing batch `service-orch`
+
+- `ORCH_BILLING_ENABLED=false`: feature flag nova; exige `BILLING_RABBITMQ_URL` quando ativa.
+- `BILLING_BATCH_SIZE=200`, `BILLING_FLUSH_INTERVAL_SECONDS=300`.
+- `BILLING_RETRY_SCAN_INTERVAL_SECONDS=15`, `BILLING_PROCESSING_LEASE_SECONDS=120`.
+- `BILLING_RETRY_INITIAL_SECONDS=15`, `BILLING_RETRY_MAX_SECONDS=3600`, `BILLING_RETRY_JITTER_SECONDS=10`.
+- `BILLING_RECONCILE_INTERVAL_SECONDS=300`, `BILLING_RECONCILE_LOOKBACK_HOURS=48`.
+- `BILLING_REPROCESS_LEASE_SECONDS=3600`, `BILLING_REPROCESS_SCAN_INTERVAL_SECONDS=60`, `BILLING_REPROCESS_CHUNK_SIZE=1000`.
+- `BILLING_PUBLISH_CONFIRM_TIMEOUT_SECONDS=10`, `BILLING_PUBLISH_CLAIM_BATCH_SIZE=20`.
+- `BILLING_EXCHANGE=domain.events`, `BILLING_ROUTING_KEY=billing.usage.snapshot.v1.target`.
+- `BILLING_APPLICATION_CODE=target`, `BILLING_SERVICE_CODE=service-orch`, `BILLING_METRIC_CODE=service-orch`.
+- `CELERY_BILLING_QUEUE`: `orch.billing.outbox` em prod, com sufixos isolados nos profiles locais.
+- `ORCH_BILLING_ADMIN_CLIENT_ID/SECRET`: autenticacao fail-closed das rotas operacionais.
+
+As flags legada e nova sao mutuamente exclusivas. Detalhes: `docs/BILLING_BATCH_RUNBOOK.md`.
 
 `ORCH_QUEUE_PROFILE` aceita `auto`, `launchd_local`, `f5_local`, `prod`. `auto` escolhe local no macOS e prod nos demais sistemas.
 
@@ -42,6 +58,7 @@ Somente nomes e semantica sao documentados; valores do `.env` nao fazem parte de
 | mailing assoc | `orch_fileapp_mailing_assoc` | `orch_fileapp_mailing_assoc_launchd_local` | `orch_fileapp_mailing_assoc_f5_local` |
 | generate run | `orch_component_generate_file_run` | sufixo launchd | sufixo f5 |
 | generate scan | `orch_component_generate_file_scan` | sufixo launchd | sufixo f5 |
+| billing | `orch.billing.outbox` | `orch.billing.outbox_launchd_local` | `orch.billing.outbox_f5_local` |
 
 Overrides `CELERY_*_QUEUE` prevalecem. API, publishers e consumers precisam usar os mesmos nomes.
 
