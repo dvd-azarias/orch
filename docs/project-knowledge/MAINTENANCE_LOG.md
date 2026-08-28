@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-08-28 — Billing batch persistente `service-orch`
+
+### REQUEST / CLASSIFICATION
+
+Substituir o publisher unitario legado por event store + snapshots agregados, retry persistente, reconciliacao e reprocessamento auditavel. `ALPHA_FIX_OPTIONAL`, risco alto por banco, Celery, concorrencia, idempotencia e RabbitMQ; novo mecanismo protegido por flag default `false`.
+
+### CHANGE
+
+- Legado `ORCH_BILLING_SNAPSHOT_ENABLED` preservado e desligado por default; configuracao rejeita dual enablement com `ORCH_BILLING_ENABLED`.
+- Migration `0022` cria eventos, snapshots, solicitacoes de reprocessamento e indice temporal de `orch_sessions`, sem alterar/remover a tabela `0020`.
+- Sessao nova, inclusive pelo componente `create_contact`, registra evento fail-open; reconciliador usa `orch_sessions` e chave idempotente por workspace/sessao/periodo/metrica.
+- Agregador cria batches maximos de 200 sob `FOR UPDATE SKIP LOCKED` e chama publicacao no mesmo flush; publisher usa payload persistido, `mandatory`, mensagem persistente e confirm.
+- Retry indefinido, backoff/teto/jitter, leases com `claim_token`, bloqueio estrutural e reprocessamento idempotente foram adicionados.
+- Reprocessamento mensal usa chunks persistentes de 1000, cursor retomavel e reserva de enqueue para nao inflar a fila quando workers estiverem indisponiveis.
+- App/fila/worker/Beat dedicados e rotas autenticadas de reprocess/status foram adicionados; nenhum template foi instalado.
+
+### VALIDATION
+
+- Regressao focada final: 157 testes passaram.
+- Integracao PostgreSQL fora da sandbox: 2 testes passaram; 450 sessoes em tabelas temporarias viraram 450 eventos e snapshots `200 + 200 + 50`, e a migration exata executou em schema descartavel dentro de transacao revertida.
+- Suite completa: 415 passaram e 27 falharam, exatamente nas duas familias do baseline (26 chamadas com assinatura antiga de `trigger_orch` e 1 invalidacao de prepared statement asyncpg em tabela temporaria); nenhuma falha nova de billing.
+- `compileall` e `git diff --check` passaram. Revisao independente concluiu `GO` para o patch de codigo.
+- Stack local homologada: API, tres workers e dois Beats `up`; smoke real nos dois flows retornou `202 accepted` para as sessoes `7201` e `7202`. Billing permaneceu desligado e nenhuma migration foi aplicada.
+- Broker/consumer alvo, concorrencia real multi-transacao, lock do indice em workspace volumoso e E2E do billing apos migration permanecem `UNKNOWN`; nenhuma producao foi acessada.
+
+### ROLLBACK
+
+`ORCH_BILLING_ENABLED=false`, restart dos processos afetados e preservacao das tabelas. Nao reativar o publisher legado sem decisao operacional explicita.
+
 ## 2026-08-27 — Card isolado `switch_bot_flow`
 
 ### REQUEST

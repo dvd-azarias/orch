@@ -4,10 +4,11 @@ Baseline estatica de 2026-08-24. O estado efetivo de producao permanece separado
 
 ## Limites do sistema
 
-O ORCH e uma aplicacao Python monolitica em repositorio unico, com tres entrypoints:
+O ORCH e uma aplicacao Python monolitica em repositorio unico, com quatro entrypoints:
 
 - FastAPI em `app/main.py`;
 - Celery em `app/core/celery_app.py`;
+- Celery dedicado de billing em `app/core/billing_celery_app.py`;
 - CLI de migrations em `app/cli.py`.
 
 A aplicacao nao usa modelos ORM declarativos. Services e repositories executam SQL textual contra PostgreSQL, alterando `search_path` conforme o workspace.
@@ -51,9 +52,12 @@ beat workflow -> heartbeat queue -> worker workflow -> Redis heartbeat
 API/FileApp   -> ingest queue -> worker FileApp -> process queue -> worker FileApp
 worker FileApp -> mailing assoc queue -> worker FileApp
 beat generate -> scan queue -> worker generate -> run queue -> worker generate
+billing beat -> orch.billing.outbox -> worker billing -> PostgreSQL/RabbitMQ domain.events
 ```
 
 Os processos sao separados por responsabilidade nos scripts e templates, mas compartilham a mesma app e o mesmo conjunto potencial de schedules. Flags incorretas podem fazer dois beats publicarem a mesma rotina.
+
+Excecao: o billing batch usa app, fila, worker e Beat dedicados. Seu schedule nao integra o `celery_app` geral e a configuracao rejeita ativacao simultanea dos publishers legado e novo.
 
 ## Multi-workspace
 
@@ -76,4 +80,3 @@ Chamadas HTTP, LLM e SFTP podem ocorrer enquanto a transacao da sessao permanece
 `CONFIRMED`: estrutura por leitura de codigo, SQL, testes, scripts e historico.
 
 `UNKNOWN`: numero real de processos, concorrencia, profiles, overrides, proxy, policies RabbitMQ e versao implantada.
-

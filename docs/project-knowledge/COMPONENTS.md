@@ -10,6 +10,8 @@
 | Worker FileApp | ingest, import, associacao e pos-processamento | mesma app Celery |
 | Worker generate_file | scan/run e SFTP | mesma app Celery |
 | Beat generate_file | agenda scan | mesma app Celery |
+| Worker billing | agrega, publica, reconcilia e reprocessa billing | `app.core.billing_celery_app:billing_celery_app` |
+| Beat billing | agenda exclusivamente as rotinas de billing | mesma app Celery dedicada |
 | CLI migration | migrate individual ou todos | `python -m app.cli` |
 
 ## Modulos principais
@@ -29,6 +31,8 @@
 - `app/services/fileapp_processed_file_service.py`: move/reupload/quarentena.
 - `app/services/generate_file_dispatch_service.py`: buffer, scan, SFTP e auditoria.
 - `app/services/migration_service.py`: registro e aplicacao de SQL versionado.
+- `app/services/billing_batch_service.py`: event store, agregacao, outbox, publisher confirm, retry, leases e reprocessamento.
+- `app/tasks/billing_batch_tasks.py`: cinco tasks dedicadas de billing.
 
 ## Health e observabilidade
 

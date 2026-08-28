@@ -20,6 +20,10 @@
 | `orch_generate_file_*` | workspace | jobs, buffer e auditoria de arquivos |
 | `orch_whatsapp_limits` | workspace | historico de limite por telefone |
 | `orch_whatsapp_rate_limit_per_flow` | workspace | consumo diario por flow/telefone |
+| `orch_billing_usage_snapshots` | workspace | outbox unitario legado, desligado por default |
+| `orch_billing_events` | workspace | event store idempotente do billing batch |
+| `orch_billing_snapshots` | workspace | outbox agregado, leases, retry e payload imutavel |
+| `orch_billing_reprocess_requests` | workspace | auditoria de reprocessamento operacional |
 | `orch_alembic_version` | workspace | controle de migrations do ORCH |
 | `target.orch_flow_aliases` | central | alias curto para workspace/flow |
 
@@ -33,12 +37,13 @@
 
 ## Migrations
 
-Lista executavel: `0001` a `0015`, depois `0018` e `0019`.
+Lista executavel: `0001` a `0015`, depois `0018` a `0022`.
 
 - `0016/0017` permanecem como arquivos historicos, mas foram retiradas do pipeline porque alteravam enum de outro sistema.
 - Todas as pendencias de um workspace rodam numa transacao.
 - `migrate-all` percorre workspaces `completed` sequencialmente; falha interrompe os seguintes, sem reverter workspaces ja concluidos.
 - Nao ha checksum, head unico, lock de migracao ou detector de drift de arquivo.
+- `0022` cria `idx_orch_sessions_billing_created_at (created_at, id)` para evitar full scan do billing. Como o pipeline e transacional, o build nao usa `CONCURRENTLY` e exige medicao no LAB/janela operacional para workspaces grandes.
 - O parser SQL e simples e nao suporta genericamente dollar-quoted blocks.
 - Paths de SQL sao relativos ao diretorio de execucao.
 
@@ -65,4 +70,3 @@ CLI individual deriva o schema do UUID sem consultar elegibilidade do workspace.
 - Versoes orfas `0016/0017` em `orch_alembic_version`.
 - Permissoes, tablespaces e extensoes no ambiente implantado.
 - Backlog, volume e qualidade dos dados.
-
