@@ -52,12 +52,19 @@ from app.repositories.orch_sessions_repository import (
     upsert_person_for_create_contact,
 )
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
+from app.services.billing_batch_service import try_record_billing_event
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 from app.services.session_metrics_service import persist_session_metrics
+from app.services.switch_bot_flow_service import (
+    SwitchBotFlowError,
+    extract_meta_message_ids,
+    is_meta_user_message_payload,
+    resolve_target_flow_uuid,
+)
 from app.services.workflow_engine import (
     component_kind,
     index_components,
@@ -75,6 +82,7 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "send_with_dialer": "blocked_send_with_dialer",
     "process_dialer_response": "blocked_process_dialer_response",
     "run_flow": "blocked_run_flow",
+    "switch_bot_flow": "blocked_switch_bot_flow",
 }
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
@@ -100,6 +108,9 @@ DIALER_BLOCKING_STOP_REASONS = {
 }
 RUN_FLOW_BLOCKING_STOP_REASONS = {
     "blocked_run_flow",
+}
+SWITCH_BOT_FLOW_BLOCKING_STOP_REASONS = {
+    "blocked_switch_bot_flow",
 }
 WHATSAPP_STATUS_ORDER_PREREQUISITES = {
     "delivered": "whatsapp_sent_at",
@@ -1220,6 +1231,104 @@ def _run_run_flow(
     return result
 
 
+def _switch_bot_flow_state(runtime_variables: dict[str, Any]) -> dict[str, Any] | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    state = workflow_meta.get("switch_bot_flow")
+    return state if isinstance(state, dict) else None
+
+
+def _run_switch_bot_flow(
+    *,
+    definition: dict[str, Any],
+    current_card_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or current_card_uuid).strip()
+    current_state = _switch_bot_flow_state(runtime_variables)
+    if isinstance(current_state, dict) and str(current_state.get("component_ref_id") or "") == component_ref_id:
+        status = str(current_state.get("status") or "").strip().lower()
+        if status == "completed":
+            return "success"
+        if status == "failed":
+            exception_branch = _resolve_component_exception_branch_label(
+                definition=definition,
+                current_card_uuid=current_card_uuid,
+            )
+            if exception_branch is not None:
+                return exception_branch
+            raise WorkflowExecutionError(
+                "switch_bot_flow_failed_without_exception_branch",
+                "switch_bot_flow falhou e não possui branch de exception.",
+            )
+        if status in {"waiting_message", "pending_delivery", "opening", "active"}:
+            return None
+
+    settings = get_settings()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        if not settings.switch_bot_flow_enabled:
+            raise SwitchBotFlowError(
+                "switch_bot_flow_disabled",
+                "switch_bot_flow está desabilitado por configuração.",
+            )
+        target_flow_uuid = resolve_target_flow_uuid(component)
+        last_payload = runtime_variables.get("last_payload")
+        if not isinstance(last_payload, dict):
+            raise SwitchBotFlowError(
+                "switch_bot_flow_last_payload_missing",
+                "switch_bot_flow não encontrou o último payload recebido pelo ORCH.",
+            )
+
+        is_meta_payload = last_payload.get("object") == "whatsapp_business_account"
+        has_user_message = is_meta_user_message_payload(last_payload)
+        if not is_meta_payload:
+            raise SwitchBotFlowError(
+                "switch_bot_flow_meta_payload_required",
+                "switch_bot_flow requer um payload original da Meta.",
+            )
+
+        state: dict[str, Any] = {
+            "component_ref_id": component_ref_id,
+            "target_flow_uuid": target_flow_uuid,
+            "target_session_id": None,
+            "status": "pending_delivery" if has_user_message else "waiting_message",
+            "activated_at": now_iso,
+            "completed_at": None,
+            "last_forwarded_event_id": None,
+            "last_error": None,
+        }
+        if has_user_message:
+            state["pending_payload"] = copy.deepcopy(last_payload)
+            state["pending_message_ids"] = extract_meta_message_ids(last_payload)
+        workflow_meta["switch_bot_flow"] = state
+        return None
+    except SwitchBotFlowError as exc:
+        workflow_meta["switch_bot_flow"] = {
+            "component_ref_id": component_ref_id,
+            "target_flow_uuid": None,
+            "target_session_id": None,
+            "status": "failed",
+            "activated_at": now_iso,
+            "completed_at": now_iso,
+            "last_forwarded_event_id": None,
+            "last_error": {
+                "code": exc.code,
+                "message": exc.message,
+                "status_code": exc.status_code,
+                "updated_at": now_iso,
+            },
+        }
+        exception_branch = _resolve_component_exception_branch_label(
+            definition=definition,
+            current_card_uuid=current_card_uuid,
+        )
+        if exception_branch is not None:
+            return exception_branch
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+
+
 def _extract_send_with_whatsapp_number_policies(component: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     config = params.get("whatsapp_numbers_config") if isinstance(params.get("whatsapp_numbers_config"), dict) else {}
@@ -1915,6 +2024,15 @@ def _should_resume_run_flow_blocking_execution(runtime_variables: dict[str, Any]
     if blocking_stop_reason not in RUN_FLOW_BLOCKING_STOP_REASONS:
         return False
     return _is_new_callback_for_waiting_run_flow(runtime_variables)
+
+
+def _should_resume_switch_bot_flow_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
+    blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+    if blocking_stop_reason not in SWITCH_BOT_FLOW_BLOCKING_STOP_REASONS:
+        return False
+    state = _switch_bot_flow_state(runtime_variables)
+    status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
+    return status in {"completed", "failed"}
 
 
 def _parse_variable_path_tokens(path: str) -> list[str | int] | None:
@@ -3243,12 +3361,21 @@ async def _run_create_contact(
         )
         if child_session.get("created"):
             created_sessions += 1
-            await try_create_billing_snapshot_outbox(
-                db_session,
-                workspace_uuid=get_current_workspace_uuid(),
-                session_id=int(child_session["id"]),
-                session_uuid=str(child_session["uuid"]),
-            )
+            billing_settings = get_settings()
+            if billing_settings.orch_billing_snapshot_enabled:
+                await try_create_billing_snapshot_outbox(
+                    db_session,
+                    workspace_uuid=get_current_workspace_uuid(),
+                    session_id=int(child_session["id"]),
+                    session_uuid=str(child_session["uuid"]),
+                )
+            elif billing_settings.orch_billing_enabled:
+                await try_record_billing_event(
+                    db_session,
+                    workspace_uuid=get_current_workspace_uuid(),
+                    session_id=int(child_session["id"]),
+                    settings=billing_settings,
+                )
         else:
             reused_sessions += 1
 
@@ -4495,13 +4622,14 @@ async def execute_workflow_m2_for_session(
         total_latency_ms = (time.perf_counter() - execution_started_perf) * 1000
         success_stop_reasons = {
             "finished_by_component",
-                "scheduled_wait",
-                "end_of_branch",
-                "blocked_send_with_whatsapp",
-                "blocked_send_whatsapp_interactive",
-                "blocked_process_whatsapp_response",
-                "blocked_send_with_dialer",
-                "blocked_process_dialer_response",
+            "scheduled_wait",
+            "end_of_branch",
+            "blocked_send_with_whatsapp",
+            "blocked_send_whatsapp_interactive",
+            "blocked_process_whatsapp_response",
+            "blocked_send_with_dialer",
+            "blocked_process_dialer_response",
+            "blocked_switch_bot_flow",
         }
         workflow_status = "success"
         if result.stopped_reason == "session_execution_locked":
@@ -4787,6 +4915,15 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
             elif _should_resume_run_flow_blocking_execution(runtime_variables):
+                _clear_blocking_execution(runtime_variables)
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
+                )
+            elif _should_resume_switch_bot_flow_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -5355,8 +5492,21 @@ async def execute_workflow_m2_for_session(
                             should_block_execution = False
                     elif kind == "run_flow":
                         _set_run_flow_waiting(runtime_variables, card_cursor=next_card_uuid)
+                    elif kind == "switch_bot_flow":
+                        branch_label = _run_switch_bot_flow(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                        if branch_label is not None:
+                            should_block_execution = False
                     if should_block_execution:
-                        resolved_next = next_card_uuid if kind == "run_flow" else resolve_next_card_uuid(definition, next_card_uuid)
+                        resolved_next = (
+                            next_card_uuid
+                            if kind in {"run_flow", "switch_bot_flow"}
+                            else resolve_next_card_uuid(definition, next_card_uuid)
+                        )
                         last_card_uuid = next_card_uuid
                         next_card_uuid = resolved_next
                         executed_steps += 1

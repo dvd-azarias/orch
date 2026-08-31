@@ -35,6 +35,7 @@ class Settings:
     celery_dispatch_batch_size: int
     celery_dispatch_queue: str
     celery_execute_queue: str
+    celery_switch_bot_flow_queue: str
     celery_heartbeat_queue: str
     celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
@@ -96,6 +97,30 @@ class Settings:
     orch_billing_publish_batch_size: int
     orch_billing_publish_max_attempts: int
     orch_billing_publish_timeout_seconds: float
+    orch_billing_enabled: bool
+    billing_batch_size: int
+    billing_flush_interval_seconds: int
+    billing_retry_scan_interval_seconds: int
+    billing_processing_lease_seconds: int
+    billing_retry_initial_seconds: int
+    billing_retry_max_seconds: int
+    billing_retry_jitter_seconds: int
+    billing_reconcile_interval_seconds: int
+    billing_reconcile_lookback_hours: int
+    billing_reprocess_lease_seconds: int
+    billing_reprocess_scan_interval_seconds: int
+    billing_reprocess_chunk_size: int
+    billing_publish_confirm_timeout_seconds: float
+    billing_publish_claim_batch_size: int
+    billing_rabbitmq_url: str | None
+    billing_exchange: str
+    billing_routing_key: str
+    billing_application_code: str
+    billing_service_code: str
+    billing_metric_code: str
+    billing_admin_client_id: str | None
+    billing_admin_client_secret: str | None
+    celery_billing_queue: str
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
     sync_ws_client_id: str | None
@@ -105,7 +130,12 @@ class Settings:
     arquivos_base_url: str | None
     sync_webhook_base_url: str | None
     sync_ws_timeout_seconds: float
+    target_core_api_base_url: str | None
     target_core_api_bearer_token: str | None
+    switch_bot_flow_enabled: bool
+    switch_bot_flow_http_timeout_seconds: float
+    switch_bot_flow_max_attempts: int
+    switch_bot_flow_retry_backoff_seconds: float
     otima_llm_api_base_url: str | None
     otima_llm_api_gateway: str | None
     otima_llm_api_key: str | None
@@ -156,6 +186,21 @@ def _read_env_int(name: str, default: int) -> int:
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
+
+
+def _read_env_int_range(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    value = _read_env_int(name, default)
+    if value < minimum or value > maximum:
+        raise ValueError(f"Valor inválido para {name}: esperado entre {minimum} e {maximum}.")
+    return value
+
+
+def _read_env_float_range(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = _read_env_optional(name)
+    value = default if raw is None else float(raw)
+    if value < minimum or value > maximum:
+        raise ValueError(f"Valor inválido para {name}: esperado entre {minimum} e {maximum}.")
+    return value
 
 
 def _read_env_bool(name: str, default: bool) -> bool:
@@ -216,12 +261,14 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
     base = {
         "dispatch": "orch_dispatch",
         "execute": "orch_execute",
+        "switch_bot_flow": "orch_switch_bot_flow",
         "heartbeat": "orch_heartbeat",
         "fileapp_ingest": "orch_fileapp_ingest_events",
         "fileapp_process": "orch_fileapp_source_list_ingest",
         "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc",
         "generate_file_run": "orch_component_generate_file_run",
         "generate_file_scan": "orch_component_generate_file_scan",
+        "billing": "orch.billing.outbox",
     }
     if queue_key not in base:
         raise ValueError(f"Queue key desconhecida: {queue_key}")
@@ -231,24 +278,28 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         mapping = {
             "dispatch": "orch_dispatch_launchd_local",
             "execute": "orch_execute_launchd_local",
+            "switch_bot_flow": "orch_switch_bot_flow_launchd_local",
             "heartbeat": "orch_heartbeat_launchd_local",
             "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
             "fileapp_process": "orch_fileapp_source_list_launchd_local",
             "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_launchd_local",
             "generate_file_run": "orch_component_generate_file_run_launchd_local",
             "generate_file_scan": "orch_component_generate_file_scan_launchd_local",
+            "billing": "orch.billing.outbox_launchd_local",
         }
         return mapping[queue_key]
     if profile == "f5_local":
         mapping = {
             "dispatch": "orch_dispatch_f5_local",
             "execute": "orch_execute_f5_local",
+            "switch_bot_flow": "orch_switch_bot_flow_f5_local",
             "heartbeat": "orch_heartbeat_f5_local",
             "fileapp_ingest": "orch_fileapp_ingest_f5_local",
             "fileapp_process": "orch_fileapp_source_list_f5_local",
             "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_f5_local",
             "generate_file_run": "orch_component_generate_file_run_f5_local",
             "generate_file_scan": "orch_component_generate_file_scan_f5_local",
+            "billing": "orch.billing.outbox_f5_local",
         }
         return mapping[queue_key]
     raise ValueError(f"Perfil de fila não suportado: {profile}")
@@ -273,8 +324,14 @@ def get_settings() -> Settings:
         broker_url = "memory://"
 
     result_backend = _read_env_optional("CELERY_RESULT_BACKEND", _read_env_optional("REDIS_URL"))
+    legacy_billing_enabled = _read_env_bool("ORCH_BILLING_SNAPSHOT_ENABLED", False)
+    billing_enabled = _read_env_bool("ORCH_BILLING_ENABLED", False)
+    if legacy_billing_enabled and billing_enabled:
+        raise ValueError(
+            "ORCH_BILLING_SNAPSHOT_ENABLED e ORCH_BILLING_ENABLED não podem estar ativos ao mesmo tempo."
+        )
 
-    return Settings(
+    settings = Settings(
         database_host=_read_env("DATABASE_HOST"),
         database_port=int(_read_env("DATABASE_PORT")),
         database_name=_read_env("DATABASE_NAME"),
@@ -308,6 +365,13 @@ def get_settings() -> Settings:
         celery_execute_queue=(
             _read_env_optional("CELERY_EXECUTE_QUEUE", _default_queue_by_profile(queue_profile, "execute"))
             or _default_queue_by_profile(queue_profile, "execute")
+        ),
+        celery_switch_bot_flow_queue=(
+            _read_env_optional(
+                "CELERY_SWITCH_BOT_FLOW_QUEUE",
+                _default_queue_by_profile(queue_profile, "switch_bot_flow"),
+            )
+            or _default_queue_by_profile(queue_profile, "switch_bot_flow")
         ),
         celery_heartbeat_queue=(
             _read_env_optional("CELERY_HEARTBEAT_QUEUE", _default_queue_by_profile(queue_profile, "heartbeat"))
@@ -452,7 +516,7 @@ def get_settings() -> Settings:
         celery_reconcile_pending_events_batch_size=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_BATCH_SIZE", 200),
         celery_reconcile_pending_events_stale_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_STALE_SECONDS", 30),
         celery_reconcile_pending_events_cooldown_seconds=_read_env_int("CELERY_RECONCILE_PENDING_EVENTS_COOLDOWN_SECONDS", 30),
-        orch_billing_snapshot_enabled=_read_env_bool("ORCH_BILLING_SNAPSHOT_ENABLED", False),
+        orch_billing_snapshot_enabled=legacy_billing_enabled,
         orch_billing_rabbitmq_url=_read_env_optional("ORCH_BILLING_RABBITMQ_URL"),
         orch_billing_exchange=_read_env_optional("ORCH_BILLING_EXCHANGE", "domain.events") or "domain.events",
         orch_billing_routing_key=(
@@ -468,6 +532,62 @@ def get_settings() -> Settings:
         orch_billing_publish_timeout_seconds=float(
             _read_env_optional("ORCH_BILLING_PUBLISH_TIMEOUT_SECONDS", "3") or "3"
         ),
+        orch_billing_enabled=billing_enabled,
+        billing_batch_size=_read_env_int_range("BILLING_BATCH_SIZE", 200, minimum=1, maximum=1000),
+        billing_flush_interval_seconds=_read_env_int_range(
+            "BILLING_FLUSH_INTERVAL_SECONDS", 300, minimum=5, maximum=86400
+        ),
+        billing_retry_scan_interval_seconds=_read_env_int_range(
+            "BILLING_RETRY_SCAN_INTERVAL_SECONDS", 15, minimum=5, maximum=3600
+        ),
+        billing_processing_lease_seconds=_read_env_int_range(
+            "BILLING_PROCESSING_LEASE_SECONDS", 120, minimum=30, maximum=86400
+        ),
+        billing_retry_initial_seconds=_read_env_int_range(
+            "BILLING_RETRY_INITIAL_SECONDS", 15, minimum=1, maximum=3600
+        ),
+        billing_retry_max_seconds=_read_env_int_range(
+            "BILLING_RETRY_MAX_SECONDS", 3600, minimum=1, maximum=86400
+        ),
+        billing_retry_jitter_seconds=_read_env_int_range(
+            "BILLING_RETRY_JITTER_SECONDS", 10, minimum=0, maximum=3600
+        ),
+        billing_reconcile_interval_seconds=_read_env_int_range(
+            "BILLING_RECONCILE_INTERVAL_SECONDS", 300, minimum=30, maximum=86400
+        ),
+        billing_reconcile_lookback_hours=_read_env_int_range(
+            "BILLING_RECONCILE_LOOKBACK_HOURS", 48, minimum=1, maximum=8760
+        ),
+        billing_reprocess_lease_seconds=_read_env_int_range(
+            "BILLING_REPROCESS_LEASE_SECONDS", 3600, minimum=60, maximum=86400
+        ),
+        billing_reprocess_scan_interval_seconds=_read_env_int_range(
+            "BILLING_REPROCESS_SCAN_INTERVAL_SECONDS", 60, minimum=5, maximum=3600
+        ),
+        billing_reprocess_chunk_size=_read_env_int_range(
+            "BILLING_REPROCESS_CHUNK_SIZE", 1000, minimum=1, maximum=10000
+        ),
+        billing_publish_confirm_timeout_seconds=_read_env_float_range(
+            "BILLING_PUBLISH_CONFIRM_TIMEOUT_SECONDS", 10.0, minimum=1.0, maximum=120.0
+        ),
+        billing_publish_claim_batch_size=_read_env_int_range(
+            "BILLING_PUBLISH_CLAIM_BATCH_SIZE", 20, minimum=1, maximum=200
+        ),
+        billing_rabbitmq_url=_read_env_optional("BILLING_RABBITMQ_URL"),
+        billing_exchange=_read_env_optional("BILLING_EXCHANGE", "domain.events") or "domain.events",
+        billing_routing_key=(
+            _read_env_optional("BILLING_ROUTING_KEY", "billing.usage.snapshot.v1.target")
+            or "billing.usage.snapshot.v1.target"
+        ),
+        billing_application_code=_read_env_optional("BILLING_APPLICATION_CODE", "target") or "target",
+        billing_service_code=_read_env_optional("BILLING_SERVICE_CODE", "service-orch") or "service-orch",
+        billing_metric_code=_read_env_optional("BILLING_METRIC_CODE", "service-orch") or "service-orch",
+        billing_admin_client_id=_read_env_optional("ORCH_BILLING_ADMIN_CLIENT_ID"),
+        billing_admin_client_secret=_read_env_optional("ORCH_BILLING_ADMIN_CLIENT_SECRET"),
+        celery_billing_queue=(
+            _read_env_optional("CELERY_BILLING_QUEUE", _default_queue_by_profile(queue_profile, "billing"))
+            or _default_queue_by_profile(queue_profile, "billing")
+        ),
         orch_lab_workspace_uuid=_read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         orch_default_workspace_uuid=_read_env_optional(
             "ORCH_DEFAULT_WORKSPACE_UUID",
@@ -480,9 +600,25 @@ def get_settings() -> Settings:
         arquivos_base_url=_read_env_optional("ARQUIVOS_BASE_URL"),
         sync_webhook_base_url=_read_env_optional("SYNC_WEBHOOK_BASE_URL"),
         sync_ws_timeout_seconds=float(_read_env_optional("SYNC_WS_TIMEOUT_SECONDS", "5") or "5"),
+        target_core_api_base_url=(
+            _read_env_optional("TARGET_CORE_API_BASE_URL")
+            or _read_env_optional("SYNC_WEBHOOK_BASE_URL")
+        ),
         target_core_api_bearer_token=(
             _read_env_optional("TARGET_CORE_API_BEARER_TOKEN")
             or _read_env_optional("SYNC_WEBHOOK_BEARER_TOKEN")
+        ),
+        switch_bot_flow_enabled=_read_env_bool("SWITCH_BOT_FLOW_ENABLED", False),
+        switch_bot_flow_http_timeout_seconds=float(
+            _read_env_optional("SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS", "30") or "30"
+        ),
+        switch_bot_flow_max_attempts=max(
+            1,
+            min(_read_env_int("SWITCH_BOT_FLOW_MAX_ATTEMPTS", 3), 5),
+        ),
+        switch_bot_flow_retry_backoff_seconds=max(
+            0.0,
+            float(_read_env_optional("SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS", "1") or "1"),
         ),
         otima_llm_api_base_url=_read_env_optional("OTIMA_LLM_API_BASE_URL"),
         otima_llm_api_gateway=_read_env_optional("OTIMA_LLM_API_GATEWAY"),
@@ -503,3 +639,10 @@ def get_settings() -> Settings:
             ("orch.otima.digital",),
         ),
     )
+    if settings.billing_retry_initial_seconds > settings.billing_retry_max_seconds:
+        raise ValueError("BILLING_RETRY_INITIAL_SECONDS não pode exceder BILLING_RETRY_MAX_SECONDS.")
+    if settings.orch_billing_enabled and not settings.billing_rabbitmq_url:
+        raise ValueError("BILLING_RABBITMQ_URL é obrigatória quando ORCH_BILLING_ENABLED=true.")
+    if settings.orch_billing_enabled and settings.celery_broker_url == "memory://":
+        raise ValueError("CELERY_BROKER_URL real é obrigatória quando ORCH_BILLING_ENABLED=true.")
+    return settings

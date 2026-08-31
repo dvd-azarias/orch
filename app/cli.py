@@ -124,7 +124,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Aplica migrations do orch em um workspace específico.",
     )
     migrate_workspace_parser.add_argument("workspace_uuid", help="UUID do workspace alvo.")
-    billing_backfill_parser = subparsers.add_parser("billing-backfill", help="Cria snapshots retroativos idempotentes na outbox.")
+    billing_backfill_parser = subparsers.add_parser(
+        "billing-backfill",
+        help="LEGADO: cria snapshots unitarios na outbox 0020; nao usar no billing batch.",
+    )
     billing_backfill_parser.add_argument("--period", required=True, help="Mês UTC no formato YYYY-MM.")
     billing_backfill_parser.add_argument("--batch-size", type=int, default=500)
     billing_backfill_parser.add_argument("--max-batches", type=int, default=1)

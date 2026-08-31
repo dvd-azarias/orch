@@ -2,6 +2,8 @@
 
 > **Nota de sustentacao (2026-08-24):** este README preserva o historico incremental das fases e contem trechos de planejamento/estado antigo. Para a baseline operacional atual, comece por `PROJECT_BRAIN.md` e `docs/project-knowledge/`; confirme comportamento no codigo e em runtime antes de usar uma regra historica como contrato.
 
+> **Billing batch `service-orch` (2026-08-28):** o mecanismo persistente novo nasce desligado, usa migration/worker/Beat dedicados e nao compartilha backfill com o publisher legado. Contratos, configuracao, deploy e rollback: `docs/BILLING_BATCH_RUNBOOK.md`.
+
 Aplicação de workflow/orquestração orientada a eventos externos (webhooks e payloads diversos), com foco inicial em detecção de origem do payload e controle de sessões no PostgreSQL.
 
 ## Fase 1 — Objetivo
@@ -1144,11 +1146,12 @@ Headers utilizados:
   3. `GET /v2/mailings/{mailing_id}/field-mappings`
   4. `PATCH /v2/mailings/{mailing_id}` (aplica `mapping_template_id`)
   5. `PUT /v2/mailings/{mailing_id}/field-mappings`
-  6. `POST /v2/mailings/{mailing_id}/import`
+  6. `POST /v2/mailings/{mailing_id}/import`, somente quando o passo 5 ainda responde `READY_TO_INGEST`
   7. `POST /v2/flow/{flow_uuid}/mailings`
 
 Regra crítica:
-- no passo 5, o status precisa chegar em `READY_TO_INGEST` antes de avançar para import/vínculo.
+- o Target Core pode autoenfileirar a ingestão no passo 5 e responder `INGESTING` ou `PROCESSED`; esses estados comprovam avanço e o ORCH não deve publicar um segundo import.
+- estados diferentes de `READY_TO_INGEST`, `INGESTING` ou `PROCESSED` continuam sendo falha do passo 5.
 - no `tipo_1`, o ORCH não deve fazer escrita direta em `orch_sessions`; a carga segue o caminho do Target Core.
 
 ## Fase 12 — `process_whatsapp_response` com desvio de branch

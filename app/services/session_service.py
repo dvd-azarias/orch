@@ -6,8 +6,10 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.orch_sessions_repository import PersistResult, upsert_active_session
+from app.services.billing_batch_service import try_record_billing_event
 from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 
 
@@ -44,12 +46,21 @@ async def persist_session(
             extracted=extracted,
         )
         if persisted.created:
-            await try_create_billing_snapshot_outbox(
-                db_session,
-                workspace_uuid=get_current_workspace_uuid(),
-                session_id=persisted.id,
-                session_uuid=persisted.uuid,
-            )
+            settings = get_settings()
+            # Settings rejects dual enablement; keep one producer path explicit here.
+            if settings.orch_billing_snapshot_enabled:
+                await try_create_billing_snapshot_outbox(
+                    db_session,
+                    workspace_uuid=get_current_workspace_uuid(),
+                    session_id=persisted.id,
+                    session_uuid=persisted.uuid,
+                )
+            elif settings.orch_billing_enabled:
+                await try_record_billing_event(
+                    db_session,
+                    workspace_uuid=get_current_workspace_uuid(),
+                    session_id=persisted.id,
+                )
 
     return SessionPersistResponse(
         session_id=persisted.id,

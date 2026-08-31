@@ -456,7 +456,87 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `V2`: avaliar entrega transacional/idempotente fora do caminho critico caso a garantia operacional passe a exigir retry.
 
-## R25 — Cutover HSM depende de ordem coordenada entre ORCH e Target Core
+## R25 — Rescue e higiene FileApp podem deixar arquivos antigos em starvation
+
+`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLANTADA (2026-08-26)
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando a pasta recebe arquivos continuamente e o batch e menor que o backlog
+
+`AFFECTED AREA`: FileApp entrada rescue/hygiene / Arquivos API
+
+`DESCRIPTION`: o risco possui dois mecanismos confirmados. O primeiro era a listagem parcial: `_list_files_in_folder` solicitava somente a primeira pagina (`offset=0`) e os reconciliadores usavam o `*_BATCH_SIZE` como `limit`; com a API em ordem decrescente, itens antigos nunca eram avaliados. O segundo permanece no rescue mesmo apos a paginacao: com batch `2`, dois itens antigos em estado Redis `in_flight`/`done` continuam ocupando toda selecao. Alem disso, `_has_fileapp_ingest_evidence` considera a mera existencia de `arquivos_s3_events` como evidencia suficiente e marca o flow como `done`, embora esse recibo possa comprovar somente entrega ao Orch e ainda nao existir `source_list`. O arquivo fisico permanece na entrada e bloqueia os seguintes.
+
+`RUNTIME EVIDENCE`: em 2026-08-26, a pasta `monitoramento/upload` continha 32 arquivos. A primeira pagina trazia `create_customer-5103-5103.csv` e os seguintes mais novos; os mais antigos, `create_customer-4699-4699.csv` e `create_customer-4701-4701.csv`, criados por volta de `09:50 UTC`, permaneciam sem qualquer evidencia no banco. Logs confirmaram repetidamente `files_scanned=2` e `skipped_recent=2`.
+
+Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na entrada. Os dois mais antigos estavam `accepted + in_flight`, sem atualizacao por mais de duas horas, e causavam starvation. Apos liberar os estados stale e reprocessar, dois itens sem `source_list` foram marcados `done` pelo rescue apenas por evidencia externa. O reenvio pela rota oficial idempotente reclamou os receipts falhos; um lote final de 15 arquivos obteve `202 queued`, terminou com 15 receipts `completed`, 15 arquivos em `processados`, zero em `falha` e zero restante na entrada.
+
+`MITIGATION`: a paginacao/ordenacao pelos mais antigos e a correcao residual foram implantadas. O rescue remove `arquivos_s3_events` da evidencia de ingestao, reclama `accepted` stale apos 60 segundos, faz o receipt duravel prevalecer sobre o estado Redis e trata o batch como limite de acoes; skips nao impedem a avaliacao dos itens seguintes. A recuperacao controlada deve usar a rota oficial do Orch, que reclama apenas receipts falhos e preserva a idempotencia por `(flow_uuid, file_id)`.
+
+`DETECTION`: alarme quando a idade do arquivo mais antigo de uma pasta monitorada ultrapassar o SLA sem evento/source list; registrar `oldest_created_at`, pagina/offset e contagem de itens elegíveis por ciclo.
+
+`V2`: claim persistente por arquivo e cursor/paginação durável, desacoplados da ordenação externa da listagem.
+
+## R26 — Corrida no status do mapping produz falso erro Tipo 1
+
+`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLEMENTADA, ROLLOUT PENDENTE (2026-08-26)
+
+`IMPACT`: high
+
+`PROBABILITY`: high sob workers Target Core rápidos
+
+`AFFECTED AREA`: FileApp tipo 1 / Target Core field mappings / pós-processamento
+
+`DESCRIPTION`: o `PUT /v2/mailings/{id}/field-mappings` do Target Core sincroniza os mappings e autoenfileira `source_list.ingest` quando existe template. Antes de o ORCH avaliar a resposta, o mailing pode avançar de `READY_TO_INGEST` para `INGESTING` ou `PROCESSED`. O ORCH exigia igualdade estrita com `READY_TO_INGEST`, registrava receipt `failed` e mantinha o arquivo na entrada até o rescue de 600 segundos, embora a entrega S3 e a ingestão Target já tivessem avançado.
+
+`RUNTIME EVIDENCE`: no workspace `253148c7-a85f-42a3-bc8b-5ffd9d885efe`, arquivos `create_customer-6687-6687.csv`, `create_customer-6763-6763.csv`, `create_customer-6764-6764.csv` e um terceiro arquivo subsequente tiveram callback aceito imediatamente e falharam no step 5 com HTTP 200 mais status `PROCESSED` ou `INGESTING`. O primeiro foi retomado pelo rescue exatamente após o grace e concluído em menos de um segundo.
+
+`MITIGATION`: aceitar somente `READY_TO_INGEST`, `INGESTING` e `PROCESSED` como estados válidos. Para `INGESTING`/`PROCESSED`, não publicar um segundo import; seguir para associação assíncrona, que já possui polling/retry até o estado final. Estados desconhecidos ou regressivos permanecem fail-closed.
+
+`DETECTION`: alertar receipt Tipo 1 `failed` com `reason=step5_put_field_mappings`, HTTP 2xx e mailing status avançado; correlacionar workspace, flow, file e receipt.
+
+`V2`: contrato explícito de ownership do auto-import e máquina de estados compartilhada entre ORCH e Target Core.
+
+## R27 — Relay BOT possui janela de repeticao entre efeito externo e commit
+
+`STATUS`: CONFIRMED CODE / E2E PENDENTE
+
+`IMPACT`: high
+
+`PROBABILITY`: low a medium em timeout, queda de worker ou resposta perdida
+
+`AFFECTED AREA`: `switch_bot_flow` / Runner v5 / mensagens WhatsApp
+
+`DESCRIPTION`: o worker envia o payload Meta ao Runner enquanto mantem a transacao da sessao. Se o Runner aceitar e a resposta/worker falhar antes do commit que remove `pending_payload` ou marca o evento, uma retomada pode reenviar o mesmo `messages[].id`. Os retries de `408/429/5xx` possuem a mesma janela. O callback terminal tambem nao possui autenticacao propria; sua protecao depende do ingress, ainda `UNKNOWN`.
+
+`MITIGATION`: habilitar inicialmente apenas no flow canario, confirmar deduplicacao do Runner por message id, monitorar `target_session_id`, `last_forwarded_event_id` e callbacks conflitantes. O relay e serializado pelo mesmo advisory lock do M2/callback e o primeiro estado terminal vence.
+
+`DETECTION`: comparar contagem de POSTs por `messages[].id` com ingestões da sessao BOT e alertar para `switch_bot_flow_runner_session_mismatch` ou repeticao de resposta após timeout.
+
+`V2`: outbox/receipt duravel com idempotency key contratual e callback autenticado/versionado.
+
+## R28 — Provider `webhook` fragmenta o handoff WhatsApp no Runner v5
+
+`STATUS`: CONFIRMED RUNTIME
+
+`IMPACT`: high
+
+`PROBABILITY`: high com token `session_key=chat.id` e entrada pelo provider `webhook`
+
+`AFFECTED AREA`: `switch_bot_flow` / Target Core Runner v5 / continuidade de sessao / resposta Meta
+
+`DESCRIPTION`: o canario de 2026-08-27 comprovou que enviar o payload Meta cru a `/v5/runner/tokens/{token}/webhook/session` nao basta para o Runner reconhecer o canal ou manter a sessao. O token BOT usava `session_key=chat.id`, ausente no JSON Meta, e o endpoint classificou os eventos como provider `webhook`. Cada POST recebeu um novo `external_session_id` e um novo Runner session ID. A engine gerou resposta em todas as sessoes, mas o dispatch terminou em `missing_integration` e nenhum `provider_msg_id` foi produzido.
+
+`RUNTIME EVIDENCE`: duas sessoes ORCH (`7080`, `7081`) produziram quatro sessoes Runner distintas em menos de 43 segundos. Todas continham o telefone no request, ficaram abertas com `user_external_id=NULL` e armazenaram a mesma resposta BOT. Os eventos seguintes fizeram o ORCH persistir `switch_bot_flow_runner_session_mismatch` e seguir pelo branch de excecao.
+
+`MITIGATION`: manter o card restrito ao canario e chamar o provider correto em `/v5/runner/tokens/{token}/whatsapp/session`. Esse caminho ja extrai `messages[].from`/`contacts[].wa_id`, resolve o numero de origem por `metadata.display_phone_number` ou `metadata.phone_number_id` e despacha pela API WhatsApp generica configurada no ambiente, sem depender de integracao ligada ao flow. Nao relaxar isoladamente o guard de mismatch no ORCH, pois isso mascara sessoes fragmentadas e torna callback/terminalidade ambiguos.
+
+`DETECTION`: correlacionar `target_session_id` do ORCH com `runner_v5_interaction_step`; alertar para mais de um Runner session ID pelo mesmo contato/handoff e para `dispatch_complete:missing_integration` ou resposta BOT sem `provider_msg_id`.
+
+`V2`: contrato versionado de relay com session key explicita, provider/canal normalizado, receipt de dispatch e identidade estavel obrigatoria.
+
+## R29 — Cutover HSM depende de ordem coordenada entre ORCH e Target Core
 
 `STATUS`: FIX IMPLEMENTED / DEPLOY AND RUNTIME VALIDATION PENDING
 

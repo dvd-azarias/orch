@@ -1318,6 +1318,103 @@ async def fetch_session_workflow_state(
     return dict(row) if row is not None else None
 
 
+async def apply_switch_bot_flow_callback(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    target_session_id: str,
+    terminal_status: str,
+    callback_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    candidate_result = await db_session.execute(
+        text(
+            """
+            SELECT id
+            FROM orch_sessions
+            WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+              AND runtime_variables #>> '{workflow_v2,switch_bot_flow,target_session_id}' = :target_session_id
+              AND unassigned_at IS NULL
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """
+        ),
+        {"flow_uuid": flow_uuid, "target_session_id": target_session_id},
+    )
+    candidate_id = candidate_result.scalar()
+    if candidate_id is None:
+        return None
+
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
+        {"class_id": 92021, "object_id": int(candidate_id)},
+    )
+    current_result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                uuid::text AS uuid,
+                state,
+                runtime_variables,
+                last_card_uuid::text AS last_card_uuid,
+                next_card_uuid::text AS next_card_uuid
+            FROM orch_sessions
+            WHERE id = :session_id
+              AND runtime_variables #>> '{workflow_v2,switch_bot_flow,target_session_id}' = :target_session_id
+            LIMIT 1
+            """
+        ),
+        {"session_id": int(candidate_id), "target_session_id": target_session_id},
+    )
+    row = current_result.mappings().first()
+    if row is None:
+        return None
+
+    runtime_variables = row.get("runtime_variables")
+    if not isinstance(runtime_variables, dict):
+        runtime_variables = {}
+    workflow_meta = runtime_variables.get("workflow_v2")
+    if not isinstance(workflow_meta, dict):
+        return None
+    handoff = workflow_meta.get("switch_bot_flow")
+    if not isinstance(handoff, dict):
+        return None
+
+    previous_status = str(handoff.get("status") or "").strip().lower()
+    already_terminal = previous_status in {"completed", "failed"}
+    idempotent = already_terminal
+    if not idempotent:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        handoff["status"] = terminal_status
+        handoff["completed_at"] = now_iso
+        handoff["target_callback"] = {
+            "status": callback_payload.get("status"),
+            "source": callback_payload.get("source") or "explicit_callback",
+            "received_at": now_iso,
+        }
+        if terminal_status == "failed":
+            handoff["last_error"] = {
+                "code": "switch_bot_flow_target_failed",
+                "message": str(callback_payload.get("error") or "BOT encerrou o handoff com falha."),
+                "updated_at": now_iso,
+            }
+        await replace_session_workflow_state(
+            db_session,
+            session_id=int(row["id"]),
+            runtime_variables=runtime_variables,
+            last_card_uuid=row.get("last_card_uuid"),
+            next_card_uuid=row.get("next_card_uuid"),
+        )
+
+    return {
+        "session_id": int(row["id"]),
+        "session_uuid": str(row["uuid"]),
+        "state": int(row["state"]),
+        "idempotent": idempotent,
+        "status": previous_status if already_terminal else terminal_status,
+    }
+
+
 async def fetch_session_webhook_snapshot(
     db_session: AsyncSession,
     *,

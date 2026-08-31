@@ -393,6 +393,18 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
             )
         if db_session.in_transaction():
             await db_session.commit()
+    if stopped_reason == "blocked_switch_bot_flow":
+        from app.tasks.switch_bot_flow_tasks import process_switch_bot_flow_task
+
+        process_switch_bot_flow_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_switch_bot_flow_queue,
+            routing_key=settings.celery_switch_bot_flow_queue,
+        )
     logger.info(
         "workflow session advanced",
         extra={

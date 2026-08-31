@@ -20,6 +20,8 @@ scripts/dev_phase_stack.sh smoke 5
 
 Processos esperados: API, worker/beat workflow, worker FileApp e worker/beat generate-file.
 
+O billing batch nao integra ainda a stack DEV canonica e nasce desligado. Para sua validacao/rollout, seguir exclusivamente `docs/BILLING_BATCH_RUNBOOK.md` e usar a fila local isolada do profile ativo.
+
 Bloqueio atual conhecido: o script usa `rg` para detectar prontidao. Se `rg` nao existir, a validacao falha mesmo com worker pronto. Nao interprete esse sintoma como falha Celery sem olhar os logs.
 
 Logs: `.runlogs/phase_stack/`.
@@ -49,6 +51,8 @@ Baseline confirmada:
 - API FastAPI/Uvicorn executa na porta `7777`.
 
 Os templates em `systemctl/` ainda representam uma topologia generica antiga, com caminhos `/opt/orch`, environment file `/etc/orch/orch.env`, hostnames `136` e units sem escala horizontal. Nao instalar ou copiar esses templates diretamente sobre o `237`.
+
+As units genericas de billing foram apenas adicionadas como referencia e nao fazem parte desta baseline de 19 servicos. Nao as instalar no `237` sem migration, plano de rollout e autorizacao.
 
 Diagnosticar pela configuracao efetiva:
 
@@ -128,6 +132,8 @@ Seguir `docs/MIGRATIONS_PLAYBOOK.md`. Aplicar primeiro em workspace LAB, validar
 ## Rollback operacional
 
 Nao ha procedimento universal versionado. Antes de qualquer mudanca, definir rollback por area. Para documentacao apenas, rollback e reverter os arquivos de conhecimento. Para runtime, nao improvisar reset, migration reversa ou purge de fila.
+
+Para billing batch, o rollback especifico e nao destrutivo: `ORCH_BILLING_ENABLED=false`, restart dos produtores/worker/Beat e preservacao integral das tres tabelas. Nao religar o legado automaticamente. Ver `docs/BILLING_BATCH_RUNBOOK.md`.
 
 ## Rollout do roteamento contextual de membros
 

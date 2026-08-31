@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -37,6 +38,11 @@ from app.services.fileapp_processed_file_service import (
 from app.services.fileapp_mailing_association_service import associate_mailing_to_flow_from_file_event
 from app.services.orch_trigger_service import process_single_payload
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
+from app.repositories.orch_fileapp_ingest_receipts_repository import (
+    claim_fileapp_ingest_receipt,
+    mark_fileapp_ingest_receipt_enqueued,
+    mark_fileapp_ingest_receipt_status,
+)
 from app.services.alarm_service import persist_alarm
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
 
@@ -45,6 +51,96 @@ logger = get_logger(__name__)
 _RETRY_DELAYS = (30, 120, 300)
 _STEP1_UPLOAD_RETRY_DELAYS = (15, 30, 60, 120, 300, 600)
 _STEP6_IMPORT_RETRY_DELAYS = (5, 15, 30, 60, 120, 300)
+
+
+async def _mark_fileapp_ingest_receipt_status(
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """Best-effort receipt lifecycle update; it must never hide FileApp processing."""
+    try:
+        _, workspace_schema = bind_workspace_context(workspace_uuid)
+        async with get_session_factory()() as db_session:
+            await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+            await mark_fileapp_ingest_receipt_status(
+                db_session,
+                receipt_id=receipt_id,
+                status=status,
+                error=error,
+            )
+            await db_session.commit()
+    except Exception:
+        logger.exception(
+            "fileapp ingest receipt lifecycle update failed",
+            extra={"workspace_uuid": workspace_uuid, "receipt_id": receipt_id, "status": status},
+        )
+
+
+async def _mark_fileapp_ingest_receipt_enqueued(
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+    task_id: str,
+) -> None:
+    """Best-effort durable task correlation after a rescue publish."""
+    try:
+        _, workspace_schema = bind_workspace_context(workspace_uuid)
+        async with get_session_factory()() as db_session:
+            await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+            await mark_fileapp_ingest_receipt_enqueued(
+                db_session,
+                receipt_id=receipt_id,
+                task_id=task_id,
+            )
+            await db_session.commit()
+    except Exception:
+        logger.exception(
+            "fileapp ingest receipt enqueue correlation failed",
+            extra={
+                "workspace_uuid": workspace_uuid,
+                "receipt_id": receipt_id,
+                "task_id": task_id,
+            },
+        )
+
+
+async def _claim_fileapp_ingest_receipt_for_worker(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    file_id: str,
+    folder_path: str,
+    file_name: str,
+    ingest_origin: str,
+) -> dict[str, Any] | None:
+    """Claim a receipt in its workspace schema before a rescue publish."""
+    try:
+        UUID(file_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        _, workspace_schema = bind_workspace_context(workspace_uuid)
+        async with get_session_factory()() as db_session:
+            await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+            receipt = await claim_fileapp_ingest_receipt(
+                db_session,
+                flow_uuid=flow_uuid,
+                file_id=file_id,
+                folder_path=folder_path,
+                file_name=file_name,
+                ingest_origin=ingest_origin,
+            )
+            await db_session.commit()
+            return receipt
+    except Exception:
+        logger.exception(
+            "fileapp rescue receipt claim failed",
+            extra={"workspace_uuid": workspace_uuid, "flow_uuid": flow_uuid, "file_id": file_id},
+        )
+        return None
 
 
 async def _fetch_existing_source_list_names(
@@ -839,8 +935,8 @@ async def _list_files_in_folder(
     def _fetch_page(offset: int) -> list[dict[str, Any]]:
         from urllib.parse import urlencode
 
-        bounded_limit = min(100, max(1, int(limit)))
-        params = urlencode({"prefix": f"{folder_path}/", "limit": bounded_limit, "offset": max(0, int(offset))})
+        page_size = 100
+        params = urlencode({"prefix": f"{folder_path}/", "limit": page_size, "offset": max(0, int(offset))})
         request = Request(f"{base_url}/files/list?{params}", headers=headers, method="GET")
         with urlopen(request, timeout=max(2, int(settings.sync_ws_timeout_seconds))) as response:
             body = response.read().decode("utf-8", errors="replace")
@@ -857,7 +953,25 @@ async def _list_files_in_folder(
         return []
 
     try:
-        first_page = await asyncio.to_thread(_fetch_page, 0)
+        listed_files: list[dict[str, Any]] = []
+        seen_file_keys: set[str] = set()
+        offset = 0
+        while True:
+            page = await asyncio.to_thread(_fetch_page, offset)
+            if not page:
+                break
+            new_items = 0
+            for item in page:
+                file_id = str(item.get("id") or item.get("uuid") or "").strip()
+                file_key = file_id or json.dumps(item, sort_keys=True, default=str)
+                if file_key in seen_file_keys:
+                    continue
+                seen_file_keys.add(file_key)
+                listed_files.append(item)
+                new_items += 1
+            if len(page) < 100 or new_items == 0:
+                break
+            offset += len(page)
     except HTTPError as exc:
         error_body = ""
         try:
@@ -889,7 +1003,29 @@ async def _list_files_in_folder(
             },
         )
         return []
-    return first_page
+    return listed_files
+
+
+def _select_oldest_files_in_folder(
+    listed_files: list[dict[str, Any]],
+    *,
+    folder_path: str,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    eligible_files: list[tuple[datetime, int, dict[str, Any]]] = []
+    normalized_folder = str(folder_path or "").strip().strip("/")
+    for index, file_item in enumerate(listed_files):
+        file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
+        original_name = str(
+            file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""
+        ).strip()
+        listed_folder = str(file_item.get("folder_path") or file_item.get("path") or normalized_folder).strip().strip("/")
+        created_at = _parse_file_datetime(file_item.get("created_at")) or _parse_file_datetime(file_item.get("updated_at"))
+        if not file_id or not original_name or listed_folder != normalized_folder or created_at is None:
+            continue
+        eligible_files.append((created_at, index, file_item))
+    eligible_files.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in eligible_files[: max(1, int(batch_size))]]
 
 
 async def _fetch_file_metadata_by_id(
@@ -978,25 +1114,6 @@ async def _has_fileapp_ingest_evidence(
     normalized_folder = _normalize_folder_path(monitored_folder).lower()
     if not normalized_folder:
         return False
-    event_check = await db_session.execute(
-        text(
-            f"""
-            SELECT 1
-            FROM "{safe_schema}".arquivos_s3_events
-            WHERE (
-                    file_id = CAST(:file_id AS uuid)
-                    OR file_name = :original_name
-                  )
-              AND lower(trim(BOTH '/' FROM COALESCE(folder_path, ''))) = :folder_path
-            ORDER BY created_at DESC
-            LIMIT 1
-            """
-        ),
-        {"file_id": file_id, "original_name": original_name, "folder_path": normalized_folder},
-    )
-    if event_check.first() is not None:
-        return True
-
     source_list_check = await db_session.execute(
         text(
             f"""
@@ -1204,8 +1321,12 @@ def ingest_fileapp_tipo1_event_task(
     flow_uuid: str,
     payload: dict[str, Any],
     mapping_template_uuid: str,
+    receipt_id: int | None = None,
+    ingest_origin: str = "webhook",
 ) -> dict[str, Any]:
     settings = get_settings()
+    if receipt_id is not None:
+        asyncio.run(_mark_fileapp_ingest_receipt_status(workspace_uuid=workspace_uuid, receipt_id=receipt_id, status="processing"))
     try:
         task = process_fileapp_tipo1_event_task.apply_async(
             kwargs={
@@ -1213,6 +1334,8 @@ def ingest_fileapp_tipo1_event_task(
                 "flow_uuid": flow_uuid,
                 "payload": payload,
                 "mapping_template_uuid": mapping_template_uuid,
+                "receipt_id": receipt_id,
+                "ingest_origin": ingest_origin,
             },
             queue=settings.celery_source_list_ingest_queue,
             routing_key=settings.celery_source_list_ingest_queue,
@@ -1231,6 +1354,8 @@ def ingest_fileapp_tipo1_event_task(
             "mapping_template_uuid": mapping_template_uuid,
             "queue": settings.celery_source_list_ingest_queue,
             "task_id": task.id,
+            "receipt_id": receipt_id,
+            "origin": ingest_origin,
         },
     )
     return {
@@ -1261,6 +1386,8 @@ def process_fileapp_tipo1_event_task(
     flow_uuid: str,
     payload: dict[str, Any],
     mapping_template_uuid: str,
+    receipt_id: int | None = None,
+    ingest_origin: str = "webhook",
 ) -> dict[str, Any]:
     _persist_process_tipo1_rescue_flow_state(
         workspace_uuid=workspace_uuid,
@@ -1279,6 +1406,8 @@ def process_fileapp_tipo1_event_task(
             )
         )
     except Exception:
+        if receipt_id is not None:
+            asyncio.run(_mark_fileapp_ingest_receipt_status(workspace_uuid=workspace_uuid, receipt_id=receipt_id, status="failed", error="Tipo 1 processing task failed"))
         _persist_process_tipo1_rescue_flow_state(
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
@@ -1319,6 +1448,15 @@ def process_fileapp_tipo1_event_task(
             state=terminal_state,
             ttl_seconds=86400,
         )
+        if receipt_id is not None:
+            asyncio.run(
+                _mark_fileapp_ingest_receipt_status(
+                    workspace_uuid=workspace_uuid,
+                    receipt_id=receipt_id,
+                    status="completed" if terminal_state == "done" else "failed",
+                    error=None if terminal_state == "done" else "Tipo 1 import conflict processing failed",
+                )
+            )
         return handled_result
     else:
         terminal_state = "done" if str(result.get("status") or "").strip().lower() == "done" else "failed"
@@ -1329,6 +1467,15 @@ def process_fileapp_tipo1_event_task(
             state=terminal_state,
             ttl_seconds=86400,
         )
+        if receipt_id is not None:
+            asyncio.run(
+                _mark_fileapp_ingest_receipt_status(
+                    workspace_uuid=workspace_uuid,
+                    receipt_id=receipt_id,
+                    status="completed" if terminal_state == "done" else "failed",
+                    error=None if terminal_state == "done" else "Tipo 1 processing returned non-terminal success",
+                )
+            )
         return result
 
     retries = int(self.request.retries or 0)
@@ -1406,6 +1553,15 @@ def process_fileapp_tipo1_event_task(
             state="failed",
             ttl_seconds=86400,
         )
+        if receipt_id is not None:
+            asyncio.run(
+                _mark_fileapp_ingest_receipt_status(
+                    workspace_uuid=workspace_uuid,
+                    receipt_id=receipt_id,
+                    status="failed",
+                    error="Tipo 1 retries exhausted",
+                )
+            )
         return failed_result
 
     asyncio.run(
@@ -2295,6 +2451,8 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
 
             for folder_path, flow_uuids in folder_to_flows.items():
                 folders_scanned += 1
+                folder_action_limit = max(1, int(settings.celery_fileapp_entrada_rescue_batch_size))
+                folder_actions = 0
                 listed_files = await _list_files_in_folder(
                     settings=settings,
                     workspace_uuid=safe_workspace_uuid,
@@ -2302,7 +2460,13 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                     workspace_api_key=workspace_api_key,
                     limit=settings.celery_fileapp_entrada_rescue_batch_size,
                 )
-                for file_item in listed_files:
+                for file_item in _select_oldest_files_in_folder(
+                    listed_files,
+                    folder_path=folder_path,
+                    batch_size=max(1, len(listed_files)),
+                ):
+                    if folder_actions >= folder_action_limit:
+                        break
                     file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
                     original_name = str(
                         file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""
@@ -2370,6 +2534,7 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                     }
 
                     if age_seconds >= fail_after_seconds and attempts >= max_retries:
+                        folder_actions += 1
                         try:
                             quarantine_result = await quarantine_file_to_falha(
                                 settings=settings,
@@ -2410,15 +2575,6 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                     enqueued = False
                     should_increment_attempt = False
                     for flow_uuid in flow_uuids:
-                        flow_state = _get_fileapp_entrada_rescue_flow_state(
-                            redis_client,
-                            workspace_uuid=safe_workspace_uuid,
-                            flow_uuid=flow_uuid,
-                            file_id=file_id,
-                        )
-                        if flow_state in {"in_flight", "done"}:
-                            continue
-
                         mapping_template_uuid = await resolve_mapping_template_uuid(
                             db_session,
                             workspace_schema=workspace_schema,
@@ -2427,28 +2583,86 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                         )
                         if not mapping_template_uuid:
                             continue
-                        if not _try_mark_fileapp_entrada_rescue_flow_in_flight(
-                            redis_client,
+                        receipt = await _claim_fileapp_ingest_receipt_for_worker(
                             workspace_uuid=safe_workspace_uuid,
                             flow_uuid=flow_uuid,
                             file_id=file_id,
-                            ttl_seconds=state_ttl_seconds,
-                        ):
+                            folder_path=folder_path,
+                            file_name=original_name,
+                            ingest_origin="rescue",
+                        )
+                        if receipt is not None and not receipt["should_enqueue"]:
+                            receipt_status = str(receipt.get("status") or "").strip().lower()
+                            _set_fileapp_entrada_rescue_flow_state(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                file_id=file_id,
+                                state="done" if receipt_status == "completed" else "in_flight",
+                                ttl_seconds=state_ttl_seconds,
+                            )
+                            logger.info(
+                                "fileapp rescue skipped existing receipt",
+                                extra={
+                                    "event": "orch.fileapp.entrada_rescue.receipt_exists",
+                                    "workspace_uuid": safe_workspace_uuid,
+                                    "flow_uuid": flow_uuid,
+                                    "file_id": file_id,
+                                    "receipt_id": receipt["id"],
+                                    "status": receipt["status"],
+                                    "origin": "rescue",
+                                },
+                            )
                             continue
+                        if receipt is not None:
+                            _set_fileapp_entrada_rescue_flow_state(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                file_id=file_id,
+                                state="in_flight",
+                                ttl_seconds=state_ttl_seconds,
+                            )
+                        else:
+                            flow_state = _get_fileapp_entrada_rescue_flow_state(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                file_id=file_id,
+                            )
+                            if flow_state in {"in_flight", "done"}:
+                                continue
+                            if not _try_mark_fileapp_entrada_rescue_flow_in_flight(
+                                redis_client,
+                                workspace_uuid=safe_workspace_uuid,
+                                flow_uuid=flow_uuid,
+                                file_id=file_id,
+                                ttl_seconds=state_ttl_seconds,
+                            ):
+                                continue
                         should_increment_attempt = True
                         try:
-                            ingest_fileapp_tipo1_event_task.apply_async(
+                            task = ingest_fileapp_tipo1_event_task.apply_async(
                                 kwargs={
                                     "workspace_uuid": safe_workspace_uuid,
                                     "flow_uuid": flow_uuid,
                                     "payload": payload,
                                     "mapping_template_uuid": mapping_template_uuid,
+                                    "receipt_id": receipt["id"] if receipt is not None else None,
+                                    "ingest_origin": "rescue",
                                 },
                                 queue=settings.celery_s3_files_ingest_queue,
                                 routing_key=settings.celery_s3_files_ingest_queue,
                             )
+                            if receipt is not None:
+                                await _mark_fileapp_ingest_receipt_enqueued(
+                                    workspace_uuid=safe_workspace_uuid,
+                                    receipt_id=receipt["id"],
+                                    task_id=str(task.id),
+                                )
                             enqueued = True
                             reingested += 1
+                            folder_actions += 1
                             _set_fileapp_entrada_rescue_attempts(
                                 redis_client,
                                 workspace_uuid=safe_workspace_uuid,
@@ -2458,6 +2672,13 @@ async def _reconcile_fileapp_entrada_rescue_task() -> dict[str, int]:
                             )
                             break
                         except Exception as exc:
+                            if receipt is not None:
+                                await _mark_fileapp_ingest_receipt_status(
+                                    workspace_uuid=safe_workspace_uuid,
+                                    receipt_id=receipt["id"],
+                                    status="enqueue_failed",
+                                    error="Celery rescue publish failed",
+                                )
                             _set_fileapp_entrada_rescue_flow_state(
                                 redis_client,
                                 workspace_uuid=safe_workspace_uuid,
@@ -2622,7 +2843,11 @@ async def _reconcile_fileapp_entrada_hygiene_task() -> dict[str, int]:
                     workspace_api_key=workspace_api_key,
                     limit=settings.celery_fileapp_entrada_hygiene_batch_size,
                 )
-                for file_item in listed_files:
+                for file_item in _select_oldest_files_in_folder(
+                    listed_files,
+                    folder_path=folder_path,
+                    batch_size=settings.celery_fileapp_entrada_hygiene_batch_size,
+                ):
                     file_id = str(file_item.get("id") or file_item.get("uuid") or "").strip()
                     original_name = str(
                         file_item.get("original_name") or file_item.get("name") or file_item.get("file_name") or ""

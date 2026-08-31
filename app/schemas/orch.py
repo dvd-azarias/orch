@@ -122,6 +122,25 @@ class OrchUnassignSessionResponse(BaseModel):
     updated_count: int
 
 
+class OrchSwitchBotFlowCallbackRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    session_id: str
+    status: str
+    error: str | None = None
+
+
+class OrchSwitchBotFlowCallbackResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    accepted: bool
+    flow_uuid: str
+    target_session_id: str
+    orch_session_id: int
+    orch_session_uuid: str
+    idempotent: bool
+
+
 class OrchFlowAliasSummary(BaseModel):
     api_version: str = "v1"
     alias: str
@@ -167,3 +186,45 @@ class OrchResubmitRequest(BaseModel):
     mailing_id: str | None = None
     reason: str | None = None
     payload: dict | None = None
+
+
+class OrchBillingReprocessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    billing_period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class OrchBillingReprocessResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    request_id: str
+    workspace_uuid: str
+    billing_period: str
+    idempotent: bool
+    enqueued: bool
+
+
+class OrchBillingEventCounts(BaseModel):
+    pending: int
+    batched: int
+    sent: int
+
+
+class OrchBillingSnapshotCounts(BaseModel):
+    pending: int
+    processing: int
+    sent: int
+    failed: int
+    blocked: int
+
+
+class OrchBillingStatusResponse(BaseModel):
+    api_version: str = "v1"
+    workspace_uuid: str
+    billing_period: str
+    events: OrchBillingEventCounts
+    snapshots: OrchBillingSnapshotCounts
+    quantity_sent: int
+    oldest_pending_at: datetime | None
+    max_attempt_count: int

@@ -1580,11 +1580,11 @@ Acesso operacional direto:
 ssh deividazarias@10.1.20.237
 ```
 
-Senha SSH:
+Autorizacao e credencial:
 
-```text
-Sysdba1982250390080613!!@@##
-```
+* O usuario `deividazarias` possui acesso SSH operacional aos servidores ORCH e pode elevar para root com `sudo su`.
+* Todo acesso remoto, inclusive somente leitura, exige pedido e autorizacao previa do responsavel pelo ambiente.
+* A senha deve ser fornecida apenas por canal/variavel segura no momento da operacao (por exemplo, `ORCH_SSH_PASSWORD`); nao deve ser registrada neste repositorio.
 
 Para operacoes de `systemctl`, leitura integral das units e acesso ao repositorio pertencente a root:
 
@@ -1593,9 +1593,31 @@ sudo su
 cd /etc/gohp/orch
 ```
 
-O `sudo su` utiliza a mesma senha. O usuario `deividazarias` nao possui permissao para executar qualquer comando arbitrario via `sudo <comando>`; elevar primeiro para root evita tentativas e perda de tempo.
+O `sudo su` utiliza a credencial operacional segura. O usuario `deividazarias` nao possui permissao para executar qualquer comando arbitrario via `sudo <comando>`; elevar primeiro para root evita tentativas e perda de tempo.
 
 Ao entrar no repositorio, preservar `.env`, `venv/` e qualquer estado operacional local. Nunca usar `git clean`, `git reset` ou restaurar `.env` apenas para obter working tree limpa.
+
+### Procedimento canonico para automacao SSH
+
+1. Confirmar que a VPN corporativa esta conectada antes de iniciar. `ssh: connect to host 10.1.20.237 port 22: Operation timed out` indica problema de rota/VPN, nao erro de senha; interromper e restaurar a conectividade antes de tentar de novo.
+2. Para comandos protegidos, usar `ssh -tt ... "sudo su -c '<comando>'"`. A elevacao exige dois prompts: o primeiro do SSH e o segundo do `sudo`.
+3. Em automacao `expect`, responder aos prompts textuais `Password:` e `password for deividazarias:`. Nunca enviar senha por temporizador (`after ... send`): em falha de VPN ela pode ser escrita no terminal ou enviada antes do prompt.
+4. Nunca registrar senha, URL AMQP completa, `.env` integral ou output que contenha esses valores. Ler segredo de variavel de ambiente/processo seguro; nao reproduzir a credencial em scripts versionados ou temporarios.
+
+Exemplo seguro de forma (a variavel deve ser injetada pelo ambiente seguro, sem log):
+
+```tcl
+set timeout 120
+set password $env(ORCH_SSH_PASSWORD)
+spawn ssh -tt -o StrictHostKeyChecking=accept-new deividazarias@10.1.20.237 {sudo su -c 'cd /etc/gohp/orch && <comando-somente-leitura>'}
+expect {
+    "Password:" {send -- "$password\r"; exp_continue}
+    "password for deividazarias:" {send -- "$password\r"; exp_continue}
+    eof
+}
+```
+
+Antes de operacao mutavel, substituir `<comando-somente-leitura>` pelo menor comando necessario, registrar a justificativa e tirar snapshot de logs/estado. Para leitura, preferir `journalctl`, `systemctl show`, consultas SQL somente leitura e endpoints `GET`.
 
 ## Inventario systemd confirmado
 

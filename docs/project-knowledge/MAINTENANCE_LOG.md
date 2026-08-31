@@ -1,5 +1,112 @@
 # Maintenance Log
 
+## 2026-08-28 — Billing batch persistente `service-orch`
+
+### REQUEST / CLASSIFICATION
+
+Substituir o publisher unitario legado por event store + snapshots agregados, retry persistente, reconciliacao e reprocessamento auditavel. `ALPHA_FIX_OPTIONAL`, risco alto por banco, Celery, concorrencia, idempotencia e RabbitMQ; novo mecanismo protegido por flag default `false`.
+
+### CHANGE
+
+- Legado `ORCH_BILLING_SNAPSHOT_ENABLED` preservado e desligado por default; configuracao rejeita dual enablement com `ORCH_BILLING_ENABLED`.
+- Migration `0022` cria eventos, snapshots, solicitacoes de reprocessamento e indice temporal de `orch_sessions`, sem alterar/remover a tabela `0020`.
+- Sessao nova, inclusive pelo componente `create_contact`, registra evento fail-open; reconciliador usa `orch_sessions` e chave idempotente por workspace/sessao/periodo/metrica.
+- Agregador cria batches maximos de 200 sob `FOR UPDATE SKIP LOCKED` e chama publicacao no mesmo flush; publisher usa payload persistido, `mandatory`, mensagem persistente e confirm.
+- Retry indefinido, backoff/teto/jitter, leases com `claim_token`, bloqueio estrutural e reprocessamento idempotente foram adicionados.
+- Reprocessamento mensal usa chunks persistentes de 1000, cursor retomavel e reserva de enqueue para nao inflar a fila quando workers estiverem indisponiveis.
+- App/fila/worker/Beat dedicados e rotas autenticadas de reprocess/status foram adicionados; nenhum template foi instalado.
+
+### VALIDATION
+
+- Regressao focada final: 157 testes passaram.
+- Integracao PostgreSQL fora da sandbox: 2 testes passaram; 450 sessoes em tabelas temporarias viraram 450 eventos e snapshots `200 + 200 + 50`, e a migration exata executou em schema descartavel dentro de transacao revertida.
+- Suite completa: 415 passaram e 27 falharam, exatamente nas duas familias do baseline (26 chamadas com assinatura antiga de `trigger_orch` e 1 invalidacao de prepared statement asyncpg em tabela temporaria); nenhuma falha nova de billing.
+- `compileall` e `git diff --check` passaram. Revisao independente concluiu `GO` para o patch de codigo.
+- Stack local homologada: API, tres workers e dois Beats `up`; smoke real nos dois flows retornou `202 accepted` para as sessoes `7201` e `7202`. Billing permaneceu desligado e nenhuma migration foi aplicada.
+- Broker/consumer alvo, concorrencia real multi-transacao, lock do indice em workspace volumoso e E2E do billing apos migration permanecem `UNKNOWN`; nenhuma producao foi acessada.
+
+### ROLLBACK
+
+`ORCH_BILLING_ENABLED=false`, restart dos processos afetados e preservacao das tabelas. Nao reativar o publisher legado sem decisao operacional explicita.
+
+## 2026-08-27 — Card isolado `switch_bot_flow`
+
+### REQUEST
+
+Criar um card separado de `run_flow` que transforme a sessao ORCH em hub WhatsApp, repassando ao BOT o payload Meta original desde o primeiro evento ate o callback terminal.
+
+### TASK TYPE / CLASSIFICATION
+
+Feature operacional isolada / `ALPHA_FIX_OPTIONAL`; blast radius contido por card, feature flag e fila dedicada. `run_flow` nao foi alterado.
+
+### CHANGE
+
+- M2 reconhece `switch_bot_flow`, persiste estado bloqueante e resolve `success`/`exception_*` somente no terminal.
+- Worker dedicado consulta e cacheia `runner_token`, envia somente mensagens de usuario ao Runner v5 e descarta status WhatsApp do relay.
+- O body do primeiro e dos eventos seguintes preserva o mesmo conteudo JSON recebido da Meta, sem envelope sintetico.
+- `target_session_id` e metadados da revisao ficam persistidos; callback idempotente retoma o M2 e o primeiro terminal vence.
+- Filas isoladas foram adicionadas aos profiles DEV/launchd/prod e aos manifests versionados.
+
+### VALIDATION
+
+- Regressao direcionada final: 135 testes passaram; `compileall`, `git diff --check`, `bash -n` e `plutil -lint` passaram.
+- Suite completa: 354 passaram e 26 falharam em baseline legado, primeiro por `trigger_orch(flow_uuid=...)` desatualizado.
+- Consulta real ao Target Core resolveu um `runner_token` de 64 caracteres sem expor o segredo.
+- Stack local completa subiu com `orch_switch_bot_flow_f5_local`; worker registrou a task e o smoke encadeado dos dois flows retornou aceite.
+- POST real ao Runner, resposta do BOT via Meta e callback terminal permanecem pendentes de canario controlado para evitar mensagem externa acidental.
+
+### CANARIO DE PRODUCAO — 2026-08-27
+
+- O template anterior ao card chegou ao contato, confirmando ausencia de regressao no caminho existente.
+- O POST real ao Runner foi aceito e a engine gerou resposta, mas cada payload criou uma sessao nova porque o token usava `session_key=chat.id` e a entrada foi classificada como provider `webhook`.
+- Todos os dispatches do BOT terminaram em `missing_integration`; nenhuma resposta chegou a Meta.
+- O ORCH detectou a troca de `session_id`, persistiu `switch_bot_flow_runner_session_mismatch` e percorreu o branch de excecao como projetado.
+- Auditoria read-only posterior confirmou que o provider e definido pela URL. O ORCH usou `/webhook/session`, enquanto `/whatsapp/session` ja interpreta o envelope Meta, mantem a identidade pelo `wa_id` e despacha pela API WhatsApp generica configurada nos hosts Target Core; nao foi identificada necessidade de alterar o codigo do Target Core antes do proximo canario.
+- Diagnostico completo em `INCIDENT_HISTORY.md` e risco `R28` em `KNOWN_RISKS.md`. Nenhum ajuste funcional ou de producao foi feito durante a investigacao.
+- Correcao preparada no ORCH: troca cirurgica do provider da URL para `whatsapp`, sem alterar payload, retry, correlacao local ou contratos dos demais cards. Deploy e novo canario permanecem pendentes.
+- O segundo canario confirmou o ciclo completo de mensagens e o contrato terminal real do BOT: `POST /v1/orch/{alias}` com `entity`, `session.id`, `variables` e `disposition`. O `session.id` `9706f438-80be-47b7-a0e4-9923b1c489f0` coincidiu exatamente com o `target_session_id` da sessao ORCH `7105`.
+- Antes da correcao, esse terminal entrou como `GenericApp` e criou a sessao fantasma `7106`, enquanto `7105` permaneceu bloqueada. A correcao Alpha intercepta apenas o caminho por alias, exige correlacao exata com um handoff do mesmo flow, reaproveita o callback idempotente e preserva o trigger legado quando nao houver correspondencia.
+- Regressao direcionada final da correcao terminal: 130 testes passaram; lint/compile e `git diff --check` passaram. A stack local completa ficou `up`, o smoke encadeado dos dois flows passou e o replay HTTP do payload real retornou `persistence=switch_bot_flow_callback`, `session_created=false` e `session_id=7105`. O worker levou a sessao `7105` a `state=3` com `ended_at`; o replay seguinte retornou `idempotent=true` e `session_state=3`, sem criar nova sessao. A stack local foi encerrada sem processos residuais.
+
+### ROLLBACK
+
+Definir `SWITCH_BOT_FLOW_ENABLED=false` e reiniciar API/worker. Flows sem o novo card e o comportamento de `run_flow` permanecem inalterados.
+
+## 2026-08-26 — Recibo idempotente para entrega imediata FileApp
+
+### REQUEST
+
+Eliminar a dependência operacional do rescue de 10 minutos para eventos S3/FileApp do fluxo crítico, mantendo o rescue como rede de segurança.
+
+### TASK TYPE / CLASSIFICATION
+
+Incident remediation / `ALPHA_FIX_REQUIRED` (high risk: FileApp, Celery e migration multi-workspace).
+
+### CHANGE
+
+- A migration `0021_create_fileapp_ingest_receipts` cria um recibo por `(flow_uuid, file_id)` no schema do workspace.
+- O trigger Tipo 1 reivindica e confirma o recibo antes de publicar no Celery; replays em estados ativos/terminais retornam `202` idempotente sem novo enqueue.
+- O worker Tipo 1 carrega o `receipt_id` e registra `processing`, `completed` ou `failed` em modo best-effort.
+- O rescue reivindica o mesmo recibo antes de publicar; um recibo originado pelo webhook impede reingestão duplicada.
+- O recibo agora expõe explicitamente `should_enqueue`: uma primeira recepção e a retomada de `failed`/`enqueue_failed` publicam uma task; estados ativos ou concluídos permanecem replays idempotentes.
+- A correção residual remove o receipt de entrega Target Core da decisão de “ingestão existente”, recupera `accepted` stale após 60 segundos, registra `task_id` no enqueue do rescue e usa o batch como limite de ações, sem starvation por skips.
+- A correção da corrida do step 5 aceita `INGESTING`/`PROCESSED` como auto-ingestão já iniciada/concluída pelo Target Core e não publica um segundo import nesses estados; estados desconhecidos continuam fail-closed.
+
+### VALIDATION
+
+- `pytest -q tests/test_fileapp_ingest_tasks.py tests/test_fileapp_entrada_rescue_task.py tests/test_migration_service.py`: 22 passed.
+- Após a correção de retomada: `pytest -q tests/test_fileapp_ingest_receipt_api.py tests/test_fileapp_entrada_rescue_task.py tests/test_fileapp_ingest_tasks.py`: 22 passed; `compileall` dos módulos alterados passou.
+- Runtime de produção após o merge `613ac46`: API `ready=true`; cinco workers FileApp ativos; 15 arquivos reenviados pela rota oficial retornaram `202 queued`, concluíram com receipts `completed` e foram encontrados em `monitoramento/upload/processados`; zero em `falha`, zero ausentes e zero restantes em `monitoramento/upload`.
+- O runtime também confirmou risco residual: `arquivos_s3_events` pode fazer o rescue marcar `done` sem `source_list`, mantendo o arquivo físico e causando starvation com batch `2`; registrado em `KNOWN_RISKS.md` R25.
+- Correção residual: 28 testes passaram; `compileall` passou; claim validado no PostgreSQL real com primeira aceitação, replay fresco bloqueado e reclaim stale permitido, tudo revertido por rollback.
+- Stack local completa subiu com filas `f5_local`, API/workers ficaram prontos e o smoke canônico dos dois flows passou. A stack foi encerrada e não restaram Uvicorn/Celery locais do repositório.
+- Validação de migration em DB real, subida da stack e E2E cruzado com Target Core permanecem pendentes.
+- Testes focados da corrida do step 5: `12 passed`; regressão FileApp ampliada: `73 passed`, cobrindo `READY_TO_INGEST`, `INGESTING`, `PROCESSED` e rejeição de estado regressivo; `compileall` passou. A stack local completa ficou pronta e o smoke canônico dos dois flows passou; nenhum processo local permaneceu ativo depois da validação.
+
+### ROLLBACK
+
+Desabilitar a migration/código desta entrega antes do rollout; após a migration ser aplicada, preservar a tabela e reverter apenas os consumidores para manter os recibos auditáveis.
+
 ## 2026-08-24 — Primeiro onboarding formal do Project Steward
 
 ### REQUEST

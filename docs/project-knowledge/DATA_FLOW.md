@@ -1,5 +1,20 @@
 # Fluxos de Dados
 
+## Billing batch `service-orch`
+
+```text
+orch_sessions INSERT confirmado pela transacao principal
+  -> registro idempotente em orch_billing_events (falha aberta via savepoint)
+  -> reconciliador repara omissoes a partir de orch_sessions
+  -> agregador trava pending com SKIP LOCKED e cria snapshot de ate 200
+  -> eventos ficam batched e ligados ao snapshot na mesma transacao
+  -> publisher adquire lease/claim_token e envia o payload persistido
+  -> confirm + roteamento RabbitMQ: snapshot/eventos sent
+  -> falha transitoria: failed + next_attempt_at; payload invalido: blocked
+```
+
+Reprocessamento mensal cria eventos ausentes pela mesma chave, reenfileira snapshots existentes sem trocar `snapshot_id` e adia o replay quando o lease esta `processing`. Detalhes em `docs/BILLING_BATCH_RUNBOOK.md`.
+
 ## Trigger comum
 
 ```text
@@ -112,6 +127,29 @@ Existe tambem um guard anterior baseado nos timestamps da sessao; ele pode desca
 Ao alcançar `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template`, o M2 seleciona ANI, resolve o template do card em foco, interpola o payload com o contato/runtime e grava `contact_list_members.outbound_hsm`. Roteamento, consumo do limite e HSM ficam no mesmo savepoint; falha reverte o conjunto. Branch `exception*` do card recebe erros lógicos de HSM; sem branch, a sessão termina com código `whatsapp_hsm_*`.
 
 O Target Core é consumidor desse estado: seu Contact Supplier seleciona somente linhas WhatsApp com HSM materializado e devolve o JSON sem carregar ou interpretar a definição do flow.
+
+## `switch_bot_flow` — hub WhatsApp para BOT
+
+```text
+Meta -> POST canonico do ORCH -> orch_sessions + orch_channel_events
+     -> M2 alcanca switch_bot_flow e bloqueia no proprio card
+     -> worker dedicado resolve/cacheia runner_token do flow alvo
+     -> POST /v5/runner/tokens/{runner_token}/whatsapp/session
+        body = mesmo conteudo JSON Meta recebido pelo ORCH
+     -> persiste target_session_id e permanece ativo
+     -> novos payloads Meta de usuario repetem o relay pelo mesmo endpoint
+     -> status sent/delivered/read/failed sao consumidos localmente, sem relay
+     -> finish_flow BOT faz POST no alias curto do flow ORCH
+        body = entity + session.id + variables + disposition
+     -> ORCH correlaciona session.id == target_session_id antes do trigger comum
+     -> success ou exception_* -> M2 continua, sem criar nova sessao
+```
+
+O primeiro POST nao usa payload sintetico: ele repassa o `runtime_variables.last_payload` que levou a sessao ate o card. O `runner_token` e fixado por flow via cache em memoria/Redis e relido apenas quando ausente ou rejeitado com `401/403`. O `run_flow` permanece independente e inalterado.
+
+O canario de 2026-08-27 confirmou o callback nativo do `finish_flow` no alias curto ja configurado (`POST /v1/orch/{alias}`). O envelope observado usa `session.id` como sessao Runner e `disposition.category/code` como resultado terminal. A interceptacao e habilitada apenas no caminho por alias e so consome o evento quando encontra handoff do mesmo flow com `target_session_id` exato; sem correlacao, preserva o trigger legado.
+
+O contrato e de entrega ao menos uma vez: timeout ou crash entre aceite externo e commit local pode repetir o mesmo payload. A deduplicacao efetiva pelo `messages[].id` no Runner ainda requer comprovacao E2E.
 
 ## Generate file
 

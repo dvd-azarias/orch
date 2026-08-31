@@ -38,6 +38,8 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0018_add_callback_at_to_orch_sessions", "sql/018_add_callback_at_to_orch_sessions.sql"),
     ("0019_allow_minus_one_in_orch_whatsapp_limits", "sql/019_allow_minus_one_in_orch_whatsapp_limits.sql"),
     ("0020_create_orch_billing_usage_snapshots", "sql/020_create_orch_billing_usage_snapshots.sql"),
+    ("0021_create_fileapp_ingest_receipts", "sql/021_create_fileapp_ingest_receipts.sql"),
+    ("0022_create_orch_billing_batch_tables", "sql/022_create_orch_billing_batch_tables.sql"),
 ]
 
 

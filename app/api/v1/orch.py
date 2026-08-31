@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,9 @@ from app.core.workspace import normalize_workspace_uuid, workspace_schema_from_u
 from app.schemas.orch import (
     OrchAlarmListResponse,
     OrchAlarmSummary,
+    OrchBillingReprocessRequest,
+    OrchBillingReprocessResponse,
+    OrchBillingStatusResponse,
     OrchCreateSessionRequest,
     OrchFlowAliasCreateResponse,
     OrchFlowAliasSummary,
@@ -26,6 +30,8 @@ from app.schemas.orch import (
     OrchResubmitRequest,
     OrchSessionListResponse,
     OrchSessionSummary,
+    OrchSwitchBotFlowCallbackRequest,
+    OrchSwitchBotFlowCallbackResponse,
     OrchTriggerAccepted,
     OrchUnassignSessionRequest,
     OrchUnassignSessionResponse,
@@ -38,8 +44,14 @@ from app.repositories.orch_flow_aliases_repository import (
     fetch_active_flow_alias,
     fetch_flow_alias_by_workspace_flow,
 )
+from app.repositories.orch_fileapp_ingest_receipts_repository import (
+    claim_fileapp_ingest_receipt,
+    mark_fileapp_ingest_receipt_enqueued,
+    mark_fileapp_ingest_receipt_status,
+)
 from app.repositories.orch_whatsapp_limits_repository import register_whatsapp_limit_event
 from app.repositories.orch_sessions_repository import (
+    apply_switch_bot_flow_callback,
     set_session_assigned_at_default,
     set_unassigned_at_by_flow_and_entity_address,
 )
@@ -47,6 +59,13 @@ from app.services.alarm_query_service import list_alarms
 from app.services.app_detector import APP_ARQUIVOS
 from app.services.app_detector import detect_app
 from app.services.alarm_service import persist_alarm
+from app.services.billing_batch_service import (
+    BillingIdempotencyConflict,
+    create_billing_reprocess_request,
+    get_billing_status,
+    mark_billing_reprocess_enqueued,
+    parse_billing_period,
+)
 from app.services.discarded_event_service import persist_discarded_event
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_service import (
@@ -73,6 +92,7 @@ from app.services.workspace_service import (
     ensure_workspace_ready_for_orch_migrate,
 )
 from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task, ingest_fileapp_tipo1_event_task
+from app.tasks.billing_batch_tasks import billing_reprocess_task
 from app.tasks.workflow_tasks import advance_session_task
 
 router = APIRouter(prefix="/v1/orch", tags=["orch"])
@@ -80,6 +100,8 @@ logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
 _SUPPORTED_MANUAL_APPS = {"ArquivosApp", "WhatsApp", "DialerApp", "GenericApp"}
 _FLOW_ALIAS_PATTERN = re.compile(r"^[0-9a-f]{14}$")
+_SWITCH_BOT_FLOW_SUCCESS_STATUSES = {"success", "completed", "finished"}
+_SWITCH_BOT_FLOW_FAILURE_STATUSES = {"error", "exception", "failed", "unsuccess"}
 
 
 def _legacy_workspace_context() -> tuple[str | None, str]:
@@ -131,6 +153,130 @@ def _is_allowed_supplier_client(*, client_id: str | None, client_secret: str | N
     return any(normalized_id == expected_id and normalized_secret == expected_secret for expected_id, expected_secret in accepted_pairs)
 
 
+def _require_billing_admin(*, client_id: str | None, client_secret: str | None) -> None:
+    settings = get_settings()
+    expected_id = str(settings.billing_admin_client_id or "").strip()
+    expected_secret = str(settings.billing_admin_client_secret or "").strip()
+    provided_id = str(client_id or "").strip()
+    provided_secret = str(client_secret or "").strip()
+    allowed = bool(
+        expected_id
+        and expected_secret
+        and provided_id
+        and provided_secret
+        and secrets.compare_digest(provided_id, expected_id)
+        and secrets.compare_digest(provided_secret, expected_secret)
+    )
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciais de billing inválidas.")
+
+
+def _extract_switch_bot_flow_terminal_signal(payload: dict[str, Any]) -> dict[str, str] | None:
+    session = payload.get("session")
+    disposition = payload.get("disposition")
+    if not isinstance(session, dict) or not isinstance(disposition, dict):
+        return None
+
+    target_session_id = str(session.get("id") or "").strip()
+    if not target_session_id:
+        return None
+
+    raw_statuses = [disposition.get("category"), disposition.get("code")]
+    normalized_statuses = [
+        str(value).strip().lower()
+        for value in raw_statuses
+        if value is not None and str(value).strip()
+    ]
+    terminal_status: str | None = None
+    if any(value in _SWITCH_BOT_FLOW_FAILURE_STATUSES for value in normalized_statuses):
+        terminal_status = "failed"
+    elif any(value in _SWITCH_BOT_FLOW_SUCCESS_STATUSES for value in normalized_statuses):
+        terminal_status = "completed"
+    if terminal_status is None:
+        return None
+
+    callback_statuses = (
+        _SWITCH_BOT_FLOW_FAILURE_STATUSES
+        if terminal_status == "failed"
+        else _SWITCH_BOT_FLOW_SUCCESS_STATUSES
+    )
+    callback_status = next(
+        (value for value in normalized_statuses if value in callback_statuses),
+        terminal_status,
+    )
+    description = str(disposition.get("description") or "").strip()
+    signal = {
+        "target_session_id": target_session_id,
+        "terminal_status": terminal_status,
+        "callback_status": callback_status,
+    }
+    if description:
+        signal["error"] = description
+    return signal
+
+
+def _switch_bot_flow_terminal_extraction(
+    payload: dict[str, Any],
+    *,
+    target_session_id: str,
+) -> SessionExtraction:
+    entity = payload.get("entity")
+    entity_block = entity if isinstance(entity, dict) else {}
+    entity_address = str(entity_block.get("address") or target_session_id).strip()
+    entity_identity = str(entity_block.get("identity") or entity_address).strip()
+    entity_type = str(entity_block.get("type") or "session").strip()
+    return SessionExtraction(
+        entity=entity_identity,
+        entity_type=entity_type,
+        entity_address=entity_address,
+        entity_session_id=target_session_id,
+    )
+
+
+async def _persist_and_enqueue_switch_bot_flow_callback(
+    *,
+    workspace_uuid: str,
+    workspace_schema: str,
+    flow_uuid: str,
+    target_session_id: str,
+    terminal_status: str,
+    callback_payload: dict[str, Any],
+    db_session: AsyncSession,
+) -> dict[str, Any] | None:
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        persisted = await apply_switch_bot_flow_callback(
+            db_session,
+            flow_uuid=flow_uuid,
+            target_session_id=target_session_id,
+            terminal_status=terminal_status,
+            callback_payload=callback_payload,
+        )
+    if persisted is None:
+        return None
+    if db_session.in_transaction():
+        await db_session.commit()
+
+    settings = get_settings()
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            lambda: advance_session_task.apply_async(
+                kwargs={
+                    "workspace_uuid": workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "session_id": int(persisted["session_id"]),
+                },
+                queue=settings.celery_execute_queue,
+                routing_key=settings.celery_execute_queue,
+            )
+        ),
+        timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+    )
+    return persisted
+
+
 async def _find_resubmit_session_by_event_id(
     *,
     db_session: AsyncSession,
@@ -169,6 +315,7 @@ async def _trigger_orch_for_workspace(
     db_session: AsyncSession,
     validate_workspace: bool = True,
     schema_override: str | None = None,
+    allow_switch_bot_flow_terminal_signal: bool = False,
 ) -> OrchTriggerAccepted:
     safe_workspace_uuid: str | None = None
     if schema_override is not None:
@@ -197,6 +344,72 @@ async def _trigger_orch_for_workspace(
             db_session,
             workspace_uuid=safe_workspace_uuid,
         )
+
+    if allow_switch_bot_flow_terminal_signal and safe_workspace_uuid is not None:
+        terminal_signal = _extract_switch_bot_flow_terminal_signal(payload)
+        if terminal_signal is not None:
+            target_session_id = terminal_signal["target_session_id"]
+            callback_payload = {
+                "session_id": target_session_id,
+                "status": terminal_signal["callback_status"],
+                "error": terminal_signal.get("error"),
+                "source": "finish_flow_alias",
+            }
+            persisted = await _persist_and_enqueue_switch_bot_flow_callback(
+                workspace_uuid=safe_workspace_uuid,
+                workspace_schema=workspace_schema,
+                flow_uuid=str(flow_uuid),
+                target_session_id=target_session_id,
+                terminal_status=terminal_signal["terminal_status"],
+                callback_payload=callback_payload,
+                db_session=db_session,
+            )
+            if persisted is not None:
+                logger.info(
+                    "switch_bot_flow terminal callback consumed from alias",
+                    extra={
+                        "event": "orch.switch_bot_flow.terminal_callback.alias_consumed",
+                        "workspace_uuid": safe_workspace_uuid,
+                        "flow_uuid": str(flow_uuid),
+                        "target_session_id": target_session_id,
+                        "orch_session_id": int(persisted["session_id"]),
+                        "terminal_status": str(persisted["status"]),
+                        "idempotent": bool(persisted["idempotent"]),
+                    },
+                )
+                return OrchTriggerAccepted(
+                    status="accepted",
+                    accepted=True,
+                    flow_uuid=str(flow_uuid),
+                    app="GenericApp",
+                    persistence="switch_bot_flow_callback",
+                    extracted=_switch_bot_flow_terminal_extraction(
+                        payload,
+                        target_session_id=target_session_id,
+                    ),
+                    session_id=int(persisted["session_id"]),
+                    session_uuid=str(persisted["session_uuid"]),
+                    session_state=int(persisted.get("state") or 1),
+                    session_created=False,
+                    workflow_execution={
+                        "mode": "async",
+                        "enqueued": True,
+                        "dispatcher": "celery",
+                        "reason": "switch_bot_flow_terminal_callback",
+                        "target_session_id": target_session_id,
+                        "terminal_status": str(persisted["status"]),
+                        "idempotent": bool(persisted["idempotent"]),
+                    },
+                )
+            logger.info(
+                "switch_bot_flow terminal-shaped alias payload has no correlated handoff",
+                extra={
+                    "event": "orch.switch_bot_flow.terminal_callback.alias_not_correlated",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": str(flow_uuid),
+                    "target_session_id": target_session_id,
+                },
+            )
 
     app_name = detect_app(payload)
     settings = get_settings()
@@ -303,16 +516,91 @@ async def _trigger_orch_for_workspace(
         and mapping_template_uuid
     ):
         extracted = extract_session_fields(app_name, payload)
-        task = ingest_fileapp_tipo1_event_task.apply_async(
+        file_payload = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+        file_id = str(file_payload.get("id") or "").strip()
+        folder_path = str(file_payload.get("folder_path") or "").strip().strip("/")
+        file_name = str(file_payload.get("original_name") or file_payload.get("name") or "").strip()
+        receipt: dict[str, Any] | None = None
+        try:
+            UUID(file_id)
+            safe_workspace_schema = workspace_schema.replace('"', '""')
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_workspace_schema}"'))
+            receipt = await claim_fileapp_ingest_receipt(
+                db_session,
+                flow_uuid=str(flow_uuid),
+                file_id=file_id,
+                folder_path=folder_path,
+                file_name=file_name,
+                ingest_origin="webhook",
+            )
+            # The claim must be durable before publishing: a replay may otherwise enqueue twice.
+            await db_session.commit()
+        except Exception:
+            # Receipt telemetry is fail-open: preserve the established immediate 202 path.
+            if db_session.in_transaction():
+                await db_session.rollback()
+            logger.exception(
+                "fileapp tipo1 ingest receipt unavailable",
+                extra={"workspace_uuid": safe_workspace_uuid, "flow_uuid": str(flow_uuid), "file_id": file_id},
+            )
+
+        if receipt is not None and not receipt["should_enqueue"]:
+            logger.info(
+                "fileapp tipo1 ingest idempotent replay",
+                extra={
+                    "event": "orch.fileapp.tipo1.ingest.idempotent_replay",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": str(flow_uuid),
+                    "file_id": file_id,
+                    "receipt_id": receipt["id"],
+                    "task_id": receipt["task_id"],
+                    "origin": "webhook",
+                    "status": receipt["status"],
+                },
+            )
+            return OrchTriggerAccepted(
+                status="accepted",
+                accepted=True,
+                flow_uuid=str(flow_uuid),
+                app=app_name,
+                persistence="idempotent_replay",
+                extracted=extracted,
+                session_id=0,
+                session_uuid=str(receipt["task_id"] or ""),
+                session_state=0,
+                session_created=False,
+                workflow_execution={"mode": "async", "enqueued": False, "pipeline": "fileapp_tipo1_ingest", "receipt_id": receipt["id"], "task_id": receipt["task_id"]},
+            )
+
+        try:
+            task = ingest_fileapp_tipo1_event_task.apply_async(
             kwargs={
                 "workspace_uuid": safe_workspace_uuid,
                 "flow_uuid": str(flow_uuid),
                 "payload": payload,
                 "mapping_template_uuid": mapping_template_uuid,
+                "receipt_id": receipt["id"] if receipt is not None else None,
+                "ingest_origin": "webhook",
             },
             queue=settings.celery_s3_files_ingest_queue,
             routing_key=settings.celery_s3_files_ingest_queue,
-        )
+            )
+        except Exception:
+            if receipt is not None:
+                try:
+                    await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+                    await mark_fileapp_ingest_receipt_status(db_session, receipt_id=receipt["id"], status="enqueue_failed", error="Celery publish failed")
+                    await db_session.commit()
+                except Exception:
+                    logger.exception("fileapp tipo1 receipt enqueue failure persistence failed", extra={"receipt_id": receipt["id"]})
+            raise
+        if receipt is not None:
+            try:
+                await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+                await mark_fileapp_ingest_receipt_enqueued(db_session, receipt_id=receipt["id"], task_id=str(task.id))
+                await db_session.commit()
+            except Exception:
+                logger.exception("fileapp tipo1 receipt enqueue persistence failed", extra={"receipt_id": receipt["id"], "task_id": task.id})
         logger.info(
             "fileapp tipo1 ingest accepted",
             extra={
@@ -321,6 +609,9 @@ async def _trigger_orch_for_workspace(
                 "flow_uuid": str(flow_uuid),
                 "queue": settings.celery_s3_files_ingest_queue,
                 "task_id": task.id,
+                "file_id": file_id,
+                "receipt_id": receipt["id"] if receipt is not None else None,
+                "origin": "webhook",
                 "mapping_template_uuid": mapping_template_uuid,
             },
         )
@@ -454,6 +745,57 @@ async def trigger_orch_by_workspace(
         flow_uuid=flow_uuid,
         payload=payload,
         db_session=db_session,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/switch-bot-flow/callback",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchSwitchBotFlowCallbackResponse,
+)
+async def callback_switch_bot_flow_by_workspace(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    request: OrchSwitchBotFlowCallbackRequest = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchSwitchBotFlowCallbackResponse:
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+
+    target_session_id = _read_required_text(request.session_id, field_name="session_id")
+    callback_status = _read_required_text(request.status, field_name="status").lower()
+    if callback_status in _SWITCH_BOT_FLOW_SUCCESS_STATUSES:
+        terminal_status = "completed"
+    elif callback_status in _SWITCH_BOT_FLOW_FAILURE_STATUSES:
+        terminal_status = "failed"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="status inválido para callback do switch_bot_flow.",
+        )
+
+    persisted = await _persist_and_enqueue_switch_bot_flow_callback(
+        workspace_uuid=safe_workspace_uuid,
+        workspace_schema=workspace_schema,
+        flow_uuid=str(flow_uuid),
+        target_session_id=target_session_id,
+        terminal_status=terminal_status,
+        callback_payload=request.model_dump(),
+        db_session=db_session,
+    )
+    if persisted is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Handoff ativo não encontrado para o session_id informado.",
+        )
+    return OrchSwitchBotFlowCallbackResponse(
+        status="accepted",
+        accepted=True,
+        flow_uuid=str(flow_uuid),
+        target_session_id=target_session_id,
+        orch_session_id=int(persisted["session_id"]),
+        orch_session_uuid=str(persisted["session_uuid"]),
+        idempotent=bool(persisted["idempotent"]),
     )
 
 
@@ -1039,6 +1381,7 @@ async def trigger_orch(
             flow_uuid=UUID(str(row["flow_uuid"])),
             payload=payload,
             db_session=db_session,
+            allow_switch_bot_flow_terminal_signal=True,
         )
 
     try:
@@ -1215,6 +1558,119 @@ async def get_alarms(
         items=[OrchAlarmSummary(**item) for item in page.items],
         next_cursor=page.next_cursor,
     )
+
+
+@router.post(
+    "/{workspace_uuid}/billing/service-orch/reprocess",
+    response_model=OrchBillingReprocessResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reprocess_service_orch_billing(
+    workspace_uuid: UUID,
+    request: OrchBillingReprocessRequest = Body(...),
+    idempotency_key: UUID = Header(..., alias="Idempotency-Key"),
+    requested_by: str = Header(..., alias="X-Requested-By"),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchBillingReprocessResponse:
+    _require_billing_admin(client_id=x_client_id, client_secret=x_client_secret)
+    settings = get_settings()
+    if not settings.orch_billing_enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Billing batch está desabilitado.")
+    requester = _read_required_text(requested_by, field_name="X-Requested-By")
+    reason = _read_required_text(request.reason, field_name="reason")
+    parse_billing_period(request.billing_period)
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    safe_schema = workspace_schema.replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    try:
+        persisted = await create_billing_reprocess_request(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            billing_period=request.billing_period,
+            idempotency_key=str(idempotency_key),
+            requested_by=requester,
+            reason=reason,
+        )
+    except BillingIdempotencyConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await db_session.commit()
+
+    enqueued = False
+    if persisted.status == "accepted" and persisted.created:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: billing_reprocess_task.apply_async(
+                        kwargs={"workspace_uuid": safe_workspace_uuid, "request_id": persisted.request_id},
+                        queue=settings.celery_billing_queue,
+                        routing_key=settings.celery_billing_queue,
+                    )
+                ),
+                timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+            )
+            enqueued = True
+            try:
+                await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+                await mark_billing_reprocess_enqueued(
+                    db_session,
+                    request_id=persisted.request_id,
+                )
+                await db_session.commit()
+            except Exception:
+                await db_session.rollback()
+                logger.warning(
+                    "billing reprocess enqueue marker failed",
+                    extra={
+                        "event": "orch.billing.reprocess.enqueue_marker_failed",
+                        "workspace_uuid": safe_workspace_uuid,
+                        "request_id": persisted.request_id,
+                    },
+                )
+        except Exception as exc:
+            logger.warning(
+                "billing reprocess enqueue failed; request remains accepted",
+                extra={
+                    "event": "orch.billing.reprocess.enqueue_failed",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "request_id": persisted.request_id,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+    return OrchBillingReprocessResponse(
+        status=persisted.status,
+        request_id=persisted.request_id,
+        workspace_uuid=safe_workspace_uuid,
+        billing_period=persisted.billing_period,
+        idempotent=not persisted.created,
+        enqueued=enqueued,
+    )
+
+
+@router.get(
+    "/{workspace_uuid}/billing/service-orch/status",
+    response_model=OrchBillingStatusResponse,
+)
+async def get_service_orch_billing_status(
+    workspace_uuid: UUID,
+    billing_period: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchBillingStatusResponse:
+    _require_billing_admin(client_id=x_client_id, client_secret=x_client_secret)
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    safe_schema = workspace_schema.replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    summary = await get_billing_status(
+        db_session,
+        workspace_uuid=safe_workspace_uuid,
+        billing_period=billing_period,
+    )
+    return OrchBillingStatusResponse(**summary)
 
 
 @router.post(
