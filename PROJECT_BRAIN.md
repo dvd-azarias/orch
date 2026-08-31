@@ -95,6 +95,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `call_origin` da associacao FileApp e `file_event`; `linked_by` e o `file.id`.
 - Migrations ORCH usam `orch_alembic_version`, nunca `alembic_version`.
 - Valores de `linked_actuator_enum` pertencem ao Target Core e nao sao migrados pelo ORCH.
+- Cards HSM WhatsApp materializam o payload final em `contact_list_members.outbound_hsm` na mesma transacao que define ANI/atuador. O Contact Supplier nao deve interpretar grafo ou card; deploy exige primeiro a migration Target, depois ORCH e por ultimo o cutover do Supplier.
 
 ## Estado da baseline
 

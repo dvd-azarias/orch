@@ -455,3 +455,21 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 `MITIGATION`: manter o destino rapido e respeitar a `Idempotency-Key` enviada pelo ORCH, monitorar `runtime_variables.finish_flow_webhook` e reenviar manualmente quando necessario. O CDR permanece um objeto transitorio por vez na sessao, selecionado no ledger e removido da memoria somente apos `2xx`; uma sessao Dialer pode emitir um POST por CDR distinto, enquanto o marcador do ledger impede replay do mesmo evento.
 
 `V2`: avaliar entrega transacional/idempotente fora do caminho critico caso a garantia operacional passe a exigir retry.
+
+## R25 — Cutover HSM depende de ordem coordenada entre ORCH e Target Core
+
+`STATUS`: FIX IMPLEMENTED / DEPLOY AND RUNTIME VALIDATION PENDING
+
+`IMPACT`: critical
+
+`PROBABILITY`: high se a ordem de rollout for invertida
+
+`AFFECTED AREA`: WhatsApp HSM / Contact Supplier / migrations
+
+`DESCRIPTION`: o ORCH passa a materializar o HSM em colunas Target-owned e o Supplier passa a selecionar somente linhas com `outbound_hsm` válido. ORCH antes da migration gera erro de coluna; Supplier antes do ORCH deixa de selecionar contatos ainda não preparados.
+
+`MITIGATION`: pausar polling WhatsApp; aplicar migration Target em todos os workspaces; implantar/reiniciar ORCH; validar materialização; implantar/reiniciar Supplier; só então retomar polling. Manter o interpretador antigo versionado, porém inativo, para rollback de código.
+
+`DETECTION`: conferir presença das cinco colunas, log `orch.workflow.m2.whatsapp_hsm_preparation_failed`, runtime `whatsapp_hsm_outbound`, linhas `status=0/linked_actuator=whatsapp/outbound_hsm IS NULL` e resposta `/select` sem `hsm=null`.
+
+`V2`: contrato versionado de command/outbox entre orquestração e seleção, sem tabela compartilhada entre serviços.

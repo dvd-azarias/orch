@@ -6,6 +6,7 @@ import pytest
 import app.services.workflow_m2_service as workflow_m2_service
 from app.services.workflow_m2_service import (
     WorkflowExecutionError,
+    _build_send_whatsapp_template_hsm,
     _build_runtime_utils_payload,
     _build_create_contact_records,
     _blocking_stop_reason_for_component,
@@ -29,6 +30,7 @@ from app.services.workflow_m2_service import (
     _mark_blocking_execution,
     _normalize_contact_extra_data,
     _prepare_send_with_whatsapp_contact_member,
+    _prepare_send_whatsapp_template_contact_member,
     _prepare_send_with_dialer_contact_member,
     _read_blocking_stop_reason,
     _read_whatsapp_last_preempt_signature,
@@ -892,6 +894,263 @@ def test_extract_send_whatsapp_interactive_number_policies_reads_percentual() ->
     numbers, percentual_by_phone = _extract_send_whatsapp_interactive_number_policies(component)
     assert numbers == ["1147371485", "1147371486"]
     assert percentual_by_phone == {"1147371485": 100, "1147371486": 35}
+
+
+def _send_whatsapp_template_component(*, variable_value: str = "{{contact.name}}") -> dict:
+    return {
+        "ref_id": "c1111111-1111-1111-1111-111111111111",
+        "component_id": "send_whatsapp_template",
+        "parameters": {
+            "whatsapp_interactive_config": {
+                "selected_number": "11941704207",
+                "numbers": [
+                    {
+                        "number": "5511941704207",
+                        "value": {
+                            "max_daily_rate_limit_consumption": 100,
+                            "template": {
+                                "selected": {
+                                    "name": "teste_disparo_whatsapp_leads_quente_v2",
+                                    "language": {"code": "pt_BR"},
+                                    "components": [
+                                        {"type": "BODY", "text": "Olá, {{1}}!"},
+                                    ],
+                                }
+                            },
+                            "variable_values": {"1": variable_value},
+                            "meta_payload": {
+                                "to": "{{recipient_phone_number}}",
+                                "type": "template",
+                                "template": {
+                                    "name": "teste_disparo_whatsapp_leads_quente_v2",
+                                    "language": {"code": "pt_BR"},
+                                    "components": [
+                                        {
+                                            "type": "body",
+                                            "parameters": [
+                                                {"type": "text", "text": variable_value},
+                                            ],
+                                        }
+                                    ],
+                                },
+                            },
+                        },
+                    }
+                ],
+            }
+        },
+    }
+
+
+def _send_whatsapp_template_runtime_and_contact() -> tuple[dict, dict]:
+    runtime_variables: dict = {"variables": {"payload": {}, "customs": {}}}
+    contact_row = {
+        "contact_list_member_id": 289,
+        "contact_identifier": "Erik",
+        "contact_name": "Erik",
+        "contact_full_name": "Erik",
+        "contact_channel_type": "voice",
+        "contact_channel_label": "tel1",
+        "contact_channel_address": "5513991988509",
+        "contact_channel_extra_data": {
+            "template_name": "teste_whatsapp_disparo_leads_quente_v2",
+        },
+    }
+    _inject_contact_runtime_scope(runtime_variables=runtime_variables, contact_row=contact_row)
+    _inject_system_runtime_scope(
+        runtime_variables=runtime_variables,
+        session_state={},
+        contact_row=contact_row,
+    )
+    return runtime_variables, contact_row
+
+
+def test_build_send_whatsapp_template_hsm_uses_card_in_focus_not_contact_template_hint() -> None:
+    runtime_variables, contact_row = _send_whatsapp_template_runtime_and_contact()
+
+    hsm = _build_send_whatsapp_template_hsm(
+        component=_send_whatsapp_template_component(),
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        selected_ani="11941704207",
+    )
+
+    assert hsm == {
+        "text": "Olá, {{1}}!",
+        "text_log": "Olá, Erik!",
+        "payload": {
+            "to": "5513991988509",
+            "type": "template",
+            "template": {
+                "name": "teste_disparo_whatsapp_leads_quente_v2",
+                "language": {"code": "pt_BR"},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": "Erik"}],
+                    }
+                ],
+            },
+        },
+        "template_name": "teste_disparo_whatsapp_leads_quente_v2",
+        "language": "pt_BR",
+        "component_ref_id": "c1111111-1111-1111-1111-111111111111",
+        "number": "5511941704207",
+    }
+
+
+def test_build_send_whatsapp_template_hsm_rejects_unresolved_variable() -> None:
+    runtime_variables, contact_row = _send_whatsapp_template_runtime_and_contact()
+
+    with pytest.raises(WorkflowExecutionError) as error:
+        _build_send_whatsapp_template_hsm(
+            component=_send_whatsapp_template_component(variable_value="{{contact.missing}}"),
+            runtime_variables=runtime_variables,
+            contact_row=contact_row,
+            selected_ani="11941704207",
+        )
+
+    assert error.value.code == "whatsapp_hsm_variable_unresolved"
+
+
+def test_build_send_whatsapp_template_hsm_rejects_ani_outside_card() -> None:
+    runtime_variables, contact_row = _send_whatsapp_template_runtime_and_contact()
+
+    with pytest.raises(WorkflowExecutionError) as error:
+        _build_send_whatsapp_template_hsm(
+            component=_send_whatsapp_template_component(),
+            runtime_variables=runtime_variables,
+            contact_row=contact_row,
+            selected_ani="11999999999",
+        )
+
+    assert error.value.code == "whatsapp_hsm_number_not_configured"
+
+
+def test_build_hsm_accepts_legacy_send_with_whatsapp_number_config() -> None:
+    runtime_variables, contact_row = _send_whatsapp_template_runtime_and_contact()
+    component = _send_whatsapp_template_component()
+    component["component_id"] = "send_with_whatsapp"
+    interactive_config = component["parameters"].pop("whatsapp_interactive_config")
+    component["parameters"]["whatsapp_numbers_config"] = {
+        "numbers": interactive_config["numbers"],
+    }
+
+    hsm = _build_send_whatsapp_template_hsm(
+        component=component,
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        selected_ani="11941704207",
+    )
+
+    assert hsm["template_name"] == "teste_disparo_whatsapp_leads_quente_v2"
+    assert hsm["payload"]["to"] == "5513991988509"
+    assert hsm["text_log"] == "Olá, Erik!"
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_whatsapp_template_materializes_hsm_with_routing(monkeypatch) -> None:
+    runtime_variables, contact_row = _send_whatsapp_template_runtime_and_contact()
+    persisted: dict = {}
+
+    class _NestedTransaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):  # noqa: ANN001
+            return False
+
+    class _DbSession:
+        def begin_nested(self):
+            return _NestedTransaction()
+
+    async def _assign(*args, **kwargs):  # noqa: ANN001
+        assert kwargs["contact_list_member_id"] == 289
+        return {
+            "contact_list_member_id": 289,
+            "ani": "11941704207",
+            "linked_actuator": "whatsapp",
+            "mode": "balanced_with_limit",
+        }
+
+    async def _persist(*args, **kwargs):  # noqa: ANN001
+        persisted.update(kwargs)
+        return True
+
+    monkeypatch.setattr(workflow_m2_service, "assign_whatsapp_routing_for_session", _assign)
+    monkeypatch.setattr(workflow_m2_service, "persist_contact_member_outbound_hsm", _persist)
+
+    assignment = await _prepare_send_whatsapp_template_contact_member(
+        db_session=_DbSession(),
+        flow_uuid="95c0b826-5834-453f-8a20-f80d328b2e57",
+        session_id=123,
+        session_uuid="11111111-1111-1111-1111-111111111111",
+        revision_id="22222222-2222-2222-2222-222222222222",
+        component=_send_whatsapp_template_component(),
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        contact_list_member_id=289,
+    )
+
+    assert assignment["linked_actuator"] == "whatsapp"
+    assert persisted["contact_list_member_id"] == 289
+    assert persisted["hsm"]["template_name"] == "teste_disparo_whatsapp_leads_quente_v2"
+    assert persisted["idempotency_key"].startswith(
+        "orch:11111111-1111-1111-1111-111111111111:"
+        "22222222-2222-2222-2222-222222222222:"
+        "c1111111-1111-1111-1111-111111111111:"
+    )
+    assert len(persisted["idempotency_key"].rsplit(":", 1)[-1]) == 16
+    assert runtime_variables["whatsapp_hsm_outbound"]["contact_list_member_id"] == 289
+
+
+@pytest.mark.asyncio
+async def test_prepare_hsm_failure_rolls_back_routing_savepoint(monkeypatch) -> None:
+    runtime_variables, contact_row = _send_whatsapp_template_runtime_and_contact()
+    transaction_exit: dict = {}
+
+    class _NestedTransaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):  # noqa: ANN001
+            transaction_exit["exc_type"] = exc_type
+            return False
+
+    class _DbSession:
+        def begin_nested(self):
+            return _NestedTransaction()
+
+    async def _assign(*args, **kwargs):  # noqa: ANN001
+        return {
+            "contact_list_member_id": 289,
+            "ani": "11941704207",
+            "linked_actuator": "whatsapp",
+            "mode": "balanced_with_limit",
+        }
+
+    async def _persist(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("não deve persistir HSM com variável inválida")
+
+    monkeypatch.setattr(workflow_m2_service, "assign_whatsapp_routing_for_session", _assign)
+    monkeypatch.setattr(workflow_m2_service, "persist_contact_member_outbound_hsm", _persist)
+
+    with pytest.raises(WorkflowExecutionError) as error:
+        await _prepare_send_whatsapp_template_contact_member(
+            db_session=_DbSession(),
+            flow_uuid="95c0b826-5834-453f-8a20-f80d328b2e57",
+            session_id=123,
+            session_uuid="11111111-1111-1111-1111-111111111111",
+            revision_id="22222222-2222-2222-2222-222222222222",
+            component=_send_whatsapp_template_component(variable_value="{{contact.missing}}"),
+            runtime_variables=runtime_variables,
+            contact_row=contact_row,
+            contact_list_member_id=289,
+        )
+
+    assert error.value.code == "whatsapp_hsm_variable_unresolved"
+    assert transaction_exit["exc_type"] is WorkflowExecutionError
+    assert "whatsapp_hsm_outbound" not in runtime_variables
 
 
 def test_is_send_with_whatsapp_limit_exhausted() -> None:

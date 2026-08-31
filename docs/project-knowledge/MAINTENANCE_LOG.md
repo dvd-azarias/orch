@@ -427,3 +427,32 @@ O CDR `GW01-1787659477.294612` da sessao `6950` recebeu `2xx`, mas foi reenviado
 - Tipar `discard_reason` como `TEXT` em ambos os usos da query para que a marca duravel seja persistida apos `2xx`.
 - Validacao local focada: `48 passed`, `py_compile` e `git diff --check`.
 - Deploy e verificacao de um CDR novo continuam pendentes.
+
+## 2026-08-31 — Materializacao de HSM no ORCH
+
+### REQUEST
+
+Retirar do Target Core a interpretação de flow/card durante o Contact Supplier e fazer o ORCH definir o HSM do contato em foco.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_REQUIRED`; risco crítico de integração e ordem de rollout.
+
+### ROOT CAUSE
+
+O ORCH persistia apenas ANI/`linked_actuator`. O Supplier carregava a definição publicada e tentava inferir o card HSM por `contact.extra.template_name`; no flow `95c0b826-5834-453f-8a20-f80d328b2e57`, a dica do contato e o template do card divergiam e a seleção retornou `hsm=null` após marcar o contato em execução.
+
+### CHANGE
+
+- Os três cards HSM historicamente aceitos materializam texto, log, payload, template, idioma, card e ANI em `contact_list_members.outbound_hsm`.
+- ANI, consumo e HSM usam o mesmo savepoint; falha reverte roteamento e segue branch `exception*` ou terminaliza com `whatsapp_hsm_*`.
+- Reentrada da mesma sessão/revisão/card reutiliza o HSM pela chave de idempotência e não incrementa novamente o rate limit.
+- O nome em `contact.extra` não escolhe o template; o card efetivamente executado é a autoridade.
+- O log estruturado `orch.workflow.m2.whatsapp_hsm_preparation_failed` registra falhas sem payload/PII.
+
+### VALIDATION
+
+- `tests/test_workflow_m2_service.py` + `tests/test_orch_sessions_repository.py`: 114 passaram.
+- `tests/test_workflow_m2_whatsapp_interactive.py` fora da sandbox: 4 passaram contra PostgreSQL configurado, incluindo branch `exception` para falha HSM.
+- `py_compile` e `git diff --check` passaram.
+- Migration Target, stack completa, Supplier real e envio externo permanecem pendentes; nenhum deploy foi executado.

@@ -47,6 +47,7 @@ from app.repositories.orch_sessions_repository import (
     fetch_session_webhook_snapshot,
     fetch_session_workflow_state,
     increment_source_list_counters_for_create_contact,
+    persist_contact_member_outbound_hsm,
     replace_session_workflow_state,
     upsert_person_for_create_contact,
 )
@@ -126,6 +127,20 @@ POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 TERMINAL_WORKFLOW_ERROR_CODES = {
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
+    "whatsapp_hsm_contact_missing",
+    "whatsapp_hsm_meta_payload_invalid",
+    "whatsapp_hsm_number_not_configured",
+    "whatsapp_hsm_persist_failed",
+    "whatsapp_hsm_template_missing",
+    "whatsapp_hsm_variable_unresolved",
+}
+WHATSAPP_HSM_ERROR_CODES = {
+    code for code in TERMINAL_WORKFLOW_ERROR_CODES if code.startswith("whatsapp_hsm_")
+}
+WHATSAPP_HSM_COMPONENT_KINDS = {
+    "send_with_whatsapp",
+    "send_whatsapp_interactive",
+    "send_whatsapp_template",
 }
 
 
@@ -1291,6 +1306,320 @@ def _read_send_whatsapp_interactive_selected_number(component: dict[str, Any]) -
     return None
 
 
+def _normalize_whatsapp_recipient_number(value: Any) -> str | None:
+    digits = re.sub(r"\D", "", str(value or "").strip())
+    digits = digits.lstrip("0")
+    if not digits:
+        return None
+    if not digits.startswith("55"):
+        digits = f"55{digits}"
+    return digits
+
+
+def _extract_whatsapp_template_body_text(template_payload: Any) -> str | None:
+    if not isinstance(template_payload, dict):
+        return None
+    components = template_payload.get("components")
+    if not isinstance(components, list):
+        return None
+    for item in components:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip().upper() != "BODY":
+            continue
+        body_text = item.get("text")
+        if isinstance(body_text, str) and body_text.strip():
+            return body_text
+    return None
+
+
+def _extract_whatsapp_meta_payload_text(meta_payload: Any) -> str | None:
+    if not isinstance(meta_payload, dict):
+        return None
+    template_payload = meta_payload.get("template")
+    template_text = _extract_whatsapp_template_body_text(template_payload)
+    if template_text:
+        return template_text
+    interactive_payload = meta_payload.get("interactive")
+    if isinstance(interactive_payload, dict):
+        body_payload = interactive_payload.get("body")
+        if isinstance(body_payload, dict):
+            body_text = body_payload.get("text")
+            if isinstance(body_text, str) and body_text.strip():
+                return body_text
+    body_payload = meta_payload.get("body")
+    if isinstance(body_payload, dict):
+        body_text = body_payload.get("text")
+        if isinstance(body_text, str) and body_text.strip():
+            return body_text
+    text_payload = meta_payload.get("text")
+    if isinstance(text_payload, str) and text_payload.strip():
+        return text_payload
+    return None
+
+
+def _extract_whatsapp_template_variable_values(template_payload: Any) -> dict[str, Any]:
+    if not isinstance(template_payload, dict):
+        return {}
+    components = template_payload.get("components")
+    if not isinstance(components, list):
+        return {}
+    for item in components:
+        if not isinstance(item, dict) or str(item.get("type") or "").strip().lower() != "body":
+            continue
+        parameters = item.get("parameters")
+        if not isinstance(parameters, list):
+            continue
+        values: dict[str, Any] = {}
+        for parameter in parameters:
+            if not isinstance(parameter, dict):
+                continue
+            if str(parameter.get("type") or "").strip().lower() != "text":
+                continue
+            values[str(len(values) + 1)] = parameter.get("text")
+        if values:
+            return values
+    return {}
+
+
+def _read_hsm_language_code(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("code")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _select_send_whatsapp_template_candidate(
+    component: dict[str, Any],
+    *,
+    selected_ani: Any,
+) -> dict[str, Any]:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    normalized_ani = str(normalize_phone_to_canonical_ani(selected_ani) or "").strip()
+    if not normalized_ani:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_number_not_configured",
+            "O roteamento WhatsApp não selecionou um número de origem válido.",
+        )
+
+    configuration_sources: list[tuple[dict[str, Any], list[Any]]] = []
+    interactive_config = params.get("whatsapp_interactive_config")
+    if isinstance(interactive_config, dict):
+        interactive_entries: list[Any] = []
+        for key in ("numbers", "selected_numbers"):
+            raw_entries = interactive_config.get(key)
+            if isinstance(raw_entries, list):
+                interactive_entries.extend(raw_entries)
+        for key in ("selected_number", "active_number"):
+            raw_entry = interactive_config.get(key)
+            if raw_entry is not None:
+                interactive_entries.append(raw_entry)
+        configuration_sources.append((interactive_config, interactive_entries))
+
+    whatsapp_numbers_config = params.get("whatsapp_numbers_config")
+    if isinstance(whatsapp_numbers_config, dict):
+        raw_entries = whatsapp_numbers_config.get("numbers")
+        configuration_sources.append(
+            (whatsapp_numbers_config, raw_entries if isinstance(raw_entries, list) else [])
+        )
+
+    addresses_config = params.get("addresses")
+    if isinstance(addresses_config, dict):
+        numbers_config = addresses_config.get("numbers")
+        in_use = numbers_config.get("in_use") if isinstance(numbers_config, dict) else None
+        configuration_sources.append(
+            (addresses_config, in_use if isinstance(in_use, list) else [])
+        )
+
+    if not configuration_sources:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_template_missing",
+            "O card WhatsApp não possui configuração de números HSM válida.",
+        )
+
+    config: dict[str, Any] = {}
+    selected_entry: dict[str, Any] | None = None
+    for current_config, entries in configuration_sources:
+        for raw_entry in entries:
+            entry = raw_entry if isinstance(raw_entry, dict) else {"number": raw_entry}
+            entry_number = entry.get("number") or entry.get("display_phone_number")
+            normalized_entry = str(normalize_phone_to_canonical_ani(entry_number) or "").strip()
+            if normalized_entry == normalized_ani:
+                config = current_config
+                selected_entry = entry
+                break
+        if selected_entry is not None:
+            break
+
+    if selected_entry is None:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_number_not_configured",
+            f"O número de origem selecionado ({normalized_ani}) não existe na configuração do card.",
+        )
+
+    value_payload = selected_entry.get("value") if isinstance(selected_entry.get("value"), dict) else {}
+    meta_payload: dict[str, Any] = {}
+    for owner in (value_payload, selected_entry, config):
+        candidate = owner.get("meta_payload") if isinstance(owner, dict) else None
+        if isinstance(candidate, dict) and candidate:
+            meta_payload = candidate
+            break
+    if not meta_payload:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_meta_payload_invalid",
+            "O número selecionado não possui meta_payload válido.",
+        )
+
+    meta_template = meta_payload.get("template") if isinstance(meta_payload.get("template"), dict) else {}
+    template_selected: dict[str, Any] = {}
+    for owner in (selected_entry, value_payload, config):
+        direct = owner.get("template_selected") if isinstance(owner, dict) else None
+        if isinstance(direct, dict) and direct:
+            template_selected = direct
+            break
+        template_container = owner.get("template") if isinstance(owner, dict) else None
+        if isinstance(template_container, dict):
+            nested_selected = template_container.get("selected")
+            if isinstance(nested_selected, dict) and nested_selected:
+                template_selected = nested_selected
+                break
+            if template_container.get("name"):
+                template_selected = template_container
+                break
+    if not template_selected:
+        template_selected = meta_template
+
+    template_name = template_selected.get("name") or meta_template.get("name")
+    if not isinstance(template_name, str) or not template_name.strip():
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_template_missing",
+            "A configuração do número selecionado não informa o nome do template.",
+        )
+
+    variable_values: dict[str, Any] = {}
+    for owner in (selected_entry, value_payload, config):
+        candidate = owner.get("variable_values") if isinstance(owner, dict) else None
+        if isinstance(candidate, dict) and candidate:
+            variable_values = candidate
+            break
+    if not variable_values:
+        variable_values = _extract_whatsapp_template_variable_values(meta_template)
+
+    return {
+        "number": _normalize_whatsapp_recipient_number(normalized_ani),
+        "template_name": template_name.strip(),
+        "language": (
+            _read_hsm_language_code(template_selected.get("language"))
+            or _read_hsm_language_code(meta_template.get("language"))
+        ),
+        "text": (
+            _extract_whatsapp_template_body_text(template_selected)
+            or _extract_whatsapp_template_body_text(meta_template)
+            or _extract_whatsapp_meta_payload_text(meta_payload)
+            or template_name.strip()
+        ),
+        "variable_values": variable_values,
+        "meta_payload": meta_payload,
+    }
+
+
+def _render_hsm_value_strict(value: Any, variables: dict[str, Any]) -> Any:
+    unresolved: set[str] = set()
+
+    def _collect(candidate: Any) -> None:
+        if isinstance(candidate, str):
+            for match in _TEMPLATE_PATTERN.finditer(candidate):
+                token = match.group(1).strip()
+                if _render_value(match.group(0), variables) is None:
+                    unresolved.add(token)
+            return
+        if isinstance(candidate, dict):
+            for nested in candidate.values():
+                _collect(nested)
+            return
+        if isinstance(candidate, list):
+            for nested in candidate:
+                _collect(nested)
+
+    _collect(value)
+    if unresolved:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_variable_unresolved",
+            f"Variáveis não resolvidas no HSM: {', '.join(sorted(unresolved))}.",
+        )
+    return _render_value(value, variables)
+
+
+def _build_send_whatsapp_template_hsm(
+    *,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    selected_ani: Any,
+) -> dict[str, Any]:
+    if not isinstance(contact_row, dict):
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_contact_missing",
+            "Não foi possível carregar o contato em foco para montar o HSM.",
+        )
+    recipient = _normalize_whatsapp_recipient_number(
+        contact_row.get("contact_channel_address")
+        or contact_row.get("contact_identifier")
+    )
+    if recipient is None:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_contact_missing",
+            "O contato em foco não possui endereço WhatsApp válido.",
+        )
+
+    candidate = _select_send_whatsapp_template_candidate(component, selected_ani=selected_ani)
+    variables = copy.deepcopy(_ensure_variables(runtime_variables))
+    customs = variables.get("customs") if isinstance(variables.get("customs"), dict) else {}
+    system = variables.get("system") if isinstance(variables.get("system"), dict) else {}
+    contact = variables.get("contact") if isinstance(variables.get("contact"), dict) else {}
+    system_contact = system.get("contact") if isinstance(system.get("contact"), dict) else {}
+    variables["recipient_phone_number"] = recipient
+    customs["recipient_phone_number"] = recipient
+    system["recipient_phone_number"] = recipient
+    contact["recipient_phone_number"] = recipient
+    system_contact["recipient_phone_number"] = recipient
+    variables["customs"] = customs
+    variables["system"] = system
+    variables["contact"] = contact
+    system["contact"] = system_contact
+
+    rendered_values: dict[str, Any] = {}
+    for key, raw_value in candidate["variable_values"].items():
+        rendered_values[str(key)] = _render_hsm_value_strict(raw_value, variables)
+        variables[str(key)] = rendered_values[str(key)]
+
+    text_value = str(candidate["text"])
+    text_log = re.sub(
+        r"\{\{\s*(\d+)\s*\}\}",
+        lambda match: str(rendered_values.get(match.group(1), "")),
+        text_value,
+    )
+    text_log = str(_render_hsm_value_strict(text_log, variables) or "")
+    rendered_payload = _render_hsm_value_strict(candidate["meta_payload"], variables)
+    if not isinstance(rendered_payload, dict) or not rendered_payload:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_meta_payload_invalid",
+            "A interpolação do meta_payload não produziu um objeto válido.",
+        )
+    rendered_payload["to"] = recipient
+
+    return {
+        "text": text_value,
+        "text_log": text_log or text_value,
+        "payload": rendered_payload,
+        "template_name": candidate["template_name"],
+        "language": candidate["language"],
+        "component_ref_id": str(component.get("ref_id") or component.get("uuid") or "") or None,
+        "number": candidate["number"],
+    }
+
+
 async def _prepare_send_with_whatsapp_contact_member(
     *,
     db_session: AsyncSession,
@@ -1352,6 +1681,106 @@ async def _prepare_send_whatsapp_interactive_contact_member(
             "contact_member_routing_update_failed",
             "O membro contextual deixou de estar ativo antes do roteamento WhatsApp interativo.",
         )
+    return assignment
+
+
+async def _prepare_send_whatsapp_template_contact_member(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    session_uuid: str,
+    revision_id: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    contact_list_member_id: int | None = None,
+) -> dict[str, Any] | None:
+    kind = component_kind(component)
+    if kind == "send_with_whatsapp":
+        numbers, percentual_by_phone = _extract_send_with_whatsapp_number_policies(component)
+        routing_runtime_key = "send_with_whatsapp_routing"
+    else:
+        numbers, percentual_by_phone = _extract_send_whatsapp_interactive_number_policies(component)
+        routing_runtime_key = "send_whatsapp_interactive_routing"
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip()
+    if not component_ref_id:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_template_missing",
+            f"O card {kind or 'WhatsApp'} não possui ref_id.",
+        )
+    component_fingerprint = hashlib.sha256(
+        json.dumps(component, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    idempotency_key = (
+        f"orch:{session_uuid}:{revision_id}:{component_ref_id}:{component_fingerprint}"
+    )
+
+    try:
+        async with db_session.begin_nested():
+            assignment = await assign_whatsapp_routing_for_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+                numbers=numbers,
+                percentual_by_phone=percentual_by_phone,
+                contact_list_member_id=contact_list_member_id,
+                outbound_hsm_idempotency_key=idempotency_key,
+            )
+            if assignment is None:
+                raise WorkflowExecutionError(
+                    "contact_member_routing_update_failed",
+                    "O membro em foco deixou de estar ativo antes da preparação do HSM.",
+                )
+            if not _is_send_with_whatsapp_limit_exhausted(assignment):
+                if assignment.get("mode") == "reuse_prepared_hsm":
+                    hsm = assignment["outbound_hsm"]
+                else:
+                    hsm = _build_send_whatsapp_template_hsm(
+                        component=component,
+                        runtime_variables=runtime_variables,
+                        contact_row=contact_row,
+                        selected_ani=assignment.get("ani"),
+                    )
+                    persisted = await persist_contact_member_outbound_hsm(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        session_id=session_id,
+                        contact_list_member_id=int(assignment["contact_list_member_id"]),
+                        hsm=hsm,
+                        idempotency_key=idempotency_key,
+                        session_uuid=session_uuid,
+                        component_ref_id=component_ref_id,
+                    )
+                    if not persisted:
+                        raise WorkflowExecutionError(
+                            "whatsapp_hsm_persist_failed",
+                            "O membro em foco deixou de estar elegível antes da persistência do HSM.",
+                        )
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "whatsapp_hsm_persist_failed",
+            f"Falha ao persistir o HSM materializado: {type(exc).__name__}.",
+        ) from exc
+
+    runtime_variables[routing_runtime_key] = {
+        "numbers": numbers,
+        "percentual_by_phone": percentual_by_phone,
+        "assignment": assignment,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    runtime_variables.pop(f"{kind}_last_error", None)
+    if not _is_send_with_whatsapp_limit_exhausted(assignment):
+        runtime_variables["whatsapp_hsm_outbound"] = {
+            "contact_list_member_id": assignment.get("contact_list_member_id"),
+            "component_kind": kind,
+            "component_ref_id": component_ref_id,
+            "template_name": hsm.get("template_name"),
+            "idempotency_key": idempotency_key,
+            "prepared_at": datetime.now(timezone.utc).isoformat(),
+        }
     return assignment
 
 
@@ -4651,12 +5080,15 @@ async def execute_workflow_m2_for_session(
 
                         runtime_variables.pop("send_whatsapp_interactive_last_error", None)
                     else:
-                        assignment = await _prepare_send_whatsapp_interactive_contact_member(
+                        assignment = await _prepare_send_whatsapp_template_contact_member(
                             db_session=db_session,
                             flow_uuid=flow_uuid,
                             session_id=session_id,
+                            session_uuid=str(session_uuid_for_metrics),
+                            revision_id=str(revision_id_for_metrics),
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
                             contact_list_member_id=routing_contact_list_member_id,
                         )
                         if _is_send_with_whatsapp_limit_exhausted(assignment):
@@ -4882,12 +5314,15 @@ async def execute_workflow_m2_for_session(
                 elif (blocking_stop_reason := _blocking_stop_reason_for_component(kind)) is not None:
                     should_block_execution = True
                     if kind == "send_with_whatsapp":
-                        assignment = await _prepare_send_with_whatsapp_contact_member(
+                        assignment = await _prepare_send_whatsapp_template_contact_member(
                             db_session=db_session,
                             flow_uuid=flow_uuid,
                             session_id=session_id,
+                            session_uuid=str(session_uuid_for_metrics),
+                            revision_id=str(revision_id_for_metrics),
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
                             contact_list_member_id=routing_contact_list_member_id,
                         )
                         if _is_send_with_whatsapp_limit_exhausted(assignment):
@@ -5253,7 +5688,42 @@ async def execute_workflow_m2_for_session(
                         WorkflowExecutionResult(True, executed_steps, f"component_not_supported:{kind}", last_card_uuid, next_card_uuid)
                     )
             except Exception as exc:
-                if isinstance(exc, WorkflowExecutionError) and exc.code in TERMINAL_WORKFLOW_ERROR_CODES:
+                if (
+                    kind in WHATSAPP_HSM_COMPONENT_KINDS
+                    and isinstance(exc, WorkflowExecutionError)
+                    and exc.code in WHATSAPP_HSM_ERROR_CODES
+                ):
+                    exception_branch = _resolve_component_exception_branch_label(
+                        definition=definition,
+                        current_card_uuid=next_card_uuid,
+                    )
+                    runtime_variables[f"{kind}_last_error"] = {
+                        "component_ref_id": component.get("ref_id"),
+                        "code": exc.code,
+                        "message": exc.message,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    logger.warning(
+                        "workflow m2 whatsapp hsm preparation failed",
+                        extra={
+                            "event": "orch.workflow.m2.whatsapp_hsm_preparation_failed",
+                            "flow_uuid": flow_uuid,
+                            "session_id": session_id,
+                            "session_uuid": session_uuid_for_metrics,
+                            "component_kind": kind,
+                            "component_ref_id": component.get("ref_id"),
+                            "error_code": exc.code,
+                            "has_exception_branch": exception_branch is not None,
+                        },
+                    )
+                    if exception_branch is not None:
+                        branch_label = exception_branch
+
+                if (
+                    branch_label is None
+                    and isinstance(exc, WorkflowExecutionError)
+                    and exc.code in TERMINAL_WORKFLOW_ERROR_CODES
+                ):
                     failed_at = datetime.now(timezone.utc)
                     failed_card_uuid = next_card_uuid
                     workflow_meta = _ensure_workflow_meta(runtime_variables)
@@ -5299,7 +5769,9 @@ async def execute_workflow_m2_for_session(
                             None,
                         )
                     )
-                if kind == "condition":
+                if branch_label is not None:
+                    pass
+                elif kind == "condition":
                     exception_branch = _resolve_component_exception_branch_label(
                         definition=definition,
                         current_card_uuid=next_card_uuid,

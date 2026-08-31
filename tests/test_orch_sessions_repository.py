@@ -9,8 +9,10 @@ from app.repositories.orch_sessions_repository import (
     WhatsappStatusTimestamps,
     _compute_effective_whatsapp_limit,
     _derive_state_update,
+    assign_whatsapp_routing_for_session,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
+    persist_contact_member_outbound_hsm,
     persist_run_flow_event_for_recent_entity_address,
     set_session_cdr,
 )
@@ -72,6 +74,9 @@ class _MappingsResult:
     def first(self) -> dict | None:
         return self.row
 
+    def scalar_one_or_none(self):
+        return self.row
+
 
 class _RecordingSession:
     def __init__(self, row: dict | None) -> None:
@@ -83,6 +88,16 @@ class _RecordingSession:
         self.statement = str(statement)
         self.parameters = parameters or {}
         return _MappingsResult(self.row)
+
+
+class _SequenceSession:
+    def __init__(self, rows: list[dict | None]) -> None:
+        self.rows = list(rows)
+        self.statements: list[str] = []
+
+    async def execute(self, statement, parameters=None) -> _MappingsResult:  # noqa: ANN001
+        self.statements.append(str(statement))
+        return _MappingsResult(self.rows.pop(0))
 
 
 @pytest.mark.asyncio
@@ -137,6 +152,68 @@ async def test_fetch_contact_context_without_scope_preserves_legacy_query() -> N
     assert "clm.id = :contact_list_member_id" not in session.statement
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" not in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" not in session.statement
+
+
+@pytest.mark.asyncio
+async def test_persist_contact_member_outbound_hsm_is_scoped_to_session_and_member() -> None:
+    session = _RecordingSession(289)
+    hsm = {"template_name": "template_demo", "payload": {"to": "5511999999999"}}
+
+    persisted = await persist_contact_member_outbound_hsm(
+        session,
+        flow_uuid="95c0b826-5834-453f-8a20-f80d328b2e57",
+        session_id=123,
+        contact_list_member_id=289,
+        hsm=hsm,
+        idempotency_key="orch:session:revision:component",
+        session_uuid="11111111-1111-1111-1111-111111111111",
+        component_ref_id="c1111111-1111-1111-1111-111111111111",
+    )
+
+    assert persisted is True
+    assert "outbound_hsm = CAST(:outbound_hsm AS jsonb)" in session.statement
+    assert "linked_actuator = 'whatsapp'" in session.statement
+    assert "os.entity = contact_list_members.contact_identifier" in session.statement
+    assert session.parameters["contact_list_member_id"] == 289
+    assert session.parameters["outbound_hsm"] == (
+        '{"template_name": "template_demo", "payload": {"to": "5511999999999"}}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_assign_whatsapp_reuses_same_prepared_hsm_without_rate_increment() -> None:
+    prepared_hsm = {"template_name": "template_demo", "payload": {"to": "5511999999999"}}
+    session = _SequenceSession(
+        [
+            None,
+            {
+                "id": 289,
+                "previous_ani": "11941704207",
+                "previous_linked_actuator": "whatsapp",
+                "previous_outbound_hsm": prepared_hsm,
+                "previous_outbound_hsm_idempotency_key": "orch:s:r:c:hash",
+            },
+        ]
+    )
+
+    assignment = await assign_whatsapp_routing_for_session(
+        session,
+        flow_uuid="95c0b826-5834-453f-8a20-f80d328b2e57",
+        session_id=123,
+        numbers=["11941704207"],
+        contact_list_member_id=289,
+        outbound_hsm_idempotency_key="orch:s:r:c:hash",
+    )
+
+    assert assignment == {
+        "contact_list_member_id": 289,
+        "ani": "11941704207",
+        "linked_actuator": "whatsapp",
+        "mode": "reuse_prepared_hsm",
+        "consumption": None,
+        "outbound_hsm": prepared_hsm,
+    }
+    assert len(session.statements) == 2
 
 
 @pytest.mark.asyncio

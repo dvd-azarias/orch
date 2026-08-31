@@ -1563,6 +1563,7 @@ async def assign_whatsapp_routing_for_session(
     numbers: list[str],
     percentual_by_phone: dict[str, int] | None = None,
     contact_list_member_id: int | None = None,
+    outbound_hsm_idempotency_key: str | None = None,
 ) -> dict[str, Any] | None:
     def _canonical_phone(value: str | None) -> str:
         return str(normalize_phone_to_canonical_ani(value) or "").strip()
@@ -1597,7 +1598,9 @@ async def assign_whatsapp_routing_for_session(
             SELECT
                 clm.id,
                 clm.ani AS previous_ani,
-                clm.linked_actuator AS previous_linked_actuator
+                clm.linked_actuator AS previous_linked_actuator,
+                clm.outbound_hsm AS previous_outbound_hsm,
+                clm.outbound_hsm_idempotency_key AS previous_outbound_hsm_idempotency_key
             FROM contact_list_members clm
             JOIN orch_sessions os
               ON os.entity = clm.contact_identifier
@@ -1624,6 +1627,25 @@ async def assign_whatsapp_routing_for_session(
         if target["previous_linked_actuator"] is not None
         else ""
     )
+    previous_outbound_hsm = target["previous_outbound_hsm"]
+    previous_outbound_hsm_idempotency_key = str(
+        target["previous_outbound_hsm_idempotency_key"] or ""
+    ).strip()
+    if (
+        outbound_hsm_idempotency_key
+        and previous_outbound_hsm_idempotency_key == outbound_hsm_idempotency_key
+        and isinstance(previous_outbound_hsm, dict)
+        and previous_outbound_hsm
+        and previous_linked_actuator == "whatsapp"
+    ):
+        return {
+            "contact_list_member_id": member_id,
+            "ani": previous_ani or None,
+            "linked_actuator": previous_linked_actuator,
+            "mode": "reuse_prepared_hsm",
+            "consumption": None,
+            "outbound_hsm": previous_outbound_hsm,
+        }
 
     if not normalized_numbers:
         update_result = await db_session.execute(
@@ -1632,6 +1654,11 @@ async def assign_whatsapp_routing_for_session(
                 UPDATE contact_list_members
                 SET
                     linked_actuator = 'whatsapp',
+                    outbound_hsm = NULL,
+                    outbound_hsm_idempotency_key = NULL,
+                    outbound_hsm_prepared_at = NULL,
+                    outbound_hsm_session_uuid = NULL,
+                    outbound_hsm_component_ref_id = NULL,
                     updated_at = NOW()
                 WHERE id = :member_id
                   AND unassigned_at IS NULL
@@ -1794,6 +1821,11 @@ async def assign_whatsapp_routing_for_session(
                 SET
                     ani = :ani,
                     linked_actuator = CAST(:linked_actuator AS linked_actuator_enum),
+                    outbound_hsm = NULL,
+                    outbound_hsm_idempotency_key = NULL,
+                    outbound_hsm_prepared_at = NULL,
+                    outbound_hsm_session_uuid = NULL,
+                    outbound_hsm_component_ref_id = NULL,
                     updated_at = NOW()
                 WHERE id = :member_id
                   AND unassigned_at IS NULL
@@ -1836,6 +1868,11 @@ async def assign_whatsapp_routing_for_session(
             SET
                 ani = :ani,
                 linked_actuator = 'whatsapp',
+                outbound_hsm = NULL,
+                outbound_hsm_idempotency_key = NULL,
+                outbound_hsm_prepared_at = NULL,
+                outbound_hsm_session_uuid = NULL,
+                outbound_hsm_component_ref_id = NULL,
                 updated_at = NOW()
             WHERE id = :member_id
               AND unassigned_at IS NULL
@@ -1880,6 +1917,55 @@ async def assign_whatsapp_routing_for_session(
         "consumption": consumption,
         "limit_candidates": candidates,
     }
+
+
+async def persist_contact_member_outbound_hsm(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+    contact_list_member_id: int,
+    hsm: dict[str, Any],
+    idempotency_key: str,
+    session_uuid: str,
+    component_ref_id: str,
+) -> bool:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE contact_list_members
+            SET
+                outbound_hsm = CAST(:outbound_hsm AS jsonb),
+                outbound_hsm_idempotency_key = :idempotency_key,
+                outbound_hsm_prepared_at = NOW(),
+                outbound_hsm_session_uuid = CAST(:session_uuid AS uuid),
+                outbound_hsm_component_ref_id = :component_ref_id,
+                updated_at = NOW()
+            WHERE id = :contact_list_member_id
+              AND unassigned_at IS NULL
+              AND linked_actuator = 'whatsapp'
+              AND EXISTS (
+                  SELECT 1
+                  FROM orch_sessions os
+                  WHERE os.id = :session_id
+                    AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND os.unassigned_at IS NULL
+                    AND os.entity = contact_list_members.contact_identifier
+              )
+            RETURNING id
+            """
+        ),
+        {
+            "outbound_hsm": json.dumps(hsm, ensure_ascii=False),
+            "idempotency_key": idempotency_key,
+            "session_uuid": session_uuid,
+            "component_ref_id": component_ref_id,
+            "contact_list_member_id": contact_list_member_id,
+            "session_id": session_id,
+            "flow_uuid": flow_uuid,
+        },
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def assign_dialer_routing_for_session(
