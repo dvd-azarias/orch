@@ -122,6 +122,12 @@ WhatsApp e Dialer sao extraidos para `orch_channel_events`. O ledger suporta cla
 
 Existe tambem um guard anterior baseado nos timestamps da sessao; ele pode descartar status repetido antes do ledger. Impacto real permanece `LIKELY`.
 
+## Preparacao HSM WhatsApp para Supplier
+
+Ao alcançar `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template`, o M2 seleciona ANI, resolve o template do card em foco, interpola o payload com o contato/runtime e grava `contact_list_members.outbound_hsm`. Roteamento, consumo do limite e HSM ficam no mesmo savepoint; falha reverte o conjunto. Branch `exception*` do card recebe erros lógicos de HSM; sem branch, a sessão termina com código `whatsapp_hsm_*`.
+
+O Target Core é consumidor desse estado: seu Contact Supplier seleciona somente linhas WhatsApp com HSM materializado e devolve o JSON sem carregar ou interpretar a definição do flow.
+
 ## `switch_bot_flow` — hub WhatsApp para BOT
 
 ```text

@@ -101,6 +101,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `call_origin` da associacao FileApp e `file_event`; `linked_by` e o `file.id`.
 - Migrations ORCH usam `orch_alembic_version`, nunca `alembic_version`.
 - Valores de `linked_actuator_enum` pertencem ao Target Core e nao sao migrados pelo ORCH.
+- Cards HSM WhatsApp materializam o payload final em `contact_list_members.outbound_hsm` na mesma transacao que define ANI/atuador. O Contact Supplier nao deve interpretar grafo ou card; deploy exige primeiro a migration Target, depois ORCH e por ultimo o cutover do Supplier.
 - Billing batch conta a criacao de `orch_sessions`, usa `created_at` UTC e nunca reconstrói o payload durante retry. `sent` significa confirmacao/roteamento do RabbitMQ, nao processamento pelo consumer.
 - `switch_bot_flow` envia ao provider `whatsapp` do Runner v5 o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`. Usar `/webhook/session` fragmenta a identidade e desvia o dispatch para uma integracao webhook do flow.
 - A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O `finish_flow` BOT observado em runtime envia ao alias curto do proprio flow ORCH um envelope `entity + session.id + disposition`; `session.id` coincide com `target_session_id`. Esse envelope deve ser consumido antes do trigger comum para nao criar uma sessao fantasma. O primeiro estado terminal vence callbacks tardios conflitantes.

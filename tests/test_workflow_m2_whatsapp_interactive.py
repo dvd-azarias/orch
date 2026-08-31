@@ -250,7 +250,7 @@ async def test_send_whatsapp_interactive_blocks_waiting_for_events(monkeypatch: 
         }
         return {"ani": "1147371486", "linked_actuator": "whatsapp"}
 
-    monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_interactive_contact_member", _fake_prepare)
+    monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_template_contact_member", _fake_prepare)
 
     try:
         session_factory = get_session_factory()
@@ -333,7 +333,7 @@ async def test_send_whatsapp_interactive_resumes_on_message_and_routes_wic_branc
         }
         return {"ani": "1147371486", "linked_actuator": "whatsapp"}
 
-    monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_interactive_contact_member", _fake_prepare)
+    monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_template_contact_member", _fake_prepare)
 
     try:
         session_factory = get_session_factory()
@@ -422,7 +422,7 @@ async def test_send_whatsapp_template_accepts_plain_status_branch(monkeypatch: p
         }
         return {"ani": "1147371486", "linked_actuator": "whatsapp"}
 
-    monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_interactive_contact_member", _fake_prepare)
+    monkeypatch.setattr(workflow_m2_service, "_prepare_send_whatsapp_template_contact_member", _fake_prepare)
 
     try:
         session_factory = get_session_factory()
@@ -440,5 +440,85 @@ async def test_send_whatsapp_template_accepts_plain_status_branch(monkeypatch: p
         row = await _get_session_state_row(response.session_id)
         assert row["state"] == 3
         assert row["ended_at"] is not None
+    finally:
+        await _cleanup_flow_with_revision(flow_uuid=inserted_flow_uuid, revision_uuid=revision_uuid)
+
+
+@pytest.mark.asyncio
+async def test_send_whatsapp_template_routes_hsm_failure_to_exception_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _ensure_flow_tables()
+    settings = get_settings()
+    flow_uuid = str(uuid4())
+    send_uuid = "d1111111-1111-1111-1111-111111111111"
+    finish_uuid = "d2222222-2222-2222-2222-222222222222"
+    definition = {
+        "trigger_start_by_ref_id": send_uuid,
+        "components": [
+            {
+                "uuid": send_uuid,
+                "ref_id": send_uuid,
+                "component_id": "send_whatsapp_template",
+                "parameters": {},
+            },
+            {"uuid": finish_uuid, "ref_id": finish_uuid, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [{"from": send_uuid, "to": finish_uuid, "branch": "exception"}],
+    }
+
+    inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(
+        flow_uuid=flow_uuid,
+        definition=definition,
+    )
+    monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
+    monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(celery_enabled=False, celery_fileapp_ingest_enabled=True),
+    )
+    monkeypatch.setattr(
+        orch_trigger_service,
+        "get_settings",
+        lambda: SimpleNamespace(celery_enabled=False),
+    )
+
+    async def _fake_prepare(**kwargs):  # noqa: ANN001
+        raise workflow_m2_service.WorkflowExecutionError(
+            "whatsapp_hsm_variable_unresolved",
+            "Variável de teste não resolvida.",
+        )
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "_prepare_send_whatsapp_template_contact_member",
+        _fake_prepare,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "_resolve_send_whatsapp_interactive_branch_labels",
+        lambda **_kwargs: [],
+    )
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as db_session:
+            response = await orch_api._trigger_orch_for_workspace(
+                workspace_uuid=settings.orch_lab_workspace_uuid,
+                flow_uuid=UUID(flow_uuid),
+                payload={"external_id": f"hsm-exception-{uuid4()}"},
+                db_session=db_session,
+                validate_workspace=False,
+                schema_override=settings.database_schema,
+            )
+
+        assert response.workflow_execution is not None
+        assert response.workflow_execution["stopped_reason"] == "finished_by_component"
+        row = await _get_session_state_row(response.session_id)
+        assert row["state"] == 3
+        assert row["runtime_variables"]["send_whatsapp_template_last_error"]["code"] == (
+            "whatsapp_hsm_variable_unresolved"
+        )
     finally:
         await _cleanup_flow_with_revision(flow_uuid=inserted_flow_uuid, revision_uuid=revision_uuid)

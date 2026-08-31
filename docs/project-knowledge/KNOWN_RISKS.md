@@ -535,3 +535,21 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `DETECTION`: correlacionar `target_session_id` do ORCH com `runner_v5_interaction_step`; alertar para mais de um Runner session ID pelo mesmo contato/handoff e para `dispatch_complete:missing_integration` ou resposta BOT sem `provider_msg_id`.
 
 `V2`: contrato versionado de relay com session key explicita, provider/canal normalizado, receipt de dispatch e identidade estavel obrigatoria.
+
+## R29 — Cutover HSM depende de ordem coordenada entre ORCH e Target Core
+
+`STATUS`: FIX IMPLEMENTED / DEPLOY AND RUNTIME VALIDATION PENDING
+
+`IMPACT`: critical
+
+`PROBABILITY`: high se a ordem de rollout for invertida
+
+`AFFECTED AREA`: WhatsApp HSM / Contact Supplier / migrations
+
+`DESCRIPTION`: o ORCH passa a materializar o HSM em colunas Target-owned e o Supplier passa a selecionar somente linhas com `outbound_hsm` válido. ORCH antes da migration gera erro de coluna; Supplier antes do ORCH deixa de selecionar contatos ainda não preparados.
+
+`MITIGATION`: pausar polling WhatsApp; aplicar migration Target em todos os workspaces; implantar/reiniciar ORCH; validar materialização; implantar/reiniciar Supplier; só então retomar polling. Manter o interpretador antigo versionado, porém inativo, para rollback de código.
+
+`DETECTION`: conferir presença das cinco colunas, log `orch.workflow.m2.whatsapp_hsm_preparation_failed`, runtime `whatsapp_hsm_outbound`, linhas `status=0/linked_actuator=whatsapp/outbound_hsm IS NULL` e resposta `/select` sem `hsm=null`.
+
+`V2`: contrato versionado de command/outbox entre orquestração e seleção, sem tabela compartilhada entre serviços.

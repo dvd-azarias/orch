@@ -31,6 +31,7 @@
 
 - Leitura: `target.workspaces`, `flow_v2`, `flow_v2_revision`.
 - Leitura/escrita em fluxos especificos: `source_lists`, `persons`, `contact_list_members`, `cache_card_store`.
+- Em cards HSM WhatsApp, o ORCH escreve em `contact_list_members` os campos Target-owned `outbound_hsm`, chave de idempotência, instante, sessão e `component_ref_id`; a migration pertence ao Target Core.
 - Ownership confirmado do Target Core: `contact_list_members` e `linked_actuator_enum`.
 - Ownership formal de `source_lists` e `persons`: `UNKNOWN`, apesar de haver escrita ORCH no componente `create_contact`.
 - `source_list_members`: nao referenciada pelo codigo FileApp.
@@ -63,6 +64,7 @@ CLI individual deriva o schema do UUID sem consultar elegibilidade do workspace.
 - API pode publicar task antes do commit final do request.
 - M2 mantem transacao durante HTTP/LLM; generate-file durante SFTP.
 - Efeitos externos nao possuem atomicidade com PostgreSQL.
+- A preparação HSM não é efeito externo: ANI, atuador, consumo e `outbound_hsm` usam savepoint único para impedir que o Supplier reivindique payload parcial.
 
 ## Estado desconhecido
 
