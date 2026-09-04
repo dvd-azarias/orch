@@ -18,6 +18,9 @@ from app.services.workflow_m2_service import (
     _extract_send_with_whatsapp_number_policies,
     _extract_send_whatsapp_interactive_number_policies,
     _extract_contact_member_routing_scope,
+    _contact_member_channel_type_matches,
+    _contextual_member_routing_enabled_for_scope,
+    _ensure_person_scope_component_supported,
     _extract_whatsapp_status_signature_from_runtime,
     _extract_whatsapp_status_from_runtime,
     _extract_whatsapp_message_branch_key_from_runtime,
@@ -47,6 +50,7 @@ from app.services.workflow_m2_service import (
     _run_generate_file,
     _run_intelligent_agent,
     _read_loop_guard_repeat_threshold,
+    _read_session_scope,
     _resolve_send_with_dialer_branch_label,
     _resolved_contact_member_id_for_routing,
     _run_process_dialer_response,
@@ -199,9 +203,58 @@ def test_resolved_contact_member_id_only_pins_explicit_scope() -> None:
     assert _resolved_contact_member_id_for_routing(explicit_scope, 10655) == 10655
 
 
+def test_session_scope_and_channel_type_contract() -> None:
+    runtime_variables = {
+        "input_payload": {
+            "session_scope": "person",
+            "channel_type": "phone",
+        }
+    }
+
+    assert _read_session_scope(runtime_variables) == "person"
+    assert _read_session_scope({"input_payload": {"session_scope": "unexpected"}}) == "channel"
+    assert _contextual_member_routing_enabled_for_scope(
+        feature_enabled=False,
+        session_scope="person",
+    )
+    assert not _contextual_member_routing_enabled_for_scope(
+        feature_enabled=False,
+        session_scope="channel",
+    )
+    assert _contact_member_channel_type_matches(
+        runtime_variables,
+        {"contact_channel_type": "voice"},
+    )
+    assert not _contact_member_channel_type_matches(
+        runtime_variables,
+        {"contact_channel_type": "email"},
+    )
+
+
+def test_person_scope_rejects_outbound_channel_component() -> None:
+    with pytest.raises(WorkflowExecutionError) as exc:
+        _ensure_person_scope_component_supported(
+            session_scope="person",
+            component_kind_value="send_with_dialer",
+        )
+
+    assert exc.value.code == "person_scope_channel_component_not_supported"
+    _ensure_person_scope_component_supported(
+        session_scope="person",
+        component_kind_value="api_call",
+    )
+    _ensure_person_scope_component_supported(
+        session_scope="channel",
+        component_kind_value="send_with_dialer",
+    )
+
+
 def test_contact_member_terminal_failures_have_inline_alarms() -> None:
     scope_alarm = m2_alarm_from_stopped_reason("contact_member_scope_not_found")
     update_alarm = m2_alarm_from_stopped_reason("contact_member_routing_update_failed")
+    person_scope_alarm = m2_alarm_from_stopped_reason(
+        "person_scope_channel_component_not_supported"
+    )
 
     assert scope_alarm == (
         "error",
@@ -212,6 +265,11 @@ def test_contact_member_terminal_failures_have_inline_alarms() -> None:
         "error",
         "workflow_m2_contact_member_routing_update_failed",
         "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
+    )
+    assert person_scope_alarm == (
+        "error",
+        "workflow_m2_person_scope_channel_component_not_supported",
+        "Sessão por pessoa encerrada ao alcançar componente de comunicação por canal.",
     )
 
 
@@ -549,17 +607,31 @@ async def test_condition_sem_branch_terminaliza_execucao(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_payload", "feature_enabled", "expects_context_fetch"),
+    [
+        (
+            {
+                "contact_list_member_id": "10655",
+                "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
+                "mailing_id": 1115,
+            },
+            True,
+            True,
+        ),
+        ({"session_scope": "person"}, False, False),
+    ],
+)
 async def test_contextual_member_scope_conflict_terminalizes_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    input_payload: dict,
+    feature_enabled: bool,
+    expects_context_fetch: bool,
 ) -> None:
     flow_uuid = "33333333-3333-3333-3333-333333333333"
     card_uuid = "11111111-1111-1111-1111-111111111111"
     runtime_variables = {
-        "input_payload": {
-            "contact_list_member_id": "10655",
-            "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
-            "mailing_id": 1115,
-        },
+        "input_payload": input_payload,
         "workflow_v2": {"next_card_cursor": card_uuid},
     }
     persisted: list[dict] = []
@@ -615,7 +687,7 @@ async def test_contextual_member_scope_conflict_terminalizes_without_fallback(
     monkeypatch.setattr(
         workflow_m2_service,
         "_read_contextual_member_routing_enabled",
-        lambda _settings: True,
+        lambda _settings: feature_enabled,
     )
     monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", _fetch_flow)
     monkeypatch.setattr(workflow_m2_service, "fetch_selected_revision", _fetch_revision)
@@ -630,15 +702,18 @@ async def test_contextual_member_scope_conflict_terminalizes_without_fallback(
         session_id=6937,
     )
 
-    assert fetched_scopes == [
-        {
-            "flow_uuid": flow_uuid,
-            "session_id": 6937,
-            "contact_list_member_id": 10655,
-            "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
-            "mailing_id": 1115,
-        }
-    ]
+    if expects_context_fetch:
+        assert fetched_scopes == [
+            {
+                "flow_uuid": flow_uuid,
+                "session_id": 6937,
+                "contact_list_member_id": 10655,
+                "contact_list_id": "dc7dc1c1-2c98-42e9-a788-5d186f458daa",
+                "mailing_id": 1115,
+            }
+        ]
+    else:
+        assert fetched_scopes == []
     assert result.stopped_reason == "contact_member_scope_not_found"
     assert persisted[-1]["state"] == 3
     assert persisted[-1]["ended_at"] is not None

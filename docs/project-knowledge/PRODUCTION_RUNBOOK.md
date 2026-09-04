@@ -151,3 +151,14 @@ Sequencia segura:
 Rollback: definir a flag como `false` e reiniciar API/workers. Isso restaura o seletor legado; nao desfaz `linked_actuator`, `ani`, consumo ou sessoes ja terminalizadas.
 
 Reparacao historica e uma operacao separada. Nao executar backfill em massa: reconstruir a relacao sessao/lista pelo payload, conferir ownership externo e aplicar updates guardados por IDs aprovados.
+
+### Piloto de cardinalidade por pessoa
+
+1. implantar e reiniciar primeiro o ORCH, mantendo o Target Core sem UUIDs na allowlist;
+2. confirmar que payload com membro/endereço conflitante termina em `contact_member_scope_not_found` e que card de comunicação sob `person` produz `workflow_m2_person_scope_channel_component_not_supported`;
+3. configurar no Target Core somente `ORCHESTRATOR_PERSON_SCOPE_FLOW_UUIDS=["e94783ce-74f0-4df6-b868-a4b17f38e1e1"]` e reiniciar API/workers que publicam a associação;
+4. em nova associação do mailing, comparar `candidate_members`, `distinct_persons`, `sessions_requested` e `suppressed_by_grouping` no log Target;
+5. no ORCH, confirmar uma sessão por pessoa, `input_payload.session_scope=person`, membro/endereço/tipo coerentes e ausência de alteração de `linked_actuator` por simples criação da sessão;
+6. antes de ampliar a allowlist, executar um controle fora dela e comprovar que N pessoas com M canais continuam produzindo N×M sessões.
+
+Rollback do piloto: retirar o UUID da allowlist e reiniciar o Target Core. Não é necessário desligar o roteamento contextual do ORCH; ele também protege o modo `channel`. Desassociar/reassociar ou reparar sessões existentes é operação separada e exige autorização.

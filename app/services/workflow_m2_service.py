@@ -138,6 +138,7 @@ POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 TERMINAL_WORKFLOW_ERROR_CODES = {
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
+    "person_scope_channel_component_not_supported",
     "whatsapp_hsm_contact_missing",
     "whatsapp_hsm_meta_payload_invalid",
     "whatsapp_hsm_number_not_configured",
@@ -149,6 +150,12 @@ WHATSAPP_HSM_ERROR_CODES = {
     code for code in TERMINAL_WORKFLOW_ERROR_CODES if code.startswith("whatsapp_hsm_")
 }
 WHATSAPP_HSM_COMPONENT_KINDS = {
+    "send_with_whatsapp",
+    "send_whatsapp_interactive",
+    "send_whatsapp_template",
+}
+PERSON_SCOPE_CHANNEL_COMPONENT_KINDS = {
+    "send_with_dialer",
     "send_with_whatsapp",
     "send_whatsapp_interactive",
     "send_whatsapp_template",
@@ -215,6 +222,61 @@ def _read_contextual_member_routing_enabled(settings: Any) -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_session_scope(runtime_variables: dict[str, Any]) -> str:
+    input_payload = runtime_variables.get("input_payload")
+    if not isinstance(input_payload, dict):
+        return "channel"
+    value = str(input_payload.get("session_scope") or "channel").strip().lower()
+    return "person" if value == "person" else "channel"
+
+
+def _contextual_member_routing_enabled_for_scope(
+    *,
+    feature_enabled: bool,
+    session_scope: str,
+) -> bool:
+    return feature_enabled or session_scope == "person"
+
+
+def _normalize_channel_type(raw_value: Any) -> str | None:
+    value = str(raw_value or "").strip().lower()
+    if not value:
+        return None
+    if value in {"phone", "voice"}:
+        return "voice"
+    return value
+
+
+def _contact_member_channel_type_matches(
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any],
+) -> bool:
+    input_payload = runtime_variables.get("input_payload")
+    if not isinstance(input_payload, dict):
+        return True
+    expected_type = _normalize_channel_type(input_payload.get("channel_type"))
+    if expected_type is None:
+        return True
+    return expected_type == _normalize_channel_type(
+        contact_row.get("contact_channel_type")
+    )
+
+
+def _ensure_person_scope_component_supported(
+    *,
+    session_scope: str,
+    component_kind_value: str,
+) -> None:
+    if (
+        session_scope == "person"
+        and component_kind_value in PERSON_SCOPE_CHANNEL_COMPONENT_KINDS
+    ):
+        raise WorkflowExecutionError(
+            "person_scope_channel_component_not_supported",
+            "Sessões por pessoa não podem executar componentes de comunicação por canal.",
+        )
 
 
 def _read_max_steps(settings: Any) -> int:
@@ -4577,7 +4639,7 @@ async def execute_workflow_m2_for_session(
     safe_schema = get_current_workspace_schema().replace('"', '""')
     max_steps = _read_max_steps(settings)
     loop_guard_repeat_threshold = _read_loop_guard_repeat_threshold(settings)
-    contextual_member_routing_enabled = _read_contextual_member_routing_enabled(settings)
+    contextual_member_routing_feature_enabled = _read_contextual_member_routing_enabled(settings)
     execution_started_at = datetime.now(timezone.utc)
     execution_started_perf = time.perf_counter()
     session_uuid_for_metrics: str | None = None
@@ -4719,8 +4781,20 @@ async def execute_workflow_m2_for_session(
                 )
             )
 
+        session_scope = _read_session_scope(runtime_variables)
+        contextual_member_routing_enabled = _contextual_member_routing_enabled_for_scope(
+            feature_enabled=contextual_member_routing_feature_enabled,
+            session_scope=session_scope,
+        )
         contact_member_scope = _extract_contact_member_routing_scope(runtime_variables)
-        if contextual_member_routing_enabled and contact_member_scope.valid:
+        person_scope_without_selectors = (
+            session_scope == "person" and not contact_member_scope.explicit
+        )
+        if (
+            contextual_member_routing_enabled
+            and contact_member_scope.valid
+            and not person_scope_without_selectors
+        ):
             contact_runtime_context = await fetch_contact_runtime_context_for_session(
                 db_session,
                 flow_uuid=flow_uuid,
@@ -4745,6 +4819,20 @@ async def execute_workflow_m2_for_session(
             except (KeyError, TypeError, ValueError):
                 contact_runtime_context = None
 
+        channel_type_matches: bool | None = None
+        if (
+            contextual_member_routing_enabled
+            and contact_member_scope.explicit
+            and isinstance(contact_runtime_context, dict)
+        ):
+            channel_type_matches = _contact_member_channel_type_matches(
+                runtime_variables,
+                contact_runtime_context,
+            )
+            if not channel_type_matches:
+                contact_runtime_context = None
+                resolved_contact_list_member_id = None
+
         if contextual_member_routing_enabled:
             workflow_meta = _ensure_workflow_meta(runtime_variables)
             workflow_meta["contact_member_routing"] = {
@@ -4752,6 +4840,7 @@ async def execute_workflow_m2_for_session(
                 "explicit": contact_member_scope.explicit,
                 "valid": contact_member_scope.valid,
                 "resolved_contact_list_member_id": resolved_contact_list_member_id,
+                "channel_type_matches": channel_type_matches,
             }
 
         routing_contact_list_member_id = _resolved_contact_member_id_for_routing(
@@ -4761,15 +4850,22 @@ async def execute_workflow_m2_for_session(
 
         if (
             contextual_member_routing_enabled
-            and contact_member_scope.explicit
+            and (contact_member_scope.explicit or session_scope == "person")
             and contact_runtime_context is None
         ):
             failed_at = datetime.now(timezone.utc)
-            failure_message = (
-                "Identificadores de membro/lista inválidos no payload de origem."
-                if not contact_member_scope.valid
-                else "Nenhum membro ativo corresponde ao escopo explícito da sessão."
-            )
+            if person_scope_without_selectors:
+                failure_message = (
+                    "Sessão por pessoa recebida sem identificadores de membro, lista ou mailing."
+                )
+            elif not contact_member_scope.valid:
+                failure_message = "Identificadores de membro/lista inválidos no payload de origem."
+            elif channel_type_matches is False:
+                failure_message = (
+                    "O membro explícito não corresponde ao tipo de canal informado pela sessão."
+                )
+            else:
+                failure_message = "Nenhum membro ativo corresponde ao escopo explícito da sessão."
             workflow_meta = _ensure_workflow_meta(runtime_variables)
             workflow_meta["terminal_failure"] = {
                 "code": "contact_member_scope_not_found",
@@ -4978,6 +5074,10 @@ async def execute_workflow_m2_for_session(
             branch_label: str | None = None
 
             try:
+                _ensure_person_scope_component_supported(
+                    session_scope=session_scope,
+                    component_kind_value=kind,
+                )
                 if kind == "set_variables":
                     _run_set_variables(component, runtime_variables)
                 elif kind == "create_contact":
