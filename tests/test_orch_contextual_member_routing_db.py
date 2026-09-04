@@ -28,6 +28,7 @@ async def test_contextual_member_routing_isolated_in_temporary_tables() -> None:
                     CREATE TEMP TABLE orch_sessions (
                         id BIGINT PRIMARY KEY,
                         entity TEXT NOT NULL,
+                        entity_address TEXT NOT NULL,
                         flow_uuid UUID NOT NULL,
                         unassigned_at TIMESTAMP NULL
                     ) ON COMMIT DROP
@@ -41,6 +42,11 @@ async def test_contextual_member_routing_isolated_in_temporary_tables() -> None:
                         id BIGINT PRIMARY KEY,
                         ani TEXT NULL,
                         linked_actuator TEXT NULL,
+                        outbound_hsm JSONB NULL,
+                        outbound_hsm_idempotency_key TEXT NULL,
+                        outbound_hsm_prepared_at TIMESTAMPTZ NULL,
+                        outbound_hsm_session_uuid UUID NULL,
+                        outbound_hsm_component_ref_id UUID NULL,
                         contact_identifier TEXT NOT NULL,
                         contact_list_id UUID NOT NULL,
                         mailing_id BIGINT NULL,
@@ -67,8 +73,8 @@ async def test_contextual_member_routing_isolated_in_temporary_tables() -> None:
             await db_session.execute(
                 text(
                     """
-                    INSERT INTO orch_sessions (id, entity, flow_uuid)
-                    VALUES (6937, '30392286855', CAST(:flow_uuid AS uuid))
+                    INSERT INTO orch_sessions (id, entity, entity_address, flow_uuid)
+                    VALUES (6937, '30392286855', '5511999999999', CAST(:flow_uuid AS uuid))
                     """
                 ),
                 {"flow_uuid": flow_uuid},
@@ -81,11 +87,26 @@ async def test_contextual_member_routing_isolated_in_temporary_tables() -> None:
                         contact_identifier,
                         contact_list_id,
                         mailing_id,
+                        contact_channel_address,
                         created_at
                     )
                     VALUES
-                        (10655, '30392286855', CAST(:expected_list_uuid AS uuid), 1115, NOW() - INTERVAL '1 hour'),
-                        (10687, '30392286855', CAST(:wrong_list_uuid AS uuid), 1114, NOW())
+                        (
+                            10655,
+                            '30392286855',
+                            CAST(:expected_list_uuid AS uuid),
+                            1115,
+                            '5511999999999',
+                            NOW() - INTERVAL '1 hour'
+                        ),
+                        (
+                            10687,
+                            '30392286855',
+                            CAST(:wrong_list_uuid AS uuid),
+                            1114,
+                            '5511888888888',
+                            NOW()
+                        )
                     """
                 ),
                 {
@@ -113,12 +134,20 @@ async def test_contextual_member_routing_isolated_in_temporary_tables() -> None:
                 contact_list_id=wrong_list_uuid,
                 mailing_id=1114,
             )
+            address_conflict = await fetch_contact_runtime_context_for_session(
+                db_session,
+                **base,
+                contact_list_member_id=10687,
+                contact_list_id=wrong_list_uuid,
+                mailing_id=1114,
+            )
 
             assert legacy is not None
             assert legacy["contact_list_member_id"] == 10687
             assert scoped is not None
             assert scoped["contact_list_member_id"] == 10655
             assert conflict is None
+            assert address_conflict is None
 
             dialer_assignment = await assign_dialer_routing_for_session(
                 db_session,

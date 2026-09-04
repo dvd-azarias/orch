@@ -224,6 +224,12 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
             "workflow_m2_contact_member_routing_update_failed",
             "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
         )
+    if stopped_reason == "person_scope_channel_component_not_supported":
+        return (
+            "error",
+            "workflow_m2_person_scope_channel_component_not_supported",
+            "Sessão por pessoa encerrada ao alcançar componente de comunicação por canal.",
+        )
     if stopped_reason == "condition_branch_not_mapped":
         return (
             "error",

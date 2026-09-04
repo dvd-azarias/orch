@@ -117,6 +117,7 @@ async def test_fetch_contact_context_uses_native_list_and_mailing_predicates() -
     assert row == {"contact_list_member_id": 10655}
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" in session.statement
+    assert "btrim(clm.contact_channel_address) = btrim(os.entity_address)" in session.statement
     assert "contact_list_id::text =" not in session.statement
     assert "mailing_id::text =" not in session.statement
     assert session.parameters["contact_list_id"] == "dc7dc1c1-2c98-42e9-a788-5d186f458daa"
@@ -137,6 +138,7 @@ async def test_fetch_contact_context_cross_validates_lower_selectors_with_member
     )
 
     assert "clm.id = :contact_list_member_id" in session.statement
+    assert "btrim(clm.contact_channel_address) = btrim(os.entity_address)" in session.statement
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" in session.statement
 
@@ -152,6 +154,7 @@ async def test_fetch_contact_context_without_scope_preserves_legacy_query() -> N
     )
 
     assert "clm.id = :contact_list_member_id" not in session.statement
+    assert "btrim(clm.contact_channel_address) = btrim(os.entity_address)" not in session.statement
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" not in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" not in session.statement
 

@@ -370,15 +370,33 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `RUNTIME EVIDENCE`: no flow `3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17`, as sessoes `6928` e `6937` declaravam `contact_list_id=dc7dc1c1-2c98-42e9-a788-5d186f458daa` e `mailing_id=1115`. O membro esperado era `10655`, mas o runtime registrou `contact_list_member_id=10687`, da lista `b5521cb2-09a9-4391-8ab5-fea25924e820`/mailing `1114`, e esse membro recebeu `linked_actuator=dialer`. O membro `10655` permaneceu `NULL`. No workspace havia 38 identificadores com duplicidade ativa, somando 113 linhas; uma agregacao conservadora encontrou 26 sessoes divergentes em tres flows: 23 Dialer e 3 WhatsApp interativo.
 
-`MITIGATION`: a correcao implementada resolve uma vez por `contact_list_member_id`, lista ou mailing, valida cruzadamente os seletores presentes e reutiliza o mesmo membro no contexto e nos atuadores. Conflito explicito ou perda concorrente do membro terminaliza com alarme; fallback global permanece somente quando o evento nao traz escopo. A flag `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED` e default-off e precisa de rollout controlado. Nao corrigir dados em massa sem preservar a relacao sessao/lista e validar ownership externo.
+`MITIGATION`: a correcao implementada resolve uma vez por `contact_list_member_id`, lista ou mailing, valida cruzadamente os seletores presentes, o endereço da sessão e o tipo de canal informado, e reutiliza o mesmo membro no contexto e nos atuadores. Conflito explícito ou perda concorrente do membro terminaliza com alarme; fallback global permanece somente quando o evento não traz escopo. A flag `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED` e default-off para sessões legadas, mas `session_scope=person` força a validação contextual. Não corrigir dados em massa sem preservar a relação sessão/lista e validar ownership externo.
 
 `MINIMUM SAFE CHANGE`: resolver o membro por identidade contextual compartilhada entre Dialer, WhatsApp e carregamento do contato. Priorizar `contact_list_member_id` validado; depois `contact_list_id + contact_identifier`; usar `mailing_id` apenas como qualificador. Manter o fallback legado para o membro mais novo somente quando nenhum seletor contextual foi fornecido. Se houver seletor explicito conflitante, falhar sem atualizar outra lista.
 
 `ROLLBACK`: desligar `WORKFLOW_CONTEXTUAL_MEMBER_ROUTING_ENABLED` e reiniciar API/workers. Dados ja alterados ou sessoes terminalizadas nao sao revertidos automaticamente.
 
-`DETECTION`: comparar `input_payload.contact_list_id` com a lista do `contact_list_member_id` persistido em `send_with_dialer_routing`, `send_with_whatsapp_routing` e `send_whatsapp_interactive_routing`.
+`DETECTION`: comparar `input_payload.contact_list_id`, `channel_type` e o `entity_address` da sessão com o membro persistido em `variables.contact` e nos metadados `send_with_dialer_routing`, `send_with_whatsapp_routing` e `send_whatsapp_interactive_routing`.
 
 `V2`: sessao deve persistir chave estrangeira/identidade imutavel do membro de origem; nao recorrelar por identificador de negocio a cada card.
+
+## R30 — Escopo por pessoa usado em flow de comunicação
+
+`STATUS`: FIX IMPLEMENTED / E2E AND DEPLOY PENDING
+
+`IMPACT`: high
+
+`PROBABILITY`: low enquanto a allowlist do Target Core permanecer restrita
+
+`AFFECTED AREA`: cardinalidade de sessões / Dialer / WhatsApp / Target Core
+
+`DESCRIPTION`: uma sessão por pessoa não contém uma decisão legítima de canal para cards de comunicação. Selecionar silenciosamente o canal primário ou mais novo poderia enviar mensagem para o endereço errado e voltar a misturar cardinalidade com decisão de atuador.
+
+`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp com alarme `workflow_m2_person_scope_channel_component_not_supported`. A allowlist inicial contém somente o flow piloto `e94783ce-74f0-4df6-b868-a4b17f38e1e1`.
+
+`ROLLBACK`: remover o UUID da allowlist no Target Core e reiniciar seus processos. O comportamento de novas associações volta a `channel`; sessões já materializadas não são expandidas retroativamente.
+
+`V2`: persistir `session_scope` como contrato versionado do flow e exigir validação de compatibilidade entre escopo e componentes no publish.
 
 ## R21 — Stack DEV perde controle dos subprocessos e reporta falso down
 

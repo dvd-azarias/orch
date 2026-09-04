@@ -1298,6 +1298,7 @@ async def fetch_session_workflow_state(
                 id,
                 uuid::text AS uuid,
                 flow_uuid::text AS flow_uuid,
+                entity_address,
                 runtime_variables,
                 last_card_uuid::text AS last_card_uuid,
                 next_card_uuid::text AS next_card_uuid,
@@ -2179,6 +2180,9 @@ async def fetch_contact_runtime_context_for_session(
 
     contextual_filter = ""
     if scope_predicates:
+        scope_predicates.append(
+            "btrim(clm.contact_channel_address) = btrim(os.entity_address)"
+        )
         contextual_filter = "\n              AND " + "\n              AND ".join(scope_predicates)
 
     result = await db_session.execute(

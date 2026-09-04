@@ -1,5 +1,24 @@
 # Maintenance Log
 
+## 2026-09-04 — Contrato ORCH para sessões por pessoa e canal exato
+
+### REQUEST / CLASSIFICATION
+
+Suportar o piloto em que o Target Core reduz o fanout para uma sessão por pessoa sem devolver ao Target a decisão de `linked_actuator`. `ALPHA_FIX_REQUIRED`; risco alto por identidade de membro, canal e comunicação externa.
+
+### CHANGE
+
+- Escopo explícito valida o endereço de `orch_sessions` contra `contact_list_members`, além de membro/lista/mailing; o tipo enviado também é validado (`phone` e `voice` são equivalentes).
+- `session_scope=person` força roteamento contextual mesmo quando a flag histórica está desligada; ausência ou valor desconhecido preserva `channel`.
+- O ORCH não define atuador na criação. Sessão `person` que alcança card de saída Dialer/WhatsApp termina com erro e alarme próprios, antes do efeito externo.
+- O fixture PostgreSQL de roteamento contextual foi alinhado às colunas HSM já usadas pelo runtime.
+
+### VALIDATION
+
+- Regressão local de repositório, M2 e rota manual: 130 testes passaram.
+- PostgreSQL real com tabelas temporárias: 1 teste passou, incluindo rejeição por endereço conflitante. Uma execução anterior invalidou o prepared statement do `asyncpg` após mudança do schema temporário; a repetição com schema estável passou.
+- E2E cruzado ainda está pendente. Nenhum deploy ou escrita de produção foi executado.
+
 ## 2026-08-28 — Billing batch persistente `service-orch`
 
 ### REQUEST / CLASSIFICATION

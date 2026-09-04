@@ -151,6 +151,20 @@ O canario de 2026-08-27 confirmou o callback nativo do `finish_flow` no alias cu
 
 O contrato e de entrega ao menos uma vez: timeout ou crash entre aceite externo e commit local pode repetir o mesmo payload. A deduplicacao efetiva pelo `messages[].id` no Runner ainda requer comprovacao E2E.
 
+## Escopo de sessão recebido do Target Core
+
+```text
+Target Core associa mailing
+  -> channel: uma sessão por canal, com member_id + endereço + tipo exatos
+  -> person: uma sessão por pessoa, com um membro-semente determinístico
+ORCH recebe a sessão
+  -> valida membro/lista/mailing + endereço da sessão + tipo informado
+  -> executa cards genéricos
+  -> define linked_actuator apenas quando um card autorizado o exige
+```
+
+`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Se ela alcançar `send_with_dialer`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template`, o M2 terminaliza com `person_scope_channel_component_not_supported`; não escolhe outro canal implicitamente. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+
 ## Generate file
 
 ```text
