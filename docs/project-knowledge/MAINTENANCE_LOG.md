@@ -16,14 +16,25 @@ Implementar no ORCH o contrato já publicado no catálogo do Target Core. `ALPHA
 
 ### VALIDATION
 
-- Testes focados de engine, dispatcher e repositório: `27 passed`.
+- Testes focados de engine, dispatcher e repositório: `28 passed`.
 - Regressão direcionada de workflow/callback/revisão/tasks: `185 passed, 1 failed`; a falha usa a assinatura legada `trigger_orch(flow_uuid=...)` já pertencente à baseline.
 - PostgreSQL real fora da sandbox: `2 passed` para o novo ciclo callback→retomada e a regressão transacional de `source_list_membership`. A sessão de prova foi criada em transação revertida e a consulta posterior confirmou zero resíduo pelo UUID.
-- Suíte completa fora da sandbox: `518 passed, 27 failed`. Vinte e seis falhas reproduzem a baseline legada; a falha adicional de prepared statement em teste antigo com tabela temporária passou isoladamente logo depois.
+- Suíte completa final fora da sandbox: `517 passed, 28 failed`. As falhas de assinatura reproduzem a baseline legada; as duas falhas potencialmente afetadas por ordem/estado compartilhado passaram isoladamente logo depois.
 - `py_compile` e `git diff --check` passaram. `ruff` não está instalado na `.venv` atual.
 - Stack local completa reiniciada na branch com perfil `f5_local`; API, três workers e dois Beats ficaram `up` em TTY persistente.
 - Smokes encadeados criaram as sessões `7366` e `7367`, ambas concluídas em `state=3` e com zero alarmes. Esses flows não possuem o card novo e comprovam regressão da stack, não o E2E de `wait_for_event`.
-- A busca no workspace de teste não encontrou revisão contendo `wait_for_event`; canário real de `received` e `timeout` permanece pendente.
+- O flow canário publicado foi configurado depois dessa primeira busca. Antes do rollout, execução transacional e canários locais confirmaram os caminhos `received` e `timeout`; a validação definitiva está registrada abaixo.
+
+### POST-DEPLOY
+
+- A PR ORCH `#149`, merge `ce4764164f28d4371cf8cc38b6efb89395a769c6`, foi implantada por fast-forward em `/etc/gohp/orch` nos hosts `10.1.20.136` e `10.1.20.237`.
+- Os `.env` locais foram preservados e copiados para `.maintenance-backups/.env.pre-wait-for-event-20260906-2030`; os checksums permaneceram idênticos antes e depois do pull.
+- No `237`, os cinco workers gerais foram reiniciados em rolling restart e anunciaram `237_01..05 ready`; o beat principal e a API também foram reiniciados. FileApp, generate-file e billing não foram interrompidos. No `136`, somente a API foi reiniciada, preservando a topologia sem workers.
+- As duas APIs responderam HTTP 200 em `live`, `ready` e `celery`; os cinco workers gerais responderam `pong`, as units afetadas ficaram `active` e nenhuma unit ORCH ficou em `failed`.
+- No flow `f7414852-e4fc-4e5f-8bb6-4e8ec2d317c8`, revisão publicada v3 `ab839afc-53fc-4830-8564-8d5dd4258f5e`, a sessão `7398` aguardou 10 segundos, seguiu pela branch `timeout`, executou o card de marcação com HTTP 200 (`stream_id=1345250`) e terminou em `state=3`, `frozen_until=NULL`, oito métricas e zero alarmes.
+- A sessão `7399` foi armada e recebeu callback `BOLETO_PAGO` pela rota canônica; reutilizou a mesma sessão, consumiu o callback, seguiu pela branch `received`, confirmou HTTP 200 (`stream_id=1345252`) e terminou em `state=3`, `frozen_until=NULL`, oito métricas e zero alarmes.
+- A auditoria tardia manteve ambas as sessões com oito métricas e `finished_by_component`, comprovando ausência do hot loop observado antes do rollout.
+- O journal também mostrou execuções antigas e independentes falhando periodicamente com `api_call sem URL válida`, inclusive antes do restart. Elas não afetaram os canários e nenhuma unit ORCH caiu; o saneamento dessas sessões/flows permanece uma investigação separada.
 
 ### RISK / ROLLBACK
 

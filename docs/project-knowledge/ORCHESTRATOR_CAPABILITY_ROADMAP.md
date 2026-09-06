@@ -22,7 +22,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Em implementacao |
 | 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
 | 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Em implementação |
+| 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 4 | `split_random` | A classificar no desenho do envelope | Planejado |
 | 5 | `select_contact_channel` | A classificar no desenho do envelope | Planejado |
 | 6 | `send_with_sms` | A classificar no desenho do envelope | Planejado |
@@ -165,23 +165,25 @@ Contrato aprovado:
 - [x] Branch Target Core criada do `origin/main` atualizado.
 - [x] Catálogo e validação `422` implementados no Target Core.
 - [x] Testes do contrato Target Core aprovados.
-- [x] PR Target Core `#466` integrada e ambiente alvo atualizado.
+- [x] PR Target Core `#467` integrada e ambiente alvo atualizado.
 - [x] Branch ORCH criada do `origin/main` atualizado.
 - [x] Engine ORCH implementada reutilizando `callbacks_pending`, `frozen_until`, dispatcher e lock da sessão.
 - [x] Timeout e idempotência locais definidos; não há retry de efeito externo próprio do card.
 - [x] Logs, métricas, resultado e erro permitem diagnosticar armamento, recebimento, timeout e exceção sem registrar `entity` ou `data` nos logs.
 - [x] Testes automatizados focados e teste transacional em PostgreSQL real aprovados.
 - [x] Stack local completa reiniciada; smokes encadeados anteriores concluíram em `state=3`, sem alarmes.
-- [ ] Canary/E2E de um flow publicado com o card confirmar `received` e `timeout` pela rota canônica.
-- [ ] PR ORCH integrada e rollout validado.
-- [x] Documentação e evidências pré-PR atualizadas.
-- [ ] Item marcado como concluído no estado geral.
+- [x] Canary/E2E de um flow publicado confirmou `received` e `timeout` pela rota canônica, sem hot loop ou alarme.
+- [x] PR ORCH `#149` integrada; rollout do merge `ce47641` validado nos hosts `10.1.20.136` e `10.1.20.237`.
+- [x] Documentação e evidências atualizadas.
+- [x] Item marcado como concluído no estado geral.
 
 Concorrência: o callback adquire o mesmo advisory lock do executor antes de alterar o runtime. Quando corresponde à espera ativa, deixa a sessão em `state=0` e remove `frozen_until`, garantindo recuperação pelo dispatcher mesmo se a task publicada antes do commit observar `session_execution_locked`.
 
 Limite Alpha: a correlação genérica existente escolhe uma sessão ativa por `flow_uuid + entity`. Flows que possam manter mais de uma sessão ativa com a mesma entidade devem usar uma entidade única por execução ou não usar este card até existir uma correlação explícita; consulte R32.
 
 Rollback: interromper novos usos e aguardar ou resolver as esperas ativas antes de reverter a engine. Uma sessão ainda posicionada no card seria encerrada como componente não suportado pelo código anterior. Não há migration nem efeito externo a desfazer.
+
+Próximo item: `split_random`.
 
 ## Backlog avancado
 
