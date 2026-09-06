@@ -13,6 +13,7 @@ from app.services.workflow_m2_service import (
     execute_workflow_m2_for_session,
 )
 from app.services.workflow_engine import definition_has_finish_flow_webhook
+from app.services.workflow_revision_service import WorkflowRevisionResolution
 
 
 def _component(webhook: str | None = "https://example.test/hook") -> dict:
@@ -417,7 +418,12 @@ async def test_execute_finish_flow_dispatches_persisted_terminal_snapshot(monkey
         return {"id": flow_uuid}
 
     async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
-        return {"id": "44444444-4444-4444-4444-444444444444", "definition": definition}
+        return WorkflowRevisionResolution(
+            revision={"id": "44444444-4444-4444-4444-444444444444", "definition": definition},
+            source="pinned",
+            requested_revision_id="44444444-4444-4444-4444-444444444444",
+            failure_reason=None,
+        )
 
     async def _fetch_session(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {
@@ -476,7 +482,7 @@ async def test_execute_finish_flow_dispatches_persisted_terminal_snapshot(monkey
 
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", _fetch_flow)
-    monkeypatch.setattr(workflow_m2_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(workflow_m2_service, "resolve_workflow_revision_for_session", _fetch_revision)
     monkeypatch.setattr(workflow_m2_service, "fetch_session_workflow_state", _fetch_session)
     monkeypatch.setattr(workflow_m2_service, "fetch_session_webhook_snapshot", _fetch_snapshot)
     monkeypatch.setattr(workflow_m2_service, "fetch_next_pending_channel_event", _fetch_pending_event)

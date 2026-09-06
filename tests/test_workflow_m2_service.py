@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import app.services.workflow_m2_service as workflow_m2_service
+from app.services.workflow_revision_service import WorkflowRevisionResolution
 from app.services.workflow_m2_service import (
     WorkflowExecutionError,
     _build_send_whatsapp_template_hsm,
@@ -554,10 +555,15 @@ async def test_condition_sem_branch_terminaliza_execucao(monkeypatch: pytest.Mon
         return {"id": "33333333-3333-3333-3333-333333333333"}
 
     async def _fetch_revision(*_args, **_kwargs) -> dict:
-        return {
-            "id": "44444444-4444-4444-4444-444444444444",
-            "definition": definition,
-        }
+        return WorkflowRevisionResolution(
+            revision={
+                "id": "44444444-4444-4444-4444-444444444444",
+                "definition": definition,
+            },
+            source="pinned",
+            requested_revision_id="44444444-4444-4444-4444-444444444444",
+            failure_reason=None,
+        )
 
     async def _fetch_session(*_args, **_kwargs) -> dict:
         return {
@@ -584,7 +590,7 @@ async def test_condition_sem_branch_terminaliza_execucao(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
     monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", _fetch_flow)
-    monkeypatch.setattr(workflow_m2_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(workflow_m2_service, "resolve_workflow_revision_for_session", _fetch_revision)
     monkeypatch.setattr(workflow_m2_service, "fetch_session_workflow_state", _fetch_session)
     monkeypatch.setattr(workflow_m2_service, "fetch_contact_runtime_context_for_session", _fetch_contact)
     monkeypatch.setattr(workflow_m2_service, "replace_session_workflow_state", _replace)
@@ -662,7 +668,12 @@ async def test_contextual_member_scope_conflict_terminalizes_without_fallback(
         return {"id": flow_uuid}
 
     async def _fetch_revision(*_args, **_kwargs) -> dict:
-        return {"id": "44444444-4444-4444-4444-444444444444", "definition": {}}
+        return WorkflowRevisionResolution(
+            revision={"id": "44444444-4444-4444-4444-444444444444", "definition": {}},
+            source="pinned",
+            requested_revision_id="44444444-4444-4444-4444-444444444444",
+            failure_reason=None,
+        )
 
     async def _fetch_session(*_args, **_kwargs) -> dict:
         return {
@@ -690,7 +701,7 @@ async def test_contextual_member_scope_conflict_terminalizes_without_fallback(
         lambda _settings: feature_enabled,
     )
     monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", _fetch_flow)
-    monkeypatch.setattr(workflow_m2_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(workflow_m2_service, "resolve_workflow_revision_for_session", _fetch_revision)
     monkeypatch.setattr(workflow_m2_service, "fetch_session_workflow_state", _fetch_session)
     monkeypatch.setattr(workflow_m2_service, "fetch_contact_runtime_context_for_session", _fetch_contact)
     monkeypatch.setattr(workflow_m2_service, "replace_session_workflow_state", _replace)

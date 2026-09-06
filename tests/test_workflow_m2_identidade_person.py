@@ -7,6 +7,7 @@ import pytest
 
 import app.services.workflow_m2_service as workflow
 from app.services.identidade_person_service import IdentidadePersonQueryResult
+from app.services.workflow_revision_service import WorkflowRevisionResolution
 
 
 def _provider_person() -> dict:
@@ -397,8 +398,15 @@ async def test_workflow_m2_dispatches_identidade_person_and_follows_branch(
     monkeypatch.setattr(workflow, "fetch_flow_row", AsyncMock(return_value={"id": flow_uuid}))
     monkeypatch.setattr(
         workflow,
-        "fetch_selected_revision",
-        AsyncMock(return_value={"id": "44444444-4444-4444-4444-444444444444", "definition": definition}),
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={"id": "44444444-4444-4444-4444-444444444444", "definition": definition},
+                source="pinned",
+                requested_revision_id="44444444-4444-4444-4444-444444444444",
+                failure_reason=None,
+            )
+        ),
     )
     monkeypatch.setattr(
         workflow,

@@ -13,14 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema
-from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
+from app.repositories.flow_v2_repository import fetch_flow_row
 from app.repositories.orch_channel_events_repository import (
     has_channel_event_identity,
     insert_channel_event,
 )
-from app.repositories.orch_sessions_repository import set_session_cdr
+from app.repositories.orch_sessions_repository import fetch_session_workflow_state, set_session_cdr
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.workflow_engine import definition_has_finish_flow_webhook
+from app.services.workflow_revision_service import resolve_workflow_revision_for_session
 
 logger = get_logger(__name__)
 
@@ -34,13 +35,42 @@ class ChannelEventItem:
     payload: dict[str, Any]
 
 
-async def _flow_has_finish_flow_webhook(db_session: AsyncSession, *, flow_uuid: str) -> bool:
+async def _session_has_finish_flow_webhook(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+) -> bool:
     flow = await fetch_flow_row(db_session, flow_uuid=flow_uuid)
     if flow is None:
         return False
-    revision = await fetch_selected_revision(db_session, flow_id=str(flow["id"]))
-    if revision is None:
+
+    session_state = await fetch_session_workflow_state(db_session, session_id=session_id)
+    if session_state is None or str(session_state.get("flow_uuid") or "") != str(flow_uuid):
         return False
+
+    runtime_variables = session_state.get("runtime_variables")
+    if not isinstance(runtime_variables, dict):
+        runtime_variables = {}
+    resolution = await resolve_workflow_revision_for_session(
+        db_session,
+        flow_id=str(flow["id"]),
+        runtime_variables=runtime_variables,
+    )
+    if resolution.revision is None:
+        logger.warning(
+            "channel event could not resolve session revision",
+            extra={
+                "event": "orch.channel_event.session_revision_unavailable",
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+                "requested_revision_id": resolution.requested_revision_id,
+                "failure_reason": resolution.failure_reason,
+            },
+        )
+        return False
+
+    revision = resolution.revision
     definition = revision.get("definition")
     return isinstance(definition, dict) and definition_has_finish_flow_webhook(definition)
 
@@ -258,9 +288,10 @@ async def persist_channel_events(
                     payload=event.payload,
                 )
                 if was_inserted:
-                    if event.channel == "dialer" and await _flow_has_finish_flow_webhook(
+                    if event.channel == "dialer" and await _session_has_finish_flow_webhook(
                         db_session,
                         flow_uuid=flow_uuid,
+                        session_id=session_id,
                     ):
                         await set_session_cdr(
                             db_session,

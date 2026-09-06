@@ -18,9 +18,10 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 6. O codigo atual nao implementa autenticacao para trigger, consultas ou endpoints admin de migration. Protecao externa e `UNKNOWN`.
 7. O risco de amplificacao deixou de ser apenas estatico: em 2026-08-24, sessoes invalidas de um flow draft acumularam 1.154.025 falhas. As sessoes `256`, `257` e `263` foram terminalizadas de forma auditada; consulte `docs/project-knowledge/INCIDENT_HISTORY.md` antes de intervir em dispatcher, reconciliador, filas ou sessoes.
 8. Bloqueios considerados sucesso tambem podem ser amplificados sem alarme. A auditoria posterior a migracao dos workers para o host `10.1.20.237` confirmou o loop `blocked_send_whatsapp_interactive` ativo em tres workspaces, mais de 213 mil execucoes de executor e 428 mil metricas em cerca de 70 minutos. A correcao Alpha inclui esse motivo em `BLOCKING_RUNNING_STOP_REASONS`, preservando a sessao em `state=1` ate callback/reconciliacao; implantacao e validacao de runtime ainda estao pendentes.
-9. Em 2026-08-27, a suite coletou 383 testes: 356 passaram e 27 falharam; 26 correspondem majoritariamente a casos legados que ainda chamam `trigger_orch(flow_uuid=...)` e uma falha adicional foi `InvalidCachedStatementError` em teste DB com tabela temporaria. Nao trate a suite completa como verde. A regressao direcionada do `switch_bot_flow` passou integralmente com 118 testes.
+9. Em 2026-09-06, o `origin/main` coletou 485 testes: 459 passaram e 26 falharam; as falhas correspondem a casos legados que ainda chamam `trigger_orch(flow_uuid=...)` e nao fazem parte da fixacao de revisao. O branch `fix/pin-session-flow-revision` coletou 493: 467 passaram e as mesmas 26 falharam. Nao trate a suite completa como verde, mas tambem nao atribua essa baseline ao patch.
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
 11. Billing possui dois mecanismos mutuamente exclusivos e desligados por default. `ORCH_BILLING_SNAPSHOT_ENABLED` e legado; `ORCH_BILLING_ENABLED` ativa o batch novo somente apos migration `0022`, worker e Beat dedicados. Nunca reutilizar o backfill legado. Consultar `docs/BILLING_BATCH_RUNBOOK.md`.
+12. O branch `fix/pin-session-flow-revision` faz a sessao executar a `revision_id` gravada no bootstrap, inclusive em retomadas dependentes do grafo. A stack local e dois smokes reais confirmaram runtime/metricas com o mesmo pin; rollout e canario N -> N+1 permanecem pendentes. Draft continua mutavel e nao recebe a mesma garantia forte de uma revisao publicada.
 
 ## O que e o ORCH
 
@@ -51,7 +52,7 @@ Entrypoints:
 ## Principais fluxos
 
 - Trigger comum: valida workspace -> detecta app -> correlaciona/persiste sessao -> registra eventos de canal -> bootstrap -> enqueue/executa M2 -> `202`.
-- Workflow: seleciona revisao -> injeta runtime -> executa cards sob lock da sessao -> persiste cursores -> finaliza, pausa ou bloqueia.
+- Workflow: seleciona revisao no bootstrap -> fixa `revision_id` no runtime -> executa essa revisao sob lock da sessao -> persiste cursores -> finaliza, pausa ou bloqueia.
 - FileApp `tipo_1`: valida pasta/template -> Celery ingest/process -> Target Core upload/mapping/import -> task de associacao -> pos-processamento do arquivo.
 - FileApp `tipo_2`: persiste sessao do arquivo -> baixa/expande CSV -> processa cada linha pelo trigger comum.
 - Canal/callback: correlaciona sessao ativa ou recente -> registra ledger/runtime -> retoma card bloqueante; sem correlacao, audita descarte.
@@ -144,7 +145,6 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Enqueues duplicados podem ocorrer enquanto claims do dispatcher sao revertidos ou antes do commit do request.
 - O storm silencioso do WhatsApp e fortemente compativel com claim revertido + scan periodico, agravado pela ausencia do stop reason na transicao defensiva do dispatcher.
 - `generate_file` pode repetir efeito SFTP se houver crash entre upload e commit.
-- Uma revisao de flow publicada entre passos pode causar drift da definicao executada.
 
 ### UNKNOWN
 
