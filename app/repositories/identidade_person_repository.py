@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _birthdate_db_value(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return date.fromisoformat(normalized)
 
 
 async def fetch_person_by_identifier_for_update(
@@ -127,7 +141,7 @@ async def insert_person_if_missing(
             "country": payload.get("country"),
             "state": payload.get("state"),
             "city": payload.get("city"),
-            "birthdate": payload.get("birthdate"),
+            "birthdate": _birthdate_db_value(payload.get("birthdate")),
             "primary_channel_type": payload.get("primary_channel_type"),
             "primary_channel_value": payload.get("primary_channel_value"),
             "primary_channel_label": payload.get("primary_channel_label"),
@@ -200,7 +214,7 @@ async def update_person_from_payload(
             "country": payload.get("country"),
             "state": payload.get("state"),
             "city": payload.get("city"),
-            "birthdate": payload.get("birthdate"),
+            "birthdate": _birthdate_db_value(payload.get("birthdate")),
             "primary_channel_type": payload.get("primary_channel_type"),
             "primary_channel_value": payload.get("primary_channel_value"),
             "primary_channel_label": payload.get("primary_channel_label"),
@@ -316,7 +330,7 @@ async def ensure_person_in_source_list(
                 "country": person.get("country"),
                 "state": person.get("state"),
                 "city": person.get("city"),
-                "birthdate": person.get("birthdate"),
+                "birthdate": _birthdate_db_value(person.get("birthdate")),
                 "extras": json.dumps(
                     person.get("extras") if isinstance(person.get("extras"), dict) else {},
                     ensure_ascii=False,
@@ -363,7 +377,7 @@ async def ensure_person_in_source_list(
                 "country": person.get("country"),
                 "state": person.get("state"),
                 "city": person.get("city"),
-                "birthdate": person.get("birthdate"),
+                "birthdate": _birthdate_db_value(person.get("birthdate")),
                 "extras": json.dumps(
                     person.get("extras") if isinstance(person.get("extras"), dict) else {},
                     ensure_ascii=False,

@@ -1,5 +1,35 @@
 # Maintenance Log
 
+## 2026-09-06 — Compatibilidade de `birthdate` no card `identidade_person`
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a falha do primeiro canário de escrita do card em produção. `ALPHA_FIX_REQUIRED`; impacto restrito à persistência de pessoa/draft do `identidade_person`, sem migration.
+
+### CAUSE
+
+O retorno da Identidade fornece `birthday` como string ISO e o runtime precisa preservar esse formato serializável. A mesma string era enviada sem conversão aos parâmetros das colunas PostgreSQL `date`; o `asyncpg` falhou com `DataError`, SQLSTATE `22000`, ao tentar codificá-la (`toordinal`). O card encapsulou a causa em `identidade_person_persistence_failed` e seguiu corretamente pelo ramo `exception`.
+
+### CHANGE
+
+- Converter `birthdate` para `datetime.date` somente na fronteira do repositório SQL.
+- Aplicar a conversão em criação e atualização de `persons` e em criação/atualização de `contact_drafts`.
+- Preservar a string ISO no runtime e rejeitar formato inválido sem coerção silenciosa.
+
+### VALIDATION
+
+- O canário que revelou o defeito criou exatamente uma sessão e não deixou pessoa, draft, membro, vínculo ou incremento parcial na lista.
+- Probe anterior ao patch reproduziu `DBAPIError`/`DataError`, SQLSTATE `22000`, com `birthdate` Python do tipo `str`.
+- Com o patch carregado isoladamente no runtime do host `10.1.20.237`, a transação real criou 1 pessoa, 1 draft e 8 canais; o valor retornado pelo banco foi `date`. O rollback confirmou zero pessoa e zero draft residuais.
+- Stack local completa: API, três workers e dois Beats ficaram `up`; o smoke canônico criou as sessões `7246` e `7247`, ambas encerradas em `state=3`.
+- Canário E2E pré-deploy `1b54233b-7075-42c9-8085-35c8afad5db7`: pessoa criada; lista passou de 3 para 4; 1 draft e 8 canais/membros materializados; vínculo ativo confirmado pelo Target Core com HTTP 200 em uma tentativa; `api_call` também registrou HTTP 200 em uma tentativa; sessão terminou em `state=3`, sem erro nem cache pendente.
+- A contagem de sessões do flow passou de 2 para 3, comprovando que o vínculo protegido não gerou fan-out ou recursão. A observação independente no destino do `api_call` não foi realizada.
+- Repetir o canário após deploy antes de considerar a versão implantada validada.
+
+### ROLLBACK
+
+Desabilitar novas execuções do card e reverter o commit do repositório; não há migration. O canário E2E criou intencionalmente pessoa, draft, canais, membros e vínculo no workspace de teste compartilhado. Esses dados não devem ser removidos automaticamente no rollback de código; eventual limpeza precisa ser uma operação explícita e auditada.
+
 ## 2026-09-05 — Engine inicial do card `identidade_person`
 
 ### REQUEST / CLASSIFICATION
