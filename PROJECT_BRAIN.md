@@ -56,6 +56,7 @@ Entrypoints:
 - FileApp `tipo_2`: persiste sessao do arquivo -> baixa/expande CSV -> processa cada linha pelo trigger comum.
 - Canal/callback: correlaciona sessao ativa ou recente -> registra ledger/runtime -> retoma card bloqueante; sem correlacao, audita descarte.
 - `switch_bot_flow`: bloqueia a sessao ORCH no card, resolve/cacheia o `runner_token` do flow alvo e repassa somente payloads Meta com mensagem de usuario ao Runner v5; callback terminal libera `success` ou `exception_*`.
+- `identidade_person`: consulta CPF na Identidade.io e, conforme política explícita, somente retorna, cria ou enriquece `persons`; associação opcional a `source_lists` é transacional e o vínculo ao flow é retomado pós-commit pelo contrato seguro do Target Core.
 - Generate file: card grava job/buffer -> beat scan -> worker produz arquivo SFTP -> auditoria e runtime.
 
 Detalhes: `docs/project-knowledge/DATA_FLOW.md`.
@@ -85,6 +86,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Files/Arquivos API: download, consulta, move/reupload de arquivos.
 - Otima LLM: componente `intelligent_agent`.
 - HTTP arbitrario: componente `api_call`.
+- Identidade.io: consulta de pessoa por CPF no card `identidade_person`, com URL fixa e Bearer do card.
 - SFTP/Paramiko: `generate_file`.
 - Supplier: endpoint autenticado de `resubmit`.
 - Billing: publisher confirmado no exchange `domain.events`; consumer deduplica por `snapshot_id` (premissa operacional fornecida).
@@ -105,10 +107,13 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - Billing batch conta a criacao de `orch_sessions`, usa `created_at` UTC e nunca reconstrói o payload durante retry. `sent` significa confirmacao/roteamento do RabbitMQ, nao processamento pelo consumer.
 - `switch_bot_flow` envia ao provider `whatsapp` do Runner v5 o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`. Usar `/webhook/session` fragmenta a identidade e desvia o dispatch para uma integracao webhook do flow.
 - A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O `finish_flow` BOT observado em runtime envia ao alias curto do proprio flow ORCH um envelope `entity + session.id + disposition`; `session.id` coincide com `target_session_id`. Esse envelope deve ser consumido antes do trigger comum para nao criar uma sessao fantasma. O primeiro estado terminal vence callbacks tardios conflitantes.
+- `identidade_person` em `lookup_only` não pode escrever em `persons` ou listas. Telefones marcados `do_not_disturb` não podem virar canais acionáveis. O vínculo mailing→flow usa `call_origin=identidade_person` somente depois do commit local; o Target valida o card publicado, materializa membros idempotentemente e não redispara sessões.
 
 ## Estado da baseline
 
 ### CONFIRMED
+
+- O envelope real de `identidade_person` usa formatos mistos da UI (string, objeto `{id, name}` e lista de checkbox); a engine os normaliza. As queries de pessoa/draft/lista foram executadas no PostgreSQL do workspace de teste dentro de transação revertida, com zero resíduos após rollback. O canário real `2dd62260-3519-45dd-9275-ad0c56359b84`, em `lookup_only`, consultou a Identidade.io uma vez, terminou em `state=3` e não criou pessoa, draft, canal ou vínculo.
 
 - Estrutura, entrypoints, rotas, tasks, filas, profiles, migrations e componentes foram rastreados no codigo.
 - A suite foi executada fora da sandbox: 295 coletados, 270 passaram, 25 falharam primeiro pela assinatura stale da rota legada; sucesso posterior desses casos nao foi comprovado.

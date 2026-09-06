@@ -571,3 +571,21 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `DETECTION`: conferir presença das cinco colunas, log `orch.workflow.m2.whatsapp_hsm_preparation_failed`, runtime `whatsapp_hsm_outbound`, linhas `status=0/linked_actuator=whatsapp/outbound_hsm IS NULL` e resposta `/select` sem `hsm=null`.
 
 `V2`: contrato versionado de command/outbox entre orquestração e seleção, sem tabela compartilhada entre serviços.
+
+## R30 — Vínculo de mailing iniciado por card pode redisparar o próprio fluxo
+
+`STATUS`: MITIGATED BY EXPLICIT CROSS-SERVICE CONTRACT / E2E WRITE CANARY PENDING
+
+`IMPACT`: critical
+
+`PROBABILITY`: low com os dois patches implantados na ordem; high se o contrato protegido for contornado
+
+`AFFECTED AREA`: `identidade_person` / Target Core / fan-out de sessões
+
+`DESCRIPTION`: o contrato normal de `POST /v2/flow/{flow_uuid}/mailings` materializa e enfileira membros. Invocá-lo durante uma sessão sem origem protegida poderia criar amplificação ou recursão, inclusive para o contato em execução.
+
+`MITIGATION`: o ORCH conclui pessoa/draft, commita e bloqueia a sessão antes da task de vínculo. A task usa `call_origin=identidade_person`; o Target Core exige que a definição executável declare o mesmo mailing, `person_action != lookup_only` e o checkbox de vínculo, então força `skip_orch_sessions=True`. Vínculo ativo é atualizado idempotentemente para materializar o draft novo e não duplica histórico.
+
+`DETECTION`: monitorar `blocked_identidade_person_flow_link`, `orch.identidade_person.flow_link.processed` e códigos `identidade_person_flow_link_*`; comparar `flow_mailing_links`, `contact_list_members` e `orch_sessions` por mailing no canário de escrita.
+
+`V2`: command/outbox idempotente de pessoa/lista/flow, sem chamada síncrona cruzada dentro da transação do workflow.

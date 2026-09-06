@@ -1,5 +1,32 @@
 # Maintenance Log
 
+## 2026-09-05 — Engine inicial do card `identidade_person`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o componente de consulta e enriquecimento criado no catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco alto por PII, API potencialmente cobrada e escrita em tabelas compartilhadas.
+
+### CHANGE
+
+- Cliente com URL fixa, Bearer sem logging, timeout, retry transitório e validação de CPF/workspace/resposta.
+- Normalização de dados, exclusão de DND dos canais acionáveis e políticas `lookup_only`, `create_if_missing`, `enrich_if_found` e `upsert`.
+- Associação idempotente a lista por `contact_drafts`/`source_list_contact_drafts`, dentro de savepoint; resposta externa bem-sucedida fica pendente no runtime somente até concluir, evitando nova cobrança após falha de persistência.
+- Branches `encontrado`, `nao_encontrado` e `exception`; formatos mistos emitidos pela UI foram cobertos.
+- O vínculo mailing→flow bloqueia a sessão e roda em task após o commit local. A origem `identidade_person` é validada pelo Target Core, atualiza vínculos ativos idempotentemente e usa `skip_orch_sessions=True`.
+
+### VALIDATION
+
+- Regressão consolidada ORCH: 159 testes passaram (155 unitários e 4 integrados contra o PostgreSQL, estes executados fora da sandbox). No Target Core, 14 testes do novo contrato passaram.
+- PostgreSQL real: pessoa, draft e canal foram criados dentro de transação de teste e desapareceram após rollback (`persons_count=0`, `drafts_count=0`).
+- Um teste preexistente de concorrência permanece vermelho no `origin/main` por chamar `trigger_orch(flow_uuid=...)`, assinatura que não existe mais; não foi alterado por este patch.
+- Stack local completa subiu no perfil isolado `f5_local`; API e cinco processos Celery ficaram `up`. O smoke canônico aceitou uma sessão em cada fluxo de regressão e ambas concluíram em `state=3` (`7233` e `7234`).
+- Canário real autorizado no flow `4e7340ee-ac17-488d-953f-46c51d7b2cd3`: sessão `2dd62260-3519-45dd-9275-ad0c56359b84` consultou a Identidade.io uma vez, terminou em `state=3`, seguiu `lookup_only` e deixou contagens de pessoa/draft/canal inalteradas em zero.
+- O E2E de escrita mais vínculo permanece pendente até os dois patches serem implantados em ordem Target Core → ORCH; nenhuma escrita de produção foi feita nesta etapa.
+
+### ROLLBACK
+
+Desabilitar/remover o card dos flows antes de reverter. Reverter ORCH e Target Core não exige migration; a ordem de rollback segura é interromper novas execuções, reverter ORCH e depois Target Core.
+
 ## 2026-09-04 — Contrato ORCH para sessões por pessoa e canal exato
 
 ### REQUEST / CLASSIFICATION

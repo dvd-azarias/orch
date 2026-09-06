@@ -69,6 +69,20 @@ Paradas relevantes:
 
 Risco: M2 relê a revisao corrente em vez de garantir uso da `revision_id` do bootstrap.
 
+## Card `identidade_person`
+
+1. Renderiza `document` com o runtime e valida CPF de 11 dígitos, UUID do workspace, token e enums do envelope.
+2. Consulta a URL fixa da Identidade.io. Uma resposta `2xx` válida é cacheada temporariamente no runtime até o card concluir; token e CPF integral não entram em logs.
+3. `data=[]` grava a saída com `found=false` e segue por `nao_encontrado` sem escrita de pessoa/lista.
+4. Com pessoa encontrada, normaliza campos e canais. Telefones `do_not_disturb=true` permanecem apenas nos metadados e nunca viram canal acionável; e-mails válidos viram canais.
+5. `lookup_only` não escreve. `create_if_missing` preserva pessoa existente. `enrich_if_found` não cria ausente. `upsert` cria ou enriquece. Valores nulos externos nunca apagam dados locais.
+6. Quando uma lista é escolhida e existe pessoa local resultante, cria/reutiliza `contact_drafts` e `source_list_contact_drafts` de forma idempotente dentro do mesmo savepoint da pessoa.
+7. Quando `link_mailing_to_current_flow` está ativo, a sessão para em `blocked_identidade_person_flow_link` após persistir o runtime e concluir o commit da pessoa/draft. A task dedicada chama `POST /v2/flow/{flow_uuid}/mailings` com `call_origin=identidade_person` e a mesma lista declarada no card.
+8. O Target Core valida a autorização na definição executável, materializa ou atualiza `contact_list_members` com `skip_orch_sessions=True` e responde idempotentemente mesmo se o vínculo já estava ativo. A task registra `completed|failed` sem token e reenfileira o executor no mesmo card.
+9. `encontrado` só é emitido depois das ações locais e do vínculo solicitado concluírem. Erro lógico, externo ou SQL reverte o savepoint ou segue por `exception` quando mapeado.
+
+A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint não permitiria que o Target Core enxergasse o `contact_draft` recém-criado. Mesmo um vínculo previamente ativo é atualizado pela task para materializar o novo membro, sem criar uma nova sessão ORCH.
+
 ## FileApp — decisao
 
 A resolucao considera UUID de template no evento e configuracao do flow. Template ausente ou nao resolvido conduz ao caminho `tipo_2`; um valor presente mas invalido nao produz erro obrigatorio.

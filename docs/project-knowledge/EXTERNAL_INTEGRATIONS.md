@@ -68,6 +68,18 @@ Cards podem chamar URL HTTP arbitraria, com headers/query/body renderizados, tim
 
 Validacao so e considerada completa quando o POST externo e observado no destino.
 
+## Identidade.io — consulta de pessoa
+
+O card exclusivo de orquestração `identidade_person` consulta `GET https://api.identidade.io/v1/workspaces/{workspace_id}/person` com Bearer fornecido no card, CPF normalizado em `document`, `format=identidade` e filtros opcionais `require_phone`/`require_email`. A URL-base é fixa: o card não aceita host arbitrário.
+
+HTTP `2xx` com `data=[]` segue por `nao_encontrado`; configuração inválida, conectividade, HTTP não-`2xx`, resposta incompatível ou persistência incompleta seguem por `exception`. O token nunca integra logs, runtime ou variável de saída. Logs usam apenas os quatro últimos dígitos mascarados do CPF. O retorno completo, quando selecionado, contém PII e permanece no runtime da sessão.
+
+A consulta roda fora do event loop com timeout de 10 segundos e no máximo duas tentativas para conectividade/estados transitórios. Uma resposta bem-sucedida é mantida temporariamente no runtime enquanto a persistência não conclui, evitando uma segunda consulta potencialmente cobrada após falha local.
+
+Quando o card solicita vínculo da lista ao próprio flow, o ORCH usa `TARGET_CORE_API_BASE_URL` (fallback `SYNC_WEBHOOK_BASE_URL`) e `TARGET_CORE_API_BEARER_TOKEN`. A chamada acontece em task após o commit local, usa `call_origin=identidade_person`, no máximo três tentativas transitórias e só considera sucesso quando o UUID solicitado aparece em `results.linked`. O Bearer não integra logs ou runtime.
+
+Documentação oficial: `https://docs.identidade.io/api/consulta-pessoa.html` e `https://docs.identidade.io/autenticacao.html`.
+
 ## Webhook de `finish_flow`
 
 Quando `finish_flow.parameters.webhook` contem uma URL, o executor envia um unico `POST` no formato `{"session": {..., "contact": {...}}, "cdr": {...}}`. `session` contem os campos persistidos publicos e o `result`; `contact` aparece uma vez e `cdr` e o payload cru do evento Dialer selecionado em `orch_channel_events`. `runtime_variables` e estado interno e nao integra o body.
