@@ -96,3 +96,44 @@ async def fetch_selected_revision(db_session: AsyncSession, *, flow_id: str) -> 
     row = dict(draft)
     row["definition"] = _normalize_definition(row.get("definition"))
     return row
+
+
+async def fetch_revision_by_id(
+    db_session: AsyncSession,
+    *,
+    flow_id: str,
+    revision_id: str,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id::text AS id,
+                flow_id::text AS flow_id,
+                version,
+                definition,
+                is_draft,
+                published_at,
+                CASE
+                    WHEN published_at IS NOT NULL THEN 'published'
+                    WHEN is_draft = TRUE THEN 'draft'
+                    ELSE 'revision'
+                END::text AS selection_mode
+            FROM flow_v2_revision
+            WHERE id = CAST(:revision_id AS uuid)
+              AND flow_id = CAST(:flow_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_id": flow_id,
+            "revision_id": revision_id,
+        },
+    )
+    revision = result.mappings().first()
+    if revision is None:
+        return None
+
+    row = dict(revision)
+    row["definition"] = _normalize_definition(row.get("definition"))
+    return row

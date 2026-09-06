@@ -11,10 +11,11 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.request_context import get_request_id
 from app.core.workspace import get_current_workspace_schema
-from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
+from app.repositories.flow_v2_repository import fetch_flow_row
 from app.repositories.orch_sessions_repository import (
     WHATSAPP_STATUS_COLUMNS,
     fetch_latest_session_by_flow_entity_address,
+    fetch_recent_session_for_run_flow_event,
     persist_callback_event_for_active_entity,
     persist_run_flow_event_for_active_entity_address,
     persist_run_flow_event_for_recent_entity_address,
@@ -27,6 +28,7 @@ from app.services.session_extractor import extract_session_fields
 from app.services.session_service import SessionPersistResponse, persist_session
 from app.services.workflow_engine import component_kind
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
+from app.services.workflow_revision_service import resolve_workflow_revision_for_session
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.tasks.workflow_tasks import advance_session_task
 
@@ -113,12 +115,29 @@ async def _resolve_single_send_with_dialer_ref(
     db_session: AsyncSession,
     *,
     flow_uuid: str,
+    runtime_variables: dict[str, Any],
 ) -> str | None:
     flow_row = await fetch_flow_row(db_session, flow_uuid=flow_uuid)
     if flow_row is None:
         return None
 
-    selected_revision = await fetch_selected_revision(db_session, flow_id=str(flow_row["id"]))
+    resolution = await resolve_workflow_revision_for_session(
+        db_session,
+        flow_id=str(flow_row["id"]),
+        runtime_variables=runtime_variables,
+    )
+    selected_revision = resolution.revision
+    if selected_revision is None:
+        logger.warning(
+            "dialer callback could not resolve session revision",
+            extra={
+                "event": "orch.trigger.callback_session_revision_unavailable",
+                "flow_uuid": flow_uuid,
+                "requested_revision_id": resolution.requested_revision_id,
+                "failure_reason": resolution.failure_reason,
+                "component_kind": "send_with_dialer",
+            },
+        )
     if selected_revision is None:
         return None
 
@@ -149,12 +168,29 @@ async def _resolve_single_run_flow_ref(
     db_session: AsyncSession,
     *,
     flow_uuid: str,
+    runtime_variables: dict[str, Any],
 ) -> str | None:
     flow_row = await fetch_flow_row(db_session, flow_uuid=flow_uuid)
     if flow_row is None:
         return None
 
-    selected_revision = await fetch_selected_revision(db_session, flow_id=str(flow_row["id"]))
+    resolution = await resolve_workflow_revision_for_session(
+        db_session,
+        flow_id=str(flow_row["id"]),
+        runtime_variables=runtime_variables,
+    )
+    selected_revision = resolution.revision
+    if selected_revision is None:
+        logger.warning(
+            "run_flow callback could not resolve session revision",
+            extra={
+                "event": "orch.trigger.callback_session_revision_unavailable",
+                "flow_uuid": flow_uuid,
+                "requested_revision_id": resolution.requested_revision_id,
+                "failure_reason": resolution.failure_reason,
+                "component_kind": "run_flow",
+            },
+        )
     if selected_revision is None:
         return None
 
@@ -223,6 +259,12 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
             "error",
             "workflow_m2_contact_member_routing_update_failed",
             "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
+        )
+    if stopped_reason in {"pinned_revision_invalid", "pinned_revision_not_found"}:
+        return (
+            "error",
+            f"workflow_m2_{stopped_reason}",
+            "Sessão encerrada porque sua revisão fixada não está disponível para execução.",
         )
     if stopped_reason == "person_scope_channel_component_not_supported":
         return (
@@ -317,12 +359,25 @@ async def process_single_payload(
                 },
             )
             if hangup_persisted is None:
-                resume_card_uuid = await _resolve_single_send_with_dialer_ref(
+                settings = get_settings()
+                recent_session = await fetch_recent_session_for_run_flow_event(
                     db_session,
                     flow_uuid=flow_uuid,
+                    entity_address=extracted.entity_address,
+                    correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
+                    allow_confirmed_finish_flow_webhook=True,
+                )
+                recent_runtime = recent_session.get("runtime_variables") if isinstance(recent_session, dict) else None
+                resume_card_uuid = (
+                    await _resolve_single_send_with_dialer_ref(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        runtime_variables=recent_runtime if isinstance(recent_runtime, dict) else {},
+                    )
+                    if recent_session is not None
+                    else None
                 )
                 if resume_card_uuid is not None:
-                    settings = get_settings()
                     hangup_persisted = await persist_run_flow_event_for_recent_entity_address(
                         db_session,
                         flow_uuid=flow_uuid,
@@ -335,6 +390,7 @@ async def process_single_payload(
                         resume_card_uuid=resume_card_uuid,
                         correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
                         allow_confirmed_finish_flow_webhook=True,
+                        expected_session_id=int(recent_session["id"]),
                         event_data={
                             "uniqueid": payload.get("uniqueid"),
                             "hangup": payload.get("hangup") if isinstance(payload.get("hangup"), dict) else {},
@@ -390,12 +446,24 @@ async def process_single_payload(
                 event_data=tabulacao_event_data,
             )
             if tabulacao_persisted is None:
-                resume_card_uuid = await _resolve_single_run_flow_ref(
+                settings = get_settings()
+                recent_session = await fetch_recent_session_for_run_flow_event(
                     db_session,
                     flow_uuid=flow_uuid,
+                    entity_address=extracted.entity_address,
+                    correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
+                )
+                recent_runtime = recent_session.get("runtime_variables") if isinstance(recent_session, dict) else None
+                resume_card_uuid = (
+                    await _resolve_single_run_flow_ref(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        runtime_variables=recent_runtime if isinstance(recent_runtime, dict) else {},
+                    )
+                    if recent_session is not None
+                    else None
                 )
                 if resume_card_uuid is not None:
-                    settings = get_settings()
                     tabulacao_persisted = await persist_run_flow_event_for_recent_entity_address(
                         db_session,
                         flow_uuid=flow_uuid,
@@ -407,6 +475,7 @@ async def process_single_payload(
                         event_result="tabulacao",
                         resume_card_uuid=resume_card_uuid,
                         correlation_window_hours=settings.workflow_dialer_event_correlation_window_hours,
+                        expected_session_id=int(recent_session["id"]),
                         event_data=tabulacao_event_data,
                     )
             if tabulacao_persisted is None:

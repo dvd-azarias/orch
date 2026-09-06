@@ -50,9 +50,10 @@ Excecoes: WhatsApp e Dialer possuem caminhos de correlacao por endereco/session 
 ```text
 flow_v2 + flow_v2_revision
   -> maior publicada ou maior draft
-  -> bootstrap runtime/cursor
+  -> bootstrap fixa revision_id no runtime/cursor
   -> task advance_session
   -> advisory lock da sessao
+  -> carrega exatamente a revisao fixada da sessao
   -> loop de cards
      -> persiste cursor/runtime
      -> finish | wait | block | error | max steps
@@ -67,7 +68,15 @@ Paradas relevantes:
 - componente desconhecido: caminho Celery pode classificar como fatal e finalizar.
 - `session_execution_locked`: outra execucao detem o lock.
 
-Risco: M2 relê a revisao corrente em vez de garantir uso da `revision_id` do bootstrap.
+O M2, eventos de canal que dependem do grafo e callbacks tardios resolvem a definicao pela
+`runtime_variables.workflow_v2.revision_id` da sessao e validam que a revisao pertence ao mesmo flow.
+Sessao antiga sem esse campo seleciona a revisao corrente uma vez e grava o pin atomicamente antes de
+executar. Pin invalido ou inexistente terminaliza a sessao de forma diagnosticavel; nao ha fallback
+silencioso para a revisao corrente.
+
+A garantia forte vale para revisoes publicadas. O fallback historico para draft foi preservado no Alpha;
+como o Target Core edita o draft existente, uma sessao fixada em draft ainda pode observar alteracoes sob
+o mesmo `revision_id`.
 
 ## Card `identidade_person`
 

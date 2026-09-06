@@ -6,6 +6,7 @@ import pytest
 
 import app.services.orch_trigger_service as orch_trigger_service
 from app.schemas.orch import SessionExtraction
+from app.services.workflow_revision_service import WorkflowRevisionResolution
 
 
 class _DummyTx:
@@ -276,11 +277,15 @@ async def test_process_single_payload_dialer_hangup_ignores_when_session_not_fou
     async def _fake_fetch_flow_row(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
+    async def _fake_fetch_recent(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
     monkeypatch.setattr(
         orch_trigger_service,
         "persist_run_flow_event_for_active_entity_address",
         _fake_persist_hangup,
     )
+    monkeypatch.setattr(orch_trigger_service, "fetch_recent_session_for_run_flow_event", _fake_fetch_recent)
     monkeypatch.setattr(orch_trigger_service, "fetch_flow_row", _fake_fetch_flow_row)
     monkeypatch.setattr(orch_trigger_service, "persist_discarded_event", _fake_discard)
 
@@ -323,6 +328,7 @@ async def test_process_single_payload_dialer_hangup_resumes_recent_session_by_se
     async def _fake_recent_persist(*args, **kwargs):  # type: ignore[no-untyped-def]
         captured["resume_card_uuid"] = str(kwargs.get("resume_card_uuid"))
         captured["window_hours"] = int(kwargs.get("correlation_window_hours"))
+        captured["expected_session_id"] = int(kwargs.get("expected_session_id"))
         return SimpleNamespace(
             id=6646,
             uuid="49cc976b-8468-4d48-b85e-d2f6fbb61e47",
@@ -339,14 +345,27 @@ async def test_process_single_payload_dialer_hangup_resumes_recent_session_by_se
     async def _fake_fetch_flow_row(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {"id": "16ce4b08-b756-425a-a56d-a5c861580714"}
 
-    async def _fake_fetch_selected_revision(*args, **kwargs):  # type: ignore[no-untyped-def]
+    async def _fake_fetch_recent(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {
-            "definition": {
-                "components": [
-                    {"ref_id": "send-dialer-card-1", "component": "send_with_dialer"},
-                ]
-            }
+            "id": 6646,
+            "runtime_variables": {
+                "workflow_v2": {"revision_id": "3cc52a68-47f8-4142-9104-69388c0f274f"}
+            },
         }
+
+    async def _fake_resolve_revision(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {"ref_id": "send-dialer-card-1", "component": "send_with_dialer"},
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="3cc52a68-47f8-4142-9104-69388c0f274f",
+            failure_reason=None,
+        )
 
     monkeypatch.setattr(
         orch_trigger_service,
@@ -358,8 +377,9 @@ async def test_process_single_payload_dialer_hangup_resumes_recent_session_by_se
         "persist_run_flow_event_for_recent_entity_address",
         _fake_recent_persist,
     )
+    monkeypatch.setattr(orch_trigger_service, "fetch_recent_session_for_run_flow_event", _fake_fetch_recent)
     monkeypatch.setattr(orch_trigger_service, "fetch_flow_row", _fake_fetch_flow_row)
-    monkeypatch.setattr(orch_trigger_service, "fetch_selected_revision", _fake_fetch_selected_revision)
+    monkeypatch.setattr(orch_trigger_service, "resolve_workflow_revision_for_session", _fake_resolve_revision)
     monkeypatch.setattr(
         orch_trigger_service,
         "get_settings",
@@ -400,6 +420,7 @@ async def test_process_single_payload_dialer_hangup_resumes_recent_session_by_se
     assert response.session_id == 6646
     assert captured["resume_card_uuid"] == "send-dialer-card-1"
     assert captured["window_hours"] == 36
+    assert captured["expected_session_id"] == 6646
 
 
 @pytest.mark.asyncio
@@ -429,15 +450,28 @@ async def test_process_single_payload_dialer_hangup_ignores_when_send_card_is_no
     async def _fake_fetch_flow_row(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {"id": "16ce4b08-b756-425a-a56d-a5c861580714"}
 
-    async def _fake_fetch_selected_revision(*args, **kwargs):  # type: ignore[no-untyped-def]
+    async def _fake_fetch_recent(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {
-            "definition": {
-                "components": [
-                    {"ref_id": "send-dialer-card-1", "component": "send_with_dialer"},
-                    {"ref_id": "send-dialer-card-2", "component": "send_with_dialer"},
-                ]
-            }
+            "id": 6647,
+            "runtime_variables": {
+                "workflow_v2": {"revision_id": "3cc52a68-47f8-4142-9104-69388c0f274f"}
+            },
         }
+
+    async def _fake_resolve_revision(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {"ref_id": "send-dialer-card-1", "component": "send_with_dialer"},
+                        {"ref_id": "send-dialer-card-2", "component": "send_with_dialer"},
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="3cc52a68-47f8-4142-9104-69388c0f274f",
+            failure_reason=None,
+        )
 
     monkeypatch.setattr(
         orch_trigger_service,
@@ -449,8 +483,9 @@ async def test_process_single_payload_dialer_hangup_ignores_when_send_card_is_no
         "persist_run_flow_event_for_recent_entity_address",
         _fake_recent_persist,
     )
+    monkeypatch.setattr(orch_trigger_service, "fetch_recent_session_for_run_flow_event", _fake_fetch_recent)
     monkeypatch.setattr(orch_trigger_service, "fetch_flow_row", _fake_fetch_flow_row)
-    monkeypatch.setattr(orch_trigger_service, "fetch_selected_revision", _fake_fetch_selected_revision)
+    monkeypatch.setattr(orch_trigger_service, "resolve_workflow_revision_for_session", _fake_resolve_revision)
     monkeypatch.setattr(orch_trigger_service, "persist_discarded_event", _fake_discard)
 
     response = await orch_trigger_service.process_single_payload(
@@ -571,6 +606,7 @@ async def test_process_single_payload_tabulacao_resumes_recent_session_by_run_fl
     async def _fake_recent_persist(*args, **kwargs):  # type: ignore[no-untyped-def]
         captured["resume_card_uuid"] = str(kwargs.get("resume_card_uuid"))
         captured["window_hours"] = int(kwargs.get("correlation_window_hours"))
+        captured["expected_session_id"] = int(kwargs.get("expected_session_id"))
         assert kwargs.get("event_name") == "tabulacao"
         assert kwargs.get("event_result") == "tabulacao"
         event_data = kwargs.get("event_data")
@@ -594,14 +630,27 @@ async def test_process_single_payload_tabulacao_resumes_recent_session_by_run_fl
     async def _fake_fetch_flow_row(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {"id": "16ce4b08-b756-425a-a56d-a5c861580714"}
 
-    async def _fake_fetch_selected_revision(*args, **kwargs):  # type: ignore[no-untyped-def]
+    async def _fake_fetch_recent(*args, **kwargs):  # type: ignore[no-untyped-def]
         return {
-            "definition": {
-                "components": [
-                    {"ref_id": "run-flow-1", "component": "run_flow"},
-                ]
-            }
+            "id": 6651,
+            "runtime_variables": {
+                "workflow_v2": {"revision_id": "3cc52a68-47f8-4142-9104-69388c0f274f"}
+            },
         }
+
+    async def _fake_resolve_revision(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {"ref_id": "run-flow-1", "component": "run_flow"},
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="3cc52a68-47f8-4142-9104-69388c0f274f",
+            failure_reason=None,
+        )
 
     monkeypatch.setattr(
         orch_trigger_service,
@@ -613,8 +662,9 @@ async def test_process_single_payload_tabulacao_resumes_recent_session_by_run_fl
         "persist_run_flow_event_for_recent_entity_address",
         _fake_recent_persist,
     )
+    monkeypatch.setattr(orch_trigger_service, "fetch_recent_session_for_run_flow_event", _fake_fetch_recent)
     monkeypatch.setattr(orch_trigger_service, "fetch_flow_row", _fake_fetch_flow_row)
-    monkeypatch.setattr(orch_trigger_service, "fetch_selected_revision", _fake_fetch_selected_revision)
+    monkeypatch.setattr(orch_trigger_service, "resolve_workflow_revision_for_session", _fake_resolve_revision)
     monkeypatch.setattr(
         orch_trigger_service,
         "get_settings",
@@ -659,6 +709,7 @@ async def test_process_single_payload_tabulacao_resumes_recent_session_by_run_fl
     assert response.session_id == 6651
     assert captured["resume_card_uuid"] == "run-flow-1"
     assert captured["window_hours"] == 24
+    assert captured["expected_session_id"] == 6651
 
 
 @pytest.mark.asyncio
@@ -682,6 +733,9 @@ async def test_process_single_payload_tabulacao_ignores_when_session_not_found(m
     async def _fake_fetch_flow_row(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
+    async def _fake_fetch_recent(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
     async def _fake_discard(*args, **kwargs):  # type: ignore[no-untyped-def]
         captured["reason"] = str(kwargs.get("discard_reason"))
 
@@ -690,6 +744,7 @@ async def test_process_single_payload_tabulacao_ignores_when_session_not_found(m
         "persist_run_flow_event_for_active_entity_address",
         _fake_active_persist,
     )
+    monkeypatch.setattr(orch_trigger_service, "fetch_recent_session_for_run_flow_event", _fake_fetch_recent)
     monkeypatch.setattr(orch_trigger_service, "fetch_flow_row", _fake_fetch_flow_row)
     monkeypatch.setattr(orch_trigger_service, "persist_discarded_event", _fake_discard)
 

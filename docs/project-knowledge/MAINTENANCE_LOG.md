@@ -639,3 +639,38 @@ O ORCH persistia apenas ANI/`linked_actuator`. O Supplier carregava a definiçã
 - `tests/test_workflow_m2_whatsapp_interactive.py` fora da sandbox: 4 passaram contra PostgreSQL configurado, incluindo branch `exception` para falha HSM.
 - `py_compile` e `git diff --check` passaram.
 - Migration Target, stack completa, Supplier real e envio externo permanecem pendentes; nenhum deploy foi executado.
+
+## 2026-09-06 — Fixacao da revisao executavel por sessao
+
+### REQUEST
+
+Antes de iniciar a sequencia de novos cards do roadmap comum, impedir que uma sessao em andamento troque de grafo quando uma nova revisao do flow for publicada.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_OPTIONAL` — mudanca pequena e isolada que remove um risco conhecido de cursores inconsistentes sem criar schema, fila ou contrato externo.
+
+### ROOT CAUSE
+
+- O bootstrap ja persistia `revision_id`, `revision_version` e `revision_mode` em `runtime_variables.workflow_v2`.
+- O executor M2 ignorava esses campos e chamava novamente o seletor da maior revisao publicada/draft.
+- Eventos Dialer ligados ao `finish_flow` e callbacks tardios de `send_with_dialer`/`run_flow` tambem consultavam o grafo corrente.
+
+### CHANGE
+
+- A leitura por `revision_id` exige que a revisao pertença ao mesmo flow.
+- M2, eventos dependentes do grafo e callbacks tardios usam a revisao da sessao.
+- Sessao legada sem pin recebe a revisao selecionada por atualizacao JSONB atomica e preserva os demais campos do runtime.
+- Pin declarado invalido ou inexistente terminaliza com alarme e metrica; nunca executa a revisao corrente como fallback.
+- A correlacao tardia fixa o `session_id` esperado entre a leitura do runtime e o update, evitando aplicar o card de uma sessao em outra durante corrida.
+- Revisoes publicadas recebem a garantia forte. Draft mutavel continua como limite conhecido do Alpha.
+
+### VALIDATION
+
+- Regressao direcionada de workflow, bootstrap, metricas, dispatcher, eventos de canal, callbacks e repositorios: `177 passed`.
+- Dois testes de repositorio executados fora da sandbox contra PostgreSQL configurado confirmaram pin JSONB atomico, preservacao de runtime e isolamento da revisao por flow.
+- Casos explicitos cobrem N preservada apos N+1, sessao nova em N+1, pin invalido/inexistente fail-closed e compatibilidade legada.
+- Comparacao completa: `origin/main` teve `459 passed, 26 failed`; o branch teve `467 passed, 26 failed`, com as mesmas falhas legadas de assinatura e oito testes novos aprovados.
+- Stack local completa reiniciada em terminal dedicado. Smokes reais nos flows `2cb9482a-131e-4b2a-8507-484745661836` e `fea492fb-9420-4690-ba09-bd73dca50717` retornaram `202`, terminaram as sessoes `7283`/`7284` e gravaram nas metricas a mesma revisao fixada no runtime (v26/v16, respectivamente).
+- `compileall` e `git diff --check` passaram antes da consolidacao documental.
+- Canario controlado publicando N+1 durante uma pausa, rollout e deploy ainda pendentes; nenhum deploy foi executado.

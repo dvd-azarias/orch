@@ -40,6 +40,8 @@ TERMINAL_FAILURE_STOP_REASONS = {
     "condition_branch_not_mapped",
     "contact_member_scope_not_found",
     "contact_member_routing_update_failed",
+    "pinned_revision_invalid",
+    "pinned_revision_not_found",
 }
 FATAL_NON_RESUMABLE_STOP_REASONS = {
     "flow_not_found",

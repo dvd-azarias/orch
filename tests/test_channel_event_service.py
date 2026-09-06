@@ -4,6 +4,7 @@ import pytest
 
 import app.services.channel_event_service as channel_event_service
 from app.services.channel_event_service import extract_channel_events, persist_channel_events
+from app.services.workflow_revision_service import WorkflowRevisionResolution
 
 
 def test_extract_channel_events_returns_whatsapp_status_items() -> None:
@@ -180,22 +181,36 @@ async def test_persist_dialer_event_sets_single_session_cdr_after_ledger_insert(
         return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
 
     async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {
+                            "component_id": "finish_flow",
+                            "parameters": {"webhook": "https://example.test/hook"},
+                        }
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="44444444-4444-4444-4444-444444444444",
+            failure_reason=None,
+        )
+
+    async def _fetch_session(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {
-            "definition": {
-                "components": [
-                    {
-                        "component_id": "finish_flow",
-                        "parameters": {"webhook": "https://example.test/hook"},
-                    }
-                ]
-            }
+            "flow_uuid": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+            "runtime_variables": {
+                "workflow_v2": {"revision_id": "44444444-4444-4444-4444-444444444444"}
+            },
         }
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
     monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_absent)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
-    monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(channel_event_service, "fetch_session_workflow_state", _fetch_session)
+    monkeypatch.setattr(channel_event_service, "resolve_workflow_revision_for_session", _fetch_revision)
 
     persisted = await persist_channel_events(
         _Session(),
@@ -233,19 +248,33 @@ async def test_persist_dialer_event_does_not_set_cdr_without_finish_webhook(monk
         return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
 
     async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {"component_id": "finish_flow", "parameters": {"webhook": None}}
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="44444444-4444-4444-4444-444444444444",
+            failure_reason=None,
+        )
+
+    async def _fetch_session(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {
-            "definition": {
-                "components": [
-                    {"component_id": "finish_flow", "parameters": {"webhook": None}}
-                ]
-            }
+            "flow_uuid": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+            "runtime_variables": {
+                "workflow_v2": {"revision_id": "44444444-4444-4444-4444-444444444444"}
+            },
         }
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
     monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_absent)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
-    monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(channel_event_service, "fetch_session_workflow_state", _fetch_session)
+    monkeypatch.setattr(channel_event_service, "resolve_workflow_revision_for_session", _fetch_revision)
 
     persisted = await persist_channel_events(
         _Session(),
@@ -283,22 +312,36 @@ async def test_persist_late_dialer_event_keeps_new_cdr_eligible_for_webhook(monk
         return {"id": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17"}
 
     async def _fetch_revision(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {
+                            "component_id": "finish_flow",
+                            "parameters": {"webhook": "https://example.test/hook"},
+                        }
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="44444444-4444-4444-4444-444444444444",
+            failure_reason=None,
+        )
+
+    async def _fetch_session(*_args, **_kwargs) -> dict:  # type: ignore[no-untyped-def]
         return {
-            "definition": {
-                "components": [
-                    {
-                        "component_id": "finish_flow",
-                        "parameters": {"webhook": "https://example.test/hook"},
-                    }
-                ]
-            }
+            "flow_uuid": "3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+            "runtime_variables": {
+                "workflow_v2": {"revision_id": "44444444-4444-4444-4444-444444444444"}
+            },
         }
 
     monkeypatch.setattr(channel_event_service, "insert_channel_event", _insert)
     monkeypatch.setattr(channel_event_service, "has_channel_event_identity", _event_identity_absent)
     monkeypatch.setattr(channel_event_service, "set_session_cdr", _set_cdr)
     monkeypatch.setattr(channel_event_service, "fetch_flow_row", _fetch_flow)
-    monkeypatch.setattr(channel_event_service, "fetch_selected_revision", _fetch_revision)
+    monkeypatch.setattr(channel_event_service, "fetch_session_workflow_state", _fetch_session)
+    monkeypatch.setattr(channel_event_service, "resolve_workflow_revision_for_session", _fetch_revision)
 
     persisted = await persist_channel_events(
         _Session(),

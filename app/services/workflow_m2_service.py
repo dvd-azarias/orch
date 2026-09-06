@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
-from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
+from app.repositories.flow_v2_repository import fetch_flow_row
 from app.repositories.identidade_person_repository import (
     ensure_person_in_source_list,
     fetch_active_flow_mailing_link,
@@ -48,6 +48,7 @@ from app.repositories.orch_channel_events_repository import (
 from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
+    ensure_session_workflow_revision_pin,
     ensure_contact_list_member_for_create_contact,
     ensure_default_source_list_for_create_contact,
     ensure_session_for_created_contact,
@@ -91,6 +92,7 @@ from app.services.workflow_engine import (
     resolve_next_card_uuid,
     resolve_next_card_uuid_by_branch,
 )
+from app.services.workflow_revision_service import resolve_workflow_revision_for_session
 
 _TEMPLATE_PATTERN = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 logger = get_logger(__name__)
@@ -5308,15 +5310,6 @@ async def execute_workflow_m2_for_session(
         if flow_row is None:
             return await _finalize(WorkflowExecutionResult(True, 0, "flow_not_found", None, None))
 
-        selected_revision = await fetch_selected_revision(db_session, flow_id=str(flow_row["id"]))
-        if selected_revision is None:
-            return await _finalize(WorkflowExecutionResult(True, 0, "revision_not_found", None, None))
-        revision_id_for_metrics = str(selected_revision["id"])
-
-        definition = selected_revision.get("definition")
-        if not isinstance(definition, dict):
-            raise WorkflowExecutionError("invalid_definition", "Definição do fluxo inválida para execução M2.")
-
         session_state = await fetch_session_workflow_state(db_session, session_id=session_id)
         if session_state is None:
             return await _finalize(WorkflowExecutionResult(True, 0, "session_not_found", None, None))
@@ -5335,6 +5328,114 @@ async def execute_workflow_m2_for_session(
                     None,
                 )
             )
+
+        async def _terminalize_revision_failure(
+            *,
+            failure_reason: str,
+            requested_revision_id: str | None,
+        ) -> WorkflowExecutionResult:
+            failed_at = datetime.now(timezone.utc)
+            workflow_meta = _ensure_workflow_meta(runtime_variables)
+            workflow_meta["terminal_failure"] = {
+                "code": failure_reason,
+                "message": "A revisão fixada da sessão não está disponível para execução.",
+                "requested_revision_id": requested_revision_id,
+                "failed_at": failed_at.isoformat(),
+            }
+            last_card_uuid = session_state.get("last_card_uuid")
+            _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=None)
+            await replace_session_workflow_state(
+                db_session,
+                session_id=session_id,
+                runtime_variables=runtime_variables,
+                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                next_card_uuid=None,
+                ended_at=failed_at,
+                state=3,
+            )
+            logger.error(
+                "workflow m2 pinned revision unavailable",
+                extra={
+                    "event": "orch.workflow.m2.pinned_revision_unavailable",
+                    "flow_uuid": flow_uuid,
+                    "session_id": session_id,
+                    "session_uuid": session_uuid_for_metrics,
+                    "requested_revision_id": requested_revision_id,
+                    "failure_reason": failure_reason,
+                },
+            )
+            return await _finalize(
+                WorkflowExecutionResult(
+                    True,
+                    0,
+                    failure_reason,
+                    last_card_uuid,
+                    None,
+                )
+            )
+
+        revision_resolution = await resolve_workflow_revision_for_session(
+            db_session,
+            flow_id=str(flow_row["id"]),
+            runtime_variables=runtime_variables,
+        )
+        if revision_resolution.failure_reason in {
+            "pinned_revision_invalid",
+            "pinned_revision_not_found",
+        }:
+            return await _terminalize_revision_failure(
+                failure_reason=revision_resolution.failure_reason,
+                requested_revision_id=revision_resolution.requested_revision_id,
+            )
+
+        selected_revision = revision_resolution.revision
+        if selected_revision is None:
+            return await _finalize(WorkflowExecutionResult(True, 0, "revision_not_found", None, None))
+
+        if revision_resolution.used_legacy_fallback:
+            revision_patch: dict[str, Any] = {
+                "revision_id": str(selected_revision["id"]),
+                "revision_mode": str(selected_revision.get("selection_mode") or "selected"),
+                "definition_loaded_at": datetime.now(timezone.utc).isoformat(),
+                "legacy_revision_pinned_at": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                revision_patch["revision_version"] = int(selected_revision["version"])
+            except (KeyError, TypeError, ValueError):
+                pass
+
+            pinned_runtime = await ensure_session_workflow_revision_pin(
+                db_session,
+                session_id=session_id,
+                flow_uuid=flow_uuid,
+                revision_patch=revision_patch,
+            )
+            if pinned_runtime is None:
+                return await _finalize(WorkflowExecutionResult(True, 0, "session_not_found", None, None))
+
+            runtime_variables = pinned_runtime
+            session_state["runtime_variables"] = runtime_variables
+            revision_resolution = await resolve_workflow_revision_for_session(
+                db_session,
+                flow_id=str(flow_row["id"]),
+                runtime_variables=runtime_variables,
+            )
+            if revision_resolution.failure_reason in {
+                "pinned_revision_invalid",
+                "pinned_revision_not_found",
+            }:
+                return await _terminalize_revision_failure(
+                    failure_reason=revision_resolution.failure_reason,
+                    requested_revision_id=revision_resolution.requested_revision_id,
+                )
+            selected_revision = revision_resolution.revision
+            if selected_revision is None:
+                return await _finalize(WorkflowExecutionResult(True, 0, "revision_not_found", None, None))
+
+        revision_id_for_metrics = str(selected_revision["id"])
+        definition = selected_revision.get("definition")
+        if not isinstance(definition, dict):
+            raise WorkflowExecutionError("invalid_definition", "Definição do fluxo inválida para execução M2.")
 
         session_scope = _read_session_scope(runtime_variables)
         contextual_member_routing_enabled = _contextual_member_routing_enabled_for_scope(

@@ -1079,6 +1079,7 @@ async def persist_run_flow_event_for_recent_entity_address(
     resume_card_uuid: str,
     correlation_window_hours: int,
     allow_confirmed_finish_flow_webhook: bool = False,
+    expected_session_id: int | None = None,
     event_data: dict[str, Any] | None = None,
 ) -> PersistResult | None:
     lock_key = f"run_flow_event_recent|{flow_uuid}|{entity_address}|{event_name}|{event_result}"
@@ -1138,6 +1139,7 @@ async def persist_run_flow_event_for_recent_entity_address(
                     AND entity_address = :entity_address
                     AND unassigned_at IS NULL
                     AND created_at >= NOW() - make_interval(hours => CAST(:window_hours AS int))
+                    AND (:expected_session_id IS NULL OR id = :expected_session_id)
                     AND (
                         :allow_confirmed_finish_flow_webhook
                         OR COALESCE(
@@ -1159,6 +1161,7 @@ async def persist_run_flow_event_for_recent_entity_address(
             "resume_card_uuid": resume_card_uuid,
             "window_hours": safe_window_hours,
             "allow_confirmed_finish_flow_webhook": allow_confirmed_finish_flow_webhook,
+            "expected_session_id": expected_session_id,
             "state_finished": SESSION_STATE_FINISHED,
         },
     )
@@ -1171,6 +1174,56 @@ async def persist_run_flow_event_for_recent_entity_address(
         state=int(row["state"]),
         created=False,
     )
+
+
+async def fetch_recent_session_for_run_flow_event(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    entity_address: str,
+    correlation_window_hours: int,
+    allow_confirmed_finish_flow_webhook: bool = False,
+) -> dict[str, Any] | None:
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                uuid::text AS uuid,
+                flow_uuid::text AS flow_uuid,
+                state,
+                runtime_variables,
+                last_card_uuid::text AS last_card_uuid,
+                next_card_uuid::text AS next_card_uuid,
+                created_at
+            FROM orch_sessions
+            WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+              AND entity_type = 'person'
+              AND entity_address = :entity_address
+              AND unassigned_at IS NULL
+              AND created_at >= NOW() - make_interval(hours => CAST(:window_hours AS int))
+              AND (
+                    :allow_confirmed_finish_flow_webhook
+                    OR COALESCE(
+                        runtime_variables->'finish_flow_webhook'->>'success',
+                        'false'
+                    ) <> 'true'
+              )
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity_address": entity_address,
+            "window_hours": max(1, int(correlation_window_hours)),
+            "allow_confirmed_finish_flow_webhook": allow_confirmed_finish_flow_webhook,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
 
 
 async def fetch_session_by_uuid(
@@ -1317,6 +1370,57 @@ async def fetch_session_workflow_state(
     )
     row = result.mappings().first()
     return dict(row) if row is not None else None
+
+
+async def ensure_session_workflow_revision_pin(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    flow_uuid: str,
+    revision_patch: dict[str, Any],
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = CASE
+                    WHEN COALESCE(runtime_variables, '{}'::jsonb)->'workflow_v2' ? 'revision_id'
+                    THEN COALESCE(runtime_variables, '{}'::jsonb)
+                    ELSE jsonb_set(
+                        COALESCE(runtime_variables, '{}'::jsonb),
+                        '{workflow_v2}',
+                        (
+                            CASE
+                                WHEN jsonb_typeof(COALESCE(runtime_variables, '{}'::jsonb)->'workflow_v2') = 'object'
+                                THEN COALESCE(runtime_variables, '{}'::jsonb)->'workflow_v2'
+                                ELSE '{}'::jsonb
+                            END
+                        ) || CAST(:revision_patch AS jsonb),
+                        true
+                    )
+                END,
+                updated_at = CASE
+                    WHEN COALESCE(runtime_variables, '{}'::jsonb)->'workflow_v2' ? 'revision_id'
+                    THEN updated_at
+                    ELSE NOW()
+                END
+            WHERE id = :session_id
+              AND flow_uuid = CAST(:flow_uuid AS uuid)
+            RETURNING runtime_variables
+            """
+        ),
+        {
+            "session_id": session_id,
+            "flow_uuid": flow_uuid,
+            "revision_patch": json.dumps(revision_patch, ensure_ascii=False),
+        },
+    )
+    row = result.mappings().first()
+    if row is None:
+        return None
+    runtime_variables = row.get("runtime_variables")
+    return runtime_variables if isinstance(runtime_variables, dict) else {}
 
 
 async def apply_switch_bot_flow_callback(
