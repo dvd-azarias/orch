@@ -92,6 +92,16 @@ o mesmo `revision_id`.
 
 A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint não permitiria que o Target Core enxergasse o `contact_draft` recém-criado. Mesmo um vínculo previamente ativo é atualizado pela task para materializar o novo membro, sem criar uma nova sessão ORCH.
 
+## Card `create_contact`
+
+1. Exige ação explícita (`update_current`, `create_if_missing` ou `upsert`), política (`fill_missing` ou `overwrite_non_null`) e mapping com ao menos um valor resolvido.
+2. `update_current` resolve a pessoa exclusivamente pelo `person_uuid` do membro contextual já validado para a sessão. O parâmetro `identifier` não participa dessa ação.
+3. `create_if_missing` e `upsert` localizam a pessoa pelo `identifier` renderizado. A criação usa `ON CONFLICT DO NOTHING` e relê a pessoa sob lock para suportar concorrência.
+4. O mapping aceita somente campos cadastrais de `persons` e caminhos `extra.<campo>`. Valores nulos ou vazios nunca apagam dados; `fill_missing` preserva preenchidos e `overwrite_non_null` substitui somente com valores presentes.
+5. Toda escrita ocorre em savepoint e afeta somente `persons`. O card não altera identificador, canais, listas, membros, cursores de outras sessões ou billing.
+6. A saída mínima (`action`, `person_uuid`, `identifier`, `changed_fields`) é gravada em `variables.customs[output_var]` e no diagnóstico `create_contact_last_result`.
+7. O fluxo segue por `created`, `updated`, `unchanged` ou `not_found`; falhas controladas seguem pela branch `exception` quando conectada.
+
 ## FileApp — decisao
 
 A resolucao considera UUID de template no evento e configuracao do flow. Template ausente ou nao resolvido conduz ao caminho `tipo_2`; um valor presente mas invalido nao produz erro obrigatorio.

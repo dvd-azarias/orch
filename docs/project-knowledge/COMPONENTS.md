@@ -18,7 +18,8 @@
 
 - `app/api/v1/orch.py`: contratos HTTP, rota canonica/legada, sessoes manuais, resubmit, aliases, limites e migrations.
 - `app/services/orch_trigger_service.py`: fluxo comum, callbacks, descartes, ledger e bootstrap.
-- `app/repositories/orch_sessions_repository.py`: maior fronteira SQL; upsert, consultas, cursores, routing e create_contact.
+- `app/repositories/orch_sessions_repository.py`: maior fronteira SQL; upsert, consultas, cursores e routing.
+- `app/repositories/create_contact_repository.py`: persistência restrita do card `create_contact` em `persons`, sem canais, listas, membros ou sessões filhas.
 - `app/services/workflow_runtime_service.py`: bootstrap M1.
 - `app/services/workflow_m2_service.py`: motor e componentes.
 - `app/services/identidade_person_service.py`: cliente fixo da Identidade.io, validação, normalização e merge de pessoa.
