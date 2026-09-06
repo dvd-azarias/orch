@@ -25,9 +25,17 @@ Implementar no ORCH o componente aditivo publicado no catálogo do Target Core. 
 - Após as duas execuções, havia exatamente duas sessões do flow, um vínculo em `source_list_contact_drafts`, zero `contact_list_members` para pessoa/lista e zero `flow_mailing_links` ativos. Os dois marcadores `api_call` foram confirmados pelo destino com HTTP 200/`received` em uma tentativa.
 - No encerramento, `dev_phase_stack.sh stop` reproduziu o risco já documentado de filhos órfãos. Os PIDs foram associados ao worktree/filas `f5_local`, encerrados explicitamente e a auditoria final confirmou porta `7777` livre e nenhum processo das filas locais.
 
+### POST-DEPLOY
+
+- O merge `c0b1c35` da PR ORCH `#147` foi implantado nos hosts `10.1.20.136` e `10.1.20.237`. Os `.env` locais foram copiados para backups temporários com modo `0600`, comparados byte a byte após o fast-forward e preservaram seus checksums; os backups foram removidos ao final.
+- No `10.1.20.136`, somente `orch-api.service` foi reiniciada, preservando a topologia sem workers. No `10.1.20.237`, `orch-api.service` e `orch-celery-worker_01..05.service` foram reiniciados em rolling restart; FileApp, generate-file e billing não foram interrompidos.
+- Os quatro health checks retornaram HTTP 200 nos dois hosts aplicáveis, os cinco workers de workflow responderam `pong` e nenhuma unit ORCH ficou em estado `failed`.
+- O canário pós-deploy `7351`, na revisão publicada v2 `265f8a89-fe8c-44fe-a999-8e673e92fdaf`, terminou em `state=3` pelo ramo `already_linked`, reutilizou o draft de 8 canais, não alterou os contadores `2/2` e não gerou alarme.
+- A auditoria confirmou um único vínculo em `source_list_contact_drafts`, zero `contact_list_members`, zero `flow_mailing_links`, três sessões totais do flow e nenhuma ativa. O marcador `api_call` foi observado no destino com HTTP 200/`received` em uma tentativa; a auditoria tardia permaneceu idêntica, sem fan-out.
+
 ### RISK / ROLLBACK
 
-O principal risco seria confundir associação à source list com materialização no flow. O card é deliberadamente aditivo e local; remoção e materialização permanecem fora do contrato. Para rollback, interromper novos usos e reverter o código; não apagar automaticamente drafts funcionais já criados.
+O principal risco seria confundir associação à source list com materialização no flow. O card é deliberadamente aditivo e local; remoção e materialização permanecem fora do contrato. Para rollback, interromper novos usos, reverter a PR `#147`/commit funcional `c5128f5` e reiniciar API/workers de workflow; não apagar automaticamente drafts funcionais já criados.
 
 ## 2026-09-06 — Serialização de `contact_birth_date` no runtime
 
