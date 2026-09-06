@@ -24,6 +24,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 12. O branch `fix/pin-session-flow-revision` faz a sessao executar a `revision_id` gravada no bootstrap, inclusive em retomadas dependentes do grafo. A stack local e dois smokes reais confirmaram runtime/metricas com o mesmo pin; rollout e canario N -> N+1 permanecem pendentes. Draft continua mutavel e nao recebe a mesma garantia forte de uma revisao publicada.
 13. Valores PostgreSQL `DATE` lidos para o runtime precisam ser convertidos para ISO antes de persistir `runtime_variables`. Em 2026-09-06, `contact_birth_date` cru causou 661 retries da sessao `7324`; a correcao minima em `_inject_contact_runtime_scope` foi implantada nos hosts `10.1.20.136` e `10.1.20.237`. O canario pos-deploy `7341` terminou em `state=3`, sem alarmes, com data ISO, escrita controlada e POST externo confirmado; os dados temporarios foram restaurados.
 14. `source_list_membership` e estritamente aditivo: cria ou reutiliza o draft da pessoa na `source_list`, mas nao associa mailing ao flow, nao materializa `contact_list_members` e nao cria sessoes. Retirada e materializacao pertencem a contratos separados; nao ampliar o card silenciosamente. A engine da PR ORCH `#147` foi implantada nos hosts `10.1.20.136` e `10.1.20.237`; o canario pos-deploy `7351` confirmou `already_linked`, idempotencia, zero alarmes e ausencia de fan-out.
+15. `wait_for_event` reutiliza exclusivamente o callback generico existente. A engine mantém a sessão em `state=0` com `frozen_until`, usa baseline de `callbacks_pending` contra evento antigo e serializa callback/executor pelo lock da sessão. O canário em flow publicado e o rollout ainda estão pendentes; não confundir a prova PostgreSQL e os smokes de regressão com E2E do card.
 
 ## O que e o ORCH
 
@@ -61,6 +62,7 @@ Entrypoints:
 - `switch_bot_flow`: bloqueia a sessao ORCH no card, resolve/cacheia o `runner_token` do flow alvo e repassa somente payloads Meta com mensagem de usuario ao Runner v5; callback terminal libera `success` ou `exception_*`.
 - `identidade_person`: consulta CPF na Identidade.io e, conforme política explícita, somente retorna, cria ou enriquece `persons`; associação opcional a `source_lists` é transacional e o vínculo ao flow é retomado pós-commit pelo contrato seguro do Target Core.
 - `source_list_membership`: resolve uma pessoa por UUID e uma lista por UUID público, cria ou reutiliza o draft transacionalmente e segue por `linked`, `already_linked`, `not_found` ou `exception`, sem chamada externa ou fan-out.
+- `wait_for_event`: arma uma espera finita pelo callback genérico, retoma por `received` ou `timeout` e preserva eventos anteriores ou não correspondentes.
 - Generate file: card grava job/buffer -> beat scan -> worker produz arquivo SFTP -> auditoria e runtime.
 
 Detalhes: `docs/project-knowledge/DATA_FLOW.md`.
