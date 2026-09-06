@@ -21,7 +21,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 9. Em 2026-09-06, o `origin/main` coletou 485 testes: 459 passaram e 26 falharam; as falhas correspondem a casos legados que ainda chamam `trigger_orch(flow_uuid=...)` e nao fazem parte da fixacao de revisao. O branch `fix/pin-session-flow-revision` coletou 493: 467 passaram e as mesmas 26 falharam. Nao trate a suite completa como verde, mas tambem nao atribua essa baseline ao patch.
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
 11. Billing possui dois mecanismos mutuamente exclusivos e desligados por default. `ORCH_BILLING_SNAPSHOT_ENABLED` e legado; `ORCH_BILLING_ENABLED` ativa o batch novo somente apos migration `0022`, worker e Beat dedicados. Nunca reutilizar o backfill legado. Consultar `docs/BILLING_BATCH_RUNBOOK.md`.
-12. O branch `fix/pin-session-flow-revision` faz a sessao executar a `revision_id` gravada no bootstrap, inclusive em retomadas dependentes do grafo. A stack local e dois smokes reais confirmaram runtime/metricas com o mesmo pin; rollout e canario N -> N+1 permanecem pendentes. Draft continua mutavel e nao recebe a mesma garantia forte de uma revisao publicada.
+12. A PR `#142`, implantada no commit de merge `b614a73`, faz a sessao executar a `revision_id` gravada no bootstrap, inclusive em retomadas dependentes do grafo. A stack local, dois smokes e um canario de producao N -> N+1 confirmaram runtime/metricas com o mesmo pin: a sessao pausada `7285` permaneceu em N e a sessao nova `7286` iniciou em N+1. Draft continua mutavel e nao recebe a mesma garantia forte de uma revisao publicada.
 
 ## O que e o ORCH
 

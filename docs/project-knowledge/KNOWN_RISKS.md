@@ -116,7 +116,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R7 — Drift de revisao de workflow
 
-`STATUS`: FIX IMPLEMENTED, LOCAL RUNTIME VALIDATED, CANARY PENDING
+`STATUS`: FIX DEPLOYED, PRODUCTION CANARY VALIDATED
 
 `IMPACT`: high
 
@@ -126,11 +126,11 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: bootstrap registrava a revisao, mas M2 selecionava novamente a revisao corrente. Publicacao entre passos podia invalidar cursores/semantica.
 
-`MITIGATION`: branch `fix/pin-session-flow-revision` faz M2, eventos dependentes do grafo e callbacks tardios carregarem a revisao fixada na sessao. Sessao legada recebe pin atomico na primeira execucao; pin invalido ou inexistente falha fechado, sem migrar silenciosamente para a revisao corrente.
+`MITIGATION`: PR `#142` faz M2, eventos dependentes do grafo e callbacks tardios carregarem a revisao fixada na sessao. Sessao legada recebe pin atomico na primeira execucao; pin invalido ou inexistente falha fechado, sem migrar silenciosamente para a revisao corrente. O commit integrado foi implantado e validado por canario N -> N+1 em 2026-09-06.
 
 `DETECTION`: comparar revision id do runtime/metricas com revisao carregada na execucao e monitorar `orch.workflow.m2.pinned_revision_unavailable`/`workflow_m2_pinned_revision_*`.
 
-`RESIDUAL`: revisoes publicadas sao historicas e recebem a garantia forte. Draft continua mutavel no Target Core; uma sessao fixada em draft pode observar alteracoes sob o mesmo id. Deploy e canario entre N e N+1 permanecem pendentes; os dois smokes locais confirmaram igualdade entre o pin do runtime e as metricas, mas nao publicaram N+1 durante uma pausa real.
+`RESIDUAL`: revisoes publicadas sao historicas e recebem a garantia forte. Draft continua mutavel no Target Core; uma sessao fixada em draft pode observar alteracoes sob o mesmo id. O canario de producao confirmou uma sessao pausada permanecendo em N apos a publicacao de N+1 e uma sessao nova iniciando em N+1; esse teste nao elimina o limite conhecido de draft mutavel.
 
 `V2`: revisoes/snapshots executaveis imutaveis inclusive durante edicao.
 
