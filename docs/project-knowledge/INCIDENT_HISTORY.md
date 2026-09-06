@@ -1,5 +1,44 @@
 # Historico de Incidentes
 
+## 2026-09-06 — `contact_birth_date` causou retry storm na execução do workflow
+
+`STATUS`: CONTAINED / FIX IMPLEMENTED / LOCAL E2E PASSED / DEPLOY PENDING
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60`
+
+`FLOW`: `2423e4d4-d600-4e47-8ef2-6d05b30e961a`
+
+`SESSION`: `7324`
+
+### Impacto e causa
+
+O canário de `create_contact.update_current` carregou um contato real do mailing cuja `contact_birth_date` era PostgreSQL `DATE`. O driver entregou corretamente um `datetime.date`, mas `_inject_contact_runtime_scope` copiou o objeto cru para `variables.contact.birth_date` e `variables.customs.contact.birth_date`. A persistência do estado usa `json.dumps` sem encoder de datas e falhou antes de gravar o cursor com `TypeError: Object of type date is not JSON serializable`.
+
+Entre `16:18:27` e `16:33:33` UTC, a sessão acumulou 661 alarmes `workflow_execute_task_failed`, 661 métricas `task_exception` e 486 execuções que não obtiveram o lock. Cada tentativa foi revertida pela transação; a pessoa protegida permaneceu com `state=RJ`, `city=Itaborai` e o mesmo `updated_at`.
+
+### Contenção
+
+- A revisão draft usada como bancada foi restaurada byte a byte, incluindo checksum, estado e `published_at`; o ponteiro do flow voltou à revisão publicada v2.
+- O endpoint oficial de `unassign` foi aplicado à sessão. Ela terminou sem mutação da pessoa e não restaram sessões ativas do flow.
+- Nenhum alarme, métrica ou evento foi apagado.
+
+### Correção e validação
+
+- A correção converte somente `contact_birth_date` do tipo `date`/`datetime` para `isoformat()` na fronteira de montagem do runtime. Não há migration nem mudança no repositório SQL.
+- O teste de regressão passa uma instância real de `date`, exige `1940-08-12` nos dois aliases e serializa o runtime completo com `json.dumps`.
+- 132 testes focados em `create_contact`/workflow passaram. Na suíte completa, 488 passaram e 28 falharam: 27 são a baseline legada; o caso adicional de cache de prepared statement passou isoladamente.
+- A stack local completa ficou `up`; os smokes canônicos terminaram as sessões `7337` e `7338` em `state=3`.
+- O E2E controlado `7340` executou a revisão draft fixada, leu `birth_date=1940-08-12`, atualizou temporariamente `state/city`, terminou em `state=3` com zero alarmes e teve o POST externo confirmado pelo destino com HTTP 200 e `status=received`.
+- Ao final, definição, checksum, estado draft, ponteiro, `state`, `city` e `updated_at` da pessoa foram restaurados; auditoria tardia confirmou zero sessões ativas e zero alarmes no canário.
+
+### Próximo passo
+
+Publicar e implantar o patch no ORCH antes de repetir o `update_current` nos workers de produção. O incidente não exige mudança no Target Core.
+
 ## 2026-08-26 — FileApp aguardava rescue após status avançado no Target Core
 
 `STATUS`: ROOT CAUSE CONFIRMED / FIX IMPLEMENTED / ROLLOUT PENDING

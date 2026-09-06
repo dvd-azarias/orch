@@ -2925,6 +2925,9 @@ def _inject_contact_runtime_scope(
         "label": contact_row.get("contact_channel_label"),
         "address": contact_row.get("contact_channel_address"),
     }
+    contact_birth_date = contact_row.get("contact_birth_date")
+    if isinstance(contact_birth_date, (date, datetime)):
+        contact_birth_date = contact_birth_date.isoformat()
 
     contact_payload = {
         "contact_list_member_id": contact_row.get("contact_list_member_id"),
@@ -2935,7 +2938,7 @@ def _inject_contact_runtime_scope(
         "country": contact_row.get("contact_country"),
         "province": contact_row.get("contact_province"),
         "city": contact_row.get("contact_city"),
-        "birth_date": contact_row.get("contact_birth_date"),
+        "birth_date": contact_birth_date,
         "age": contact_row.get("contact_age"),
         "channel_type": contact_row.get("contact_channel_type"),
         "channel_label": contact_row.get("contact_channel_label"),

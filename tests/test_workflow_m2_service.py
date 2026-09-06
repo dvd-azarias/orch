@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1239,6 +1240,21 @@ def test_inject_contact_runtime_scope_sets_contact_extra() -> None:
     assert variables["contact"]["channel"]["address"] == "5511900700001"
     assert variables["contact"]["channel"]["type"] == "voice"
     assert variables["customs"]["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
+
+
+def test_inject_contact_runtime_scope_serializes_birth_date_as_iso() -> None:
+    runtime_variables: dict[str, object] = {}
+    _inject_contact_runtime_scope(
+        runtime_variables=runtime_variables,
+        contact_row={
+            "contact_birth_date": date(1940, 8, 12),
+        },
+    )
+
+    variables = runtime_variables["variables"]
+    assert variables["contact"]["birth_date"] == "1940-08-12"
+    assert variables["customs"]["contact"]["birth_date"] == "1940-08-12"
+    assert json.loads(json.dumps(runtime_variables, ensure_ascii=False)) == runtime_variables
 
 
 def test_inject_contact_runtime_scope_normalizes_carteira_alias() -> None:
