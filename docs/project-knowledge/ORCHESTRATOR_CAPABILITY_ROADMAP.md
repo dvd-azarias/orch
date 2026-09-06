@@ -21,7 +21,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 |---:|---|---|---|
 | 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Em implementacao |
 | 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
-| 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Em implementação |
+| 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 3 | `wait_for_event` | A classificar no desenho do envelope | Planejado |
 | 4 | `split_random` | A classificar no desenho do envelope | Planejado |
 | 5 | `select_contact_channel` | A classificar no desenho do envelope | Planejado |
@@ -44,7 +44,7 @@ Aplicar este checklist separadamente a cada item de 1 a 8:
 - [ ] Timeout, retry e idempotencia locais definidos quando houver efeito externo.
 - [ ] Logs, alarmes e runtime permitem diagnosticar sucesso e falha sem expor segredos.
 - [ ] Testes automatizados ORCH aprovados.
-- [x] Stack local completa reiniciada e validada conforme `AGENTS.md`.
+- [ ] Stack local completa reiniciada e validada conforme `AGENTS.md`.
 - [ ] Canary/E2E confirmou persistencia e efeitos externos aplicaveis.
 - [ ] PR ORCH integrado e rollout validado.
 - [ ] Documentacao e evidencias atualizadas.
@@ -139,11 +139,13 @@ Contrato aprovado:
 - [x] Testes automatizados focados e teste transacional em PostgreSQL real aprovados.
 - [x] Stack local completa reiniciada e validada conforme `AGENTS.md`.
 - [x] Canário/E2E confirmou persistência no fluxo real, idempotência e ausência de fan-out.
-- [ ] PR ORCH integrada e rollout validado.
-- [x] Documentação e evidências atualizadas até a etapa local.
-- [ ] Item marcado como concluído no estado geral.
+- [x] PR ORCH `#147` integrada; rollout do merge `c0b1c35` validado nos hosts `10.1.20.136` e `10.1.20.237`.
+- [x] Documentação e evidências atualizadas.
+- [x] Item marcado como concluído no estado geral.
 
 Rollback: interromper novos usos do card e reverter a engine. Não há migration. Drafts e vínculos já criados representam dados funcionais e não devem ser removidos automaticamente no rollback de código.
+
+Próximo item: `wait_for_event`.
 
 ## Backlog avancado
 
