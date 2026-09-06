@@ -22,6 +22,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 10. Nao conclua runtime apenas por leitura ou teste unitario. Fluxos com DB, broker, API externa ou SFTP exigem evidencia fora da sandbox.
 11. Billing possui dois mecanismos mutuamente exclusivos e desligados por default. `ORCH_BILLING_SNAPSHOT_ENABLED` e legado; `ORCH_BILLING_ENABLED` ativa o batch novo somente apos migration `0022`, worker e Beat dedicados. Nunca reutilizar o backfill legado. Consultar `docs/BILLING_BATCH_RUNBOOK.md`.
 12. O branch `fix/pin-session-flow-revision` faz a sessao executar a `revision_id` gravada no bootstrap, inclusive em retomadas dependentes do grafo. A stack local e dois smokes reais confirmaram runtime/metricas com o mesmo pin; rollout e canario N -> N+1 permanecem pendentes. Draft continua mutavel e nao recebe a mesma garantia forte de uma revisao publicada.
+13. Valores PostgreSQL `DATE` lidos para o runtime precisam ser convertidos para ISO antes de persistir `runtime_variables`. Em 2026-09-06, `contact_birth_date` cru causou 661 retries da sessao `7324`; a correcao minima fica em `_inject_contact_runtime_scope`. Deploy permanece pendente.
 
 ## O que e o ORCH
 

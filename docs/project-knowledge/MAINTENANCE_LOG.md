@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-09-06 — Serialização de `contact_birth_date` no runtime
+
+### REQUEST / CLASSIFICATION
+
+Corrigir o retry storm descoberto durante o canário de `create_contact.update_current`. `ALPHA_FIX_REQUIRED`; mudança cirúrgica no executor M2, sem migration, fila ou contrato externo novo.
+
+### CAUSE
+
+O contexto SQL retorna `contact_birth_date` como `datetime.date`. `_inject_contact_runtime_scope` armazenava o objeto cru nos aliases `variables.contact` e `variables.customs.contact`; a chamada seguinte a `replace_session_workflow_state` executava `json.dumps` e lançava `TypeError`, revertendo card e cursor. A sessão `7324` repetiu esse caminho 661 vezes.
+
+### CHANGE
+
+- Converter `date`/`datetime` para ISO apenas ao montar `contact.birth_date`.
+- Preservar strings e `None` já válidos, todos os demais campos e o comportamento do card.
+- Cobrir os dois aliases e a serialização completa do runtime em teste unitário.
+
+### VALIDATION
+
+- Teste específico de injeção: `3 passed`; regressão `create_contact`/workflow: `132 passed`.
+- Suíte completa: `488 passed, 28 failed`; 27 falhas pertencem à baseline legada e o `InvalidCachedStatementError` adicional passou isoladamente.
+- Stack local completa reiniciada em terminal dedicado, com API, três workers e dois Beats `up`.
+- Smokes canônicos: sessões `7337` e `7338`, ambas encerradas em `state=3`.
+- Canário E2E `7340`: revisão draft fixada, `birth_date=1940-08-12`, resultado `updated` nos campos `state/city`, zero alarmes, sessão `state=3` e confirmação externa HTTP 200/`received`.
+- Restauração auditada: definição, checksum, draft, ponteiro, pessoa e `updated_at` voltaram exatamente à baseline; zero sessão ativa e zero alarme tardio no canário.
+
+### ROLLBACK
+
+Reverter a conversão e o teste. Não há migration nem dado novo persistente. Não executar novo `update_current` com contato que possua data de nascimento enquanto o código antigo estiver ativo.
+
 ## 2026-09-06 — Compatibilidade de `birthdate` no card `identidade_person`
 
 ### REQUEST / CLASSIFICATION

@@ -593,3 +593,23 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `EVIDENCE`: o canário pré-deploy `1b54233b-7075-42c9-8085-35c8afad5db7`, executado pela stack local isolada contra as integrações reais, criou 1 pessoa, 1 draft, 8 canais/membros e 1 vínculo ativo. A chamada protegida ao Target Core retornou HTTP 200 em uma tentativa e a contagem do flow aumentou somente uma sessão. Repetir após deploy do patch de compatibilidade de `birthdate` antes de considerar a versão implantada validada.
 
 `V2`: command/outbox idempotente de pessoa/lista/flow, sem chamada síncrona cruzada dentro da transação do workflow.
+
+## R31 — Tipos SQL não serializáveis podem amplificar retries do workflow
+
+`STATUS`: FIX IMPLEMENTED / LOCAL E2E PASSED / DEPLOY PENDING
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando um campo `DATE` cru entra no runtime persistido
+
+`AFFECTED AREA`: contexto de contato / executor M2 / persistência de `runtime_variables`
+
+`DESCRIPTION`: `fetch_contact_runtime_context_for_session` retorna `contact_birth_date` como `datetime.date`. Antes do patch, a injeção copiava esse objeto para o runtime e `replace_session_workflow_state` falhava em `json.dumps`. Como o cursor não era persistido, o dispatcher voltava a executar a mesma sessão. O canário `7324` acumulou 661 falhas antes da contenção.
+
+`MITIGATION`: normalizar `contact_birth_date` para ISO no limite de `_inject_contact_runtime_scope`, preservando o contrato `YYYY-MM-DD`; manter teste com `date` real e serialização completa. Não aplicar `default=str` global, que ocultaria outros tipos inesperados e ampliaria o contrato silenciosamente.
+
+`DETECTION`: alertar repetição de `workflow_execute_task_failed` com `exception_type=TypeError` e `date is not JSON serializable`; correlacionar com sessão/cursor e interromper a amplificação antes de retestar.
+
+`EVIDENCE`: o E2E local `7340` terminou em `state=3`, zero alarmes, runtime ISO, atualização real e POST externo `200/received`; todos os dados temporários foram restaurados.
+
+`V2`: definir um contrato tipado e centralizado de serialização do runtime, com rejeição explícita de valores fora do conjunto JSON.
