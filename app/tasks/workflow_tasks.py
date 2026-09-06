@@ -13,7 +13,12 @@ from app.core.database import get_session_factory
 from app.core.logging import get_logger
 from app.core.workspace import normalize_workspace_uuid
 from app.repositories.orch_channel_events_repository import list_stale_pending_channel_event_sessions
+from app.repositories.orch_sessions_repository import (
+    fetch_session_workflow_state,
+    replace_session_workflow_state,
+)
 from app.services.alarm_service import persist_alarm
+from app.services.identidade_person_flow_link_service import link_identidade_mailing_to_current_flow
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
 from app.services.workflow_dispatcher_service import (
@@ -23,12 +28,24 @@ from app.services.workflow_dispatcher_service import (
 )
 
 logger = get_logger(__name__)
+_IDENTIDADE_PERSON_FLOW_LINK_LOCK_CLASS_ID = 92022
 
 
 @celery_app.task(name="app.tasks.workflow.advance_session", ignore_result=True)
 def advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_id: int) -> None:
     asyncio.run(
         _advance_session_task(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            session_id=session_id,
+        )
+    )
+
+
+@celery_app.task(name="app.tasks.workflow.link_identidade_person_mailing", ignore_result=True)
+def link_identidade_person_mailing_task(*, workspace_uuid: str, flow_uuid: str, session_id: int) -> None:
+    asyncio.run(
+        _link_identidade_person_mailing_task(
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
             session_id=session_id,
@@ -405,6 +422,16 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
             queue=settings.celery_switch_bot_flow_queue,
             routing_key=settings.celery_switch_bot_flow_queue,
         )
+    elif stopped_reason == "blocked_identidade_person_flow_link":
+        link_identidade_person_mailing_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_execute_queue,
+            routing_key=settings.celery_execute_queue,
+        )
     logger.info(
         "workflow session advanced",
         extra={
@@ -413,5 +440,113 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
             "flow_uuid": flow_uuid,
             "session_id": session_id,
             "stopped_reason": stopped_reason,
+        },
+    )
+
+
+async def _link_identidade_person_mailing_task(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    session_id: int,
+) -> None:
+    settings = get_settings()
+    safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
+    _safe_workspace_uuid, workspace_schema = bind_workspace_context(safe_workspace_uuid)
+    safe_schema = workspace_schema.replace('"', '""')
+    session_factory = get_session_factory()
+    should_advance = False
+    outcome = "ignored"
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+            lock_result = await db_session.execute(
+                text("SELECT pg_try_advisory_xact_lock(:class_id, :object_id) AS locked"),
+                {"class_id": _IDENTIDADE_PERSON_FLOW_LINK_LOCK_CLASS_ID, "object_id": int(session_id)},
+            )
+            if not bool(lock_result.scalar_one()):
+                return
+
+            session_state = await fetch_session_workflow_state(db_session, session_id=session_id)
+            if session_state is None or str(session_state.get("flow_uuid") or "") != str(flow_uuid):
+                return
+            runtime_variables = session_state.get("runtime_variables")
+            if not isinstance(runtime_variables, dict):
+                return
+            workflow_meta = runtime_variables.get("workflow_v2")
+            if not isinstance(workflow_meta, dict):
+                return
+            link_state = workflow_meta.get("identidade_person_flow_link")
+            if not isinstance(link_state, dict) or str(link_state.get("status") or "").lower() != "pending":
+                return
+
+            mailing_uuid = str(link_state.get("mailing_uuid") or "").strip()
+            try:
+                result = await link_identidade_mailing_to_current_flow(
+                    settings=settings,
+                    workspace_uuid=safe_workspace_uuid,
+                    flow_uuid=flow_uuid,
+                    mailing_uuid=mailing_uuid,
+                )
+                now_iso = datetime.now(timezone.utc).isoformat()
+                link_state["attempts"] = result.attempts
+                link_state["status_code"] = result.status_code
+                link_state["completed_at"] = now_iso
+                if result.success:
+                    link_state["status"] = "completed"
+                    link_state["last_error"] = None
+                    outcome = "completed"
+                else:
+                    link_state["status"] = "failed"
+                    link_state["last_error"] = {
+                        "code": f"identidade_person_flow_link_{result.reason}",
+                        "message": result.message or "Falha ao vincular a lista ao fluxo atual.",
+                        "status_code": result.status_code,
+                        "updated_at": now_iso,
+                    }
+                    outcome = "failed"
+            except Exception as exc:  # pragma: no cover - proteção final da tarefa
+                now_iso = datetime.now(timezone.utc).isoformat()
+                link_state.update(
+                    {
+                        "status": "failed",
+                        "completed_at": now_iso,
+                        "last_error": {
+                            "code": "identidade_person_flow_link_unexpected_error",
+                            "message": "Falha inesperada ao vincular a lista ao fluxo atual.",
+                            "updated_at": now_iso,
+                        },
+                    }
+                )
+                outcome = type(exc).__name__
+
+            await replace_session_workflow_state(
+                db_session,
+                session_id=session_id,
+                runtime_variables=runtime_variables,
+                last_card_uuid=session_state.get("last_card_uuid"),
+                next_card_uuid=session_state.get("next_card_uuid"),
+            )
+            should_advance = True
+
+    if should_advance:
+        advance_session_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_execute_queue,
+            routing_key=settings.celery_execute_queue,
+        )
+    logger.info(
+        "identidade person mailing link processed",
+        extra={
+            "event": "orch.identidade_person.flow_link.processed",
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+            "outcome": outcome,
         },
     )

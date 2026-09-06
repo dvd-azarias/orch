@@ -21,8 +21,11 @@
 - `app/repositories/orch_sessions_repository.py`: maior fronteira SQL; upsert, consultas, cursores, routing e create_contact.
 - `app/services/workflow_runtime_service.py`: bootstrap M1.
 - `app/services/workflow_m2_service.py`: motor e componentes.
+- `app/services/identidade_person_service.py`: cliente fixo da Identidade.io, validação, normalização e merge de pessoa.
+- `app/services/identidade_person_flow_link_service.py`: contrato autenticado e idempotente para o Target Core confirmar mailing→flow sem fan-out de sessões.
+- `app/repositories/identidade_person_repository.py`: persistência transacional de `persons` e associação idempotente a `source_lists`.
 - `app/services/workflow_dispatcher_service.py`: claim e classificacao de parada.
-- `app/tasks/workflow_tasks.py`: dispatch, execute, heartbeat e reconciliacao de eventos.
+- `app/tasks/workflow_tasks.py`: dispatch, execute, heartbeat, reconciliacao de eventos e retomada pós-commit do vínculo do Identidade.
 - `app/services/switch_bot_flow_service.py`: resolve/cacheia `runner_token`, valida payload Meta e chama o Runner v5.
 - `app/tasks/switch_bot_flow_tasks.py`: relay assincrono e serializado dos eventos de usuario ao BOT.
 - `app/tasks/fileapp_ingest_tasks.py`: pipeline FileApp e reconciliadores.

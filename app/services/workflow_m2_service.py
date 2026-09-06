@@ -30,6 +30,14 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
 from app.repositories.flow_v2_repository import fetch_flow_row, fetch_selected_revision
+from app.repositories.identidade_person_repository import (
+    ensure_person_in_source_list,
+    fetch_active_flow_mailing_link,
+    fetch_person_by_identifier_for_update,
+    insert_person_if_missing,
+    resolve_source_list_by_public_id,
+    update_person_from_payload,
+)
 from app.repositories.orch_channel_events_repository import (
     claim_next_pending_channel_event,
     fetch_channel_event_by_identity,
@@ -56,6 +64,17 @@ from app.services.billing_batch_service import try_record_billing_event
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
+from app.services.identidade_person_service import (
+    IdentidadePersonQueryResult,
+    IdentidadePersonServiceError,
+    build_normalized_output,
+    mask_document,
+    merge_person_payload,
+    normalize_document,
+    normalize_identidade_person,
+    normalize_workspace_id,
+    query_identidade_person,
+)
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 from app.services.session_metrics_service import persist_session_metrics
@@ -83,6 +102,7 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "process_dialer_response": "blocked_process_dialer_response",
     "run_flow": "blocked_run_flow",
     "switch_bot_flow": "blocked_switch_bot_flow",
+    "identidade_person": "blocked_identidade_person_flow_link",
 }
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
@@ -111,6 +131,9 @@ RUN_FLOW_BLOCKING_STOP_REASONS = {
 }
 SWITCH_BOT_FLOW_BLOCKING_STOP_REASONS = {
     "blocked_switch_bot_flow",
+}
+IDENTIDADE_PERSON_BLOCKING_STOP_REASONS = {
+    "blocked_identidade_person_flow_link",
 }
 WHATSAPP_STATUS_ORDER_PREREQUISITES = {
     "delivered": "whatsapp_sent_at",
@@ -1299,6 +1322,12 @@ def _switch_bot_flow_state(runtime_variables: dict[str, Any]) -> dict[str, Any] 
     return state if isinstance(state, dict) else None
 
 
+def _identidade_person_flow_link_state(runtime_variables: dict[str, Any]) -> dict[str, Any] | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    state = workflow_meta.get("identidade_person_flow_link")
+    return state if isinstance(state, dict) else None
+
+
 def _run_switch_bot_flow(
     *,
     definition: dict[str, Any],
@@ -2093,6 +2122,15 @@ def _should_resume_switch_bot_flow_blocking_execution(runtime_variables: dict[st
     if blocking_stop_reason not in SWITCH_BOT_FLOW_BLOCKING_STOP_REASONS:
         return False
     state = _switch_bot_flow_state(runtime_variables)
+    status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
+    return status in {"completed", "failed"}
+
+
+def _should_resume_identidade_person_blocking_execution(runtime_variables: dict[str, Any]) -> bool:
+    blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+    if blocking_stop_reason not in IDENTIDADE_PERSON_BLOCKING_STOP_REASONS:
+        return False
+    state = _identidade_person_flow_link_state(runtime_variables)
     status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
     return status in {"completed", "failed"}
 
@@ -3173,6 +3211,522 @@ def _is_terminal_failure_session_state(session_state: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
     return session_state_value in {3, 5} and isinstance(terminal_failure, dict)
+
+
+def _catalog_parameter_scalar(value: Any, *, preferred_keys: tuple[str, ...] = ()) -> Any:
+    if isinstance(value, list):
+        if not value:
+            return None
+        return _catalog_parameter_scalar(value[0], preferred_keys=preferred_keys)
+    if isinstance(value, dict):
+        for key in (*preferred_keys, "id", "value"):
+            candidate = value.get(key)
+            if candidate is not None and str(candidate).strip():
+                return candidate
+        return None
+    return value
+
+
+def _catalog_parameter_bool(value: Any) -> bool:
+    scalar = _catalog_parameter_scalar(value)
+    if isinstance(scalar, bool):
+        return scalar
+    return str(scalar or "").strip().lower() in {"1", "true", "yes", "sim", "on", "enabled"}
+
+
+def _identidade_enum_parameter(
+    params: dict[str, Any],
+    *,
+    field: str,
+    allowed: set[str],
+    default: str,
+) -> str:
+    raw = _catalog_parameter_scalar(params.get(field))
+    value = str(raw or default).strip().lower()
+    if value not in allowed:
+        raise WorkflowExecutionError(
+            f"identidade_person_invalid_{field}",
+            f"O campo {field} possui um valor inválido.",
+        )
+    return value
+
+
+def _identidade_mailing_public_id(value: Any) -> str | None:
+    scalar = _catalog_parameter_scalar(
+        value,
+        preferred_keys=("mailing_id", "public_id", "source_list_id", "uuid"),
+    )
+    normalized = str(scalar or "").strip()
+    if not normalized:
+        return None
+    try:
+        return str(UUID(normalized))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "identidade_person_invalid_mailing_id",
+            "O campo mailing_id deve conter uma lista válida.",
+        ) from exc
+
+
+def _identidade_output_var(value: Any) -> str:
+    normalized = str(_catalog_parameter_scalar(value) or "identidade").strip()
+    if not normalized or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,127}", normalized):
+        raise WorkflowExecutionError(
+            "identidade_person_invalid_output_var",
+            "O campo output_var deve ser um caminho de variável válido.",
+        )
+    return normalized
+
+
+def _store_identidade_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
+    component_ref_id: str | None,
+    document: str,
+    status_code: int,
+    attempts: int,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    _set_by_path(customs, output_var, output)
+    runtime_variables["identidade_person_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "document_masked": mask_document(document),
+        "found": bool(output.get("found")),
+        "status_code": status_code,
+        "attempts": attempts,
+        "output_var": output_var,
+        "result": output,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _update_identidade_flow_link_output(
+    runtime_variables: dict[str, Any],
+    *,
+    flow_link_state: dict[str, Any],
+    status: str,
+) -> None:
+    last_result = runtime_variables.get("identidade_person_last_result")
+    outputs: list[dict[str, Any]] = []
+    if isinstance(last_result, dict):
+        result = last_result.get("result")
+        if isinstance(result, dict):
+            outputs.append(result)
+        output_var = str(last_result.get("output_var") or "").strip()
+        variables = runtime_variables.get("variables")
+        customs = variables.get("customs") if isinstance(variables, dict) else None
+        current: Any = customs
+        for part in [value for value in output_var.split(".") if value]:
+            current = current.get(part) if isinstance(current, dict) else None
+        if isinstance(current, dict) and all(current is not item for item in outputs):
+            outputs.append(current)
+
+    for output in outputs:
+        mailing_action = output.get("mailing_action")
+        if not isinstance(mailing_action, dict):
+            continue
+        mailing_action.update(
+            {
+                "flow_link": status,
+                "flow_link_attempts": flow_link_state.get("attempts"),
+                "flow_link_status_code": flow_link_state.get("status_code"),
+            }
+        )
+
+
+async def _resolve_identidade_query(
+    *,
+    component_ref_id: str,
+    workspace_id: str,
+    access_token: str,
+    document: str,
+    require_phone: bool,
+    require_email: bool,
+    runtime_variables: dict[str, Any],
+) -> IdentidadePersonQueryResult:
+    cache_key = hashlib.sha256(
+        f"{component_ref_id}:{workspace_id}:{document}:{int(require_phone)}:{int(require_email)}".encode("utf-8")
+    ).hexdigest()
+    pending = runtime_variables.get("identidade_person_pending_query")
+    if isinstance(pending, dict) and pending.get("cache_key") == cache_key:
+        cached_person = pending.get("person")
+        return IdentidadePersonQueryResult(
+            found=bool(pending.get("found")),
+            person=dict(cached_person) if isinstance(cached_person, dict) else None,
+            attempts=int(pending.get("attempts") or 1),
+            status_code=int(pending.get("status_code") or 200),
+        )
+
+    result = await query_identidade_person(
+        workspace_id=workspace_id,
+        access_token=access_token,
+        document=document,
+        require_phone=require_phone,
+        require_email=require_email,
+    )
+    runtime_variables["identidade_person_pending_query"] = {
+        "cache_key": cache_key,
+        "component_ref_id": component_ref_id,
+        "document_masked": mask_document(document),
+        "found": result.found,
+        "person": result.person,
+        "attempts": result.attempts,
+        "status_code": result.status_code,
+        "queried_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return result
+
+
+async def _persist_identidade_person_action(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    normalized_person: dict[str, Any],
+    person_action: str,
+    enrichment_policy: str,
+    mailing_public_id: str | None,
+    link_mailing_to_current_flow: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    local_action: dict[str, Any] = {
+        "requested": person_action,
+        "status": "not_written",
+        "person_uuid": None,
+    }
+    mailing_action: dict[str, Any] = {
+        "requested": mailing_public_id is not None,
+        "mailing_id": mailing_public_id,
+        "status": "not_requested" if mailing_public_id is None else "pending",
+        "flow_link": "not_requested" if not link_mailing_to_current_flow else "pending",
+    }
+    if person_action == "lookup_only":
+        if mailing_public_id is not None:
+            mailing_action["status"] = "ignored_lookup_only"
+        if link_mailing_to_current_flow:
+            mailing_action["flow_link"] = "ignored_lookup_only"
+        return local_action, mailing_action
+
+    identifier = str(normalized_person["identifier"])
+    try:
+        async with db_session.begin_nested():
+            existing = await fetch_person_by_identifier_for_update(
+                db_session,
+                identifier=identifier,
+            )
+            local_person: dict[str, Any] | None = None
+            if person_action == "create_if_missing":
+                if existing is not None:
+                    local_person = existing
+                    local_action["status"] = "already_exists_unchanged"
+                else:
+                    local_person = await insert_person_if_missing(db_session, payload=normalized_person)
+                    if local_person is None:
+                        local_person = await fetch_person_by_identifier_for_update(db_session, identifier=identifier)
+                        local_action["status"] = "already_exists_unchanged"
+                    else:
+                        local_action["status"] = "created"
+            elif person_action == "enrich_if_found":
+                if existing is None:
+                    local_action["status"] = "local_person_not_found"
+                else:
+                    merged = merge_person_payload(
+                        existing,
+                        normalized_person,
+                        enrichment_policy=enrichment_policy,
+                    )
+                    local_person = await update_person_from_payload(
+                        db_session,
+                        person_uuid=str(existing["uuid"]),
+                        payload=merged,
+                    )
+                    local_action["status"] = "enriched"
+            elif person_action == "upsert":
+                if existing is None:
+                    local_person = await insert_person_if_missing(db_session, payload=normalized_person)
+                    if local_person is None:
+                        existing = await fetch_person_by_identifier_for_update(db_session, identifier=identifier)
+                    if local_person is not None:
+                        local_action["status"] = "created"
+                if local_person is None and existing is not None:
+                    merged = merge_person_payload(
+                        existing,
+                        normalized_person,
+                        enrichment_policy=enrichment_policy,
+                    )
+                    local_person = await update_person_from_payload(
+                        db_session,
+                        person_uuid=str(existing["uuid"]),
+                        payload=merged,
+                    )
+                    local_action["status"] = "enriched"
+
+            if local_person is not None:
+                local_action["person_uuid"] = local_person.get("uuid")
+
+            if mailing_public_id is not None and local_person is not None:
+                source_list = await resolve_source_list_by_public_id(
+                    db_session,
+                    public_id=mailing_public_id,
+                )
+                if source_list is None:
+                    raise WorkflowExecutionError(
+                        "identidade_person_mailing_not_found",
+                        "A lista selecionada em mailing_id não foi encontrada.",
+                    )
+                source_status = str(source_list.get("status") or "").strip().upper()
+                if source_status not in {"READY_TO_INGEST", "PROCESSED"}:
+                    raise WorkflowExecutionError(
+                        "identidade_person_mailing_not_ready",
+                        "A lista selecionada precisa estar pronta ou processada.",
+                    )
+                membership = await ensure_person_in_source_list(
+                    db_session,
+                    source_list_id=int(source_list["id"]),
+                    person=local_person,
+                )
+                mailing_action.update(
+                    {
+                        "status": "added" if membership.get("created") else "already_present",
+                        "source_list_id": source_list.get("id"),
+                        "contact_draft_id": membership.get("contact_draft_id"),
+                        "channels": membership.get("channels"),
+                    }
+                )
+                if link_mailing_to_current_flow:
+                    active_link = await fetch_active_flow_mailing_link(
+                        db_session,
+                        flow_uuid=flow_uuid,
+                        source_list_id=int(source_list["id"]),
+                    )
+                    if active_link is None:
+                        mailing_action["flow_link"] = "pending"
+                    else:
+                        # O vínculo ativo também precisa ser atualizado no Target Core,
+                        # pois o contact_draft acabou de ser criado/atualizado nesta transação.
+                        mailing_action["flow_link"] = "pending"
+                        mailing_action["flow_link_previous_state"] = "already_linked"
+                        mailing_action["contact_list_id"] = active_link.get("contact_list_id")
+            elif mailing_public_id is not None:
+                mailing_action["status"] = "skipped_no_local_person"
+                if link_mailing_to_current_flow:
+                    mailing_action["flow_link"] = "skipped_no_local_person"
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "identidade_person_persistence_failed",
+            "Falha ao persistir os dados retornados pela Identidade.",
+        ) from exc
+
+    return local_action, mailing_action
+
+
+async def _run_identidade_person(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str | None:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip()
+    if not component_ref_id:
+        raise WorkflowExecutionError(
+            "identidade_person_missing_ref_id",
+            "O componente identidade_person não possui ref_id.",
+        )
+
+    flow_link_state = _identidade_person_flow_link_state(runtime_variables)
+    if isinstance(flow_link_state, dict) and str(flow_link_state.get("component_ref_id") or "") == component_ref_id:
+        flow_link_status = str(flow_link_state.get("status") or "").strip().lower()
+        if flow_link_status == "pending":
+            return None
+        if flow_link_status == "completed":
+            _update_identidade_flow_link_output(
+                runtime_variables,
+                flow_link_state=flow_link_state,
+                status="linked",
+            )
+            flow_link_state["status"] = "consumed"
+            return "encontrado"
+        if flow_link_status == "failed":
+            _update_identidade_flow_link_output(
+                runtime_variables,
+                flow_link_state=flow_link_state,
+                status="failed",
+            )
+            flow_link_state["status"] = "consumed"
+            error = flow_link_state.get("last_error")
+            error = error if isinstance(error, dict) else {}
+            raise WorkflowExecutionError(
+                str(error.get("code") or "identidade_person_flow_link_failed"),
+                str(error.get("message") or "Falha ao vincular a lista ao fluxo atual."),
+            )
+
+    variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
+    rendered_document = _render_value(params.get("document"), resolution_scope)
+    try:
+        document = normalize_document(rendered_document)
+        workspace_id = normalize_workspace_id(_catalog_parameter_scalar(params.get("workspace_id")))
+    except IdentidadePersonServiceError as exc:
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+    access_token = str(_catalog_parameter_scalar(params.get("access_token")) or "").strip()
+    if not access_token:
+        raise WorkflowExecutionError(
+            "identidade_person_missing_access_token",
+            "O campo access_token é obrigatório.",
+        )
+
+    require_phone = _catalog_parameter_bool(params.get("require_phone"))
+    require_email = _catalog_parameter_bool(params.get("require_email"))
+    person_action = _identidade_enum_parameter(
+        params,
+        field="person_action",
+        allowed={"lookup_only", "create_if_missing", "enrich_if_found", "upsert"},
+        default="lookup_only",
+    )
+    enrichment_policy = _identidade_enum_parameter(
+        params,
+        field="enrichment_policy",
+        allowed={"fill_missing", "overwrite_non_null"},
+        default="fill_missing",
+    )
+    phone_policy = _identidade_enum_parameter(
+        params,
+        field="phone_policy",
+        allowed={"best_eligible", "all_eligible", "none"},
+        default="best_eligible",
+    )
+    response_detail = _identidade_enum_parameter(
+        params,
+        field="response_detail",
+        allowed={"normalized", "complete"},
+        default="normalized",
+    )
+    mailing_public_id = _identidade_mailing_public_id(params.get("mailing_id"))
+    link_mailing_to_current_flow = _catalog_parameter_bool(params.get("link_mailing_to_current_flow"))
+    if link_mailing_to_current_flow and mailing_public_id is None:
+        raise WorkflowExecutionError(
+            "identidade_person_flow_link_without_mailing",
+            "Selecione mailing_id para vincular uma lista ao fluxo atual.",
+        )
+    output_var = _identidade_output_var(params.get("output_var"))
+
+    logger.info(
+        "workflow m2 identidade person query started",
+        extra={
+            "event": "orch.workflow.m2.identidade_person.started",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "document_masked": mask_document(document),
+            "person_action": person_action,
+        },
+    )
+    try:
+        query_result = await _resolve_identidade_query(
+            component_ref_id=component_ref_id,
+            workspace_id=workspace_id,
+            access_token=access_token,
+            document=document,
+            require_phone=require_phone,
+            require_email=require_email,
+            runtime_variables=runtime_variables,
+        )
+    except IdentidadePersonServiceError as exc:
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+
+    if not query_result.found or query_result.person is None:
+        output = {
+            "found": False,
+            "person": None,
+            "local_action": {"requested": person_action, "status": "not_executed"},
+            "mailing_action": {"requested": mailing_public_id is not None, "status": "not_executed"},
+        }
+        _store_identidade_output(
+            runtime_variables=runtime_variables,
+            output_var=output_var,
+            output=output,
+            component_ref_id=component_ref_id,
+            document=document,
+            status_code=query_result.status_code,
+            attempts=query_result.attempts,
+        )
+        runtime_variables.pop("identidade_person_pending_query", None)
+        return "nao_encontrado"
+
+    try:
+        normalized_person = normalize_identidade_person(
+            query_result.person,
+            fallback_document=document,
+            phone_policy=phone_policy,
+        )
+    except IdentidadePersonServiceError as exc:
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+    local_action, mailing_action = await _persist_identidade_person_action(
+        db_session=db_session,
+        flow_uuid=flow_uuid,
+        normalized_person=normalized_person,
+        person_action=person_action,
+        enrichment_policy=enrichment_policy,
+        mailing_public_id=mailing_public_id,
+        link_mailing_to_current_flow=link_mailing_to_current_flow,
+    )
+    normalized_output = build_normalized_output(
+        normalized_person=normalized_person,
+        local_action=local_action,
+        mailing_action=mailing_action,
+    )
+    output = normalized_output
+    if response_detail == "complete":
+        output = {
+            **normalized_output,
+            "provider_response": query_result.person,
+        }
+    _store_identidade_output(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        output=output,
+        component_ref_id=component_ref_id,
+        document=document,
+        status_code=query_result.status_code,
+        attempts=query_result.attempts,
+    )
+    runtime_variables.pop("identidade_person_pending_query", None)
+    if mailing_action.get("flow_link") == "pending" and mailing_public_id is not None:
+        workflow_meta = _ensure_workflow_meta(runtime_variables)
+        workflow_meta["identidade_person_flow_link"] = {
+            "component_ref_id": component_ref_id,
+            "flow_uuid": flow_uuid,
+            "mailing_uuid": mailing_public_id,
+            "status": "pending",
+            "attempts": 0,
+            "status_code": None,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "last_error": None,
+        }
+        return None
+    logger.info(
+        "workflow m2 identidade person query completed",
+        extra={
+            "event": "orch.workflow.m2.identidade_person.completed",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "document_masked": mask_document(document),
+            "person_action_status": local_action.get("status"),
+            "mailing_action_status": mailing_action.get("status"),
+        },
+    )
+    return "encontrado"
 
 
 def _normalize_create_contact_mapping_key(raw_key: str) -> str:
@@ -4692,6 +5246,7 @@ async def execute_workflow_m2_for_session(
             "blocked_send_with_dialer",
             "blocked_process_dialer_response",
             "blocked_switch_bot_flow",
+            "blocked_identidade_person_flow_link",
         }
         workflow_status = "success"
         if result.stopped_reason == "session_execution_locked":
@@ -5020,6 +5575,18 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
             elif _should_resume_switch_bot_flow_blocking_execution(runtime_variables):
+                _clear_blocking_execution(runtime_variables)
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
+                )
+            elif _should_resume_identidade_person_blocking_execution(runtime_variables):
+                resumed_from_card = str(session_state.get("last_card_uuid") or "").strip()
+                if resumed_from_card:
+                    current_card_uuid = resumed_from_card
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -5601,10 +6168,44 @@ async def execute_workflow_m2_for_session(
                         )
                         if branch_label is not None:
                             should_block_execution = False
+                    elif kind == "identidade_person":
+                        try:
+                            branch_label = await _run_identidade_person(
+                                db_session=db_session,
+                                flow_uuid=flow_uuid,
+                                component=component,
+                                runtime_variables=runtime_variables,
+                            )
+                        except WorkflowExecutionError as exc:
+                            exception_branch = _resolve_component_exception_branch_label(
+                                definition=definition,
+                                current_card_uuid=next_card_uuid,
+                            )
+                            if exception_branch is None:
+                                raise
+                            runtime_variables["identidade_person_last_error"] = {
+                                "component_ref_id": component.get("ref_id"),
+                                "code": exc.code,
+                                "message": exc.message,
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            logger.warning(
+                                "workflow m2 identidade person failed",
+                                extra={
+                                    "event": "orch.workflow.m2.identidade_person.failed",
+                                    "flow_uuid": flow_uuid,
+                                    "session_id": session_id,
+                                    "component_ref_id": component.get("ref_id"),
+                                    "error_code": exc.code,
+                                },
+                            )
+                            branch_label = exception_branch
+                        if branch_label is not None:
+                            should_block_execution = False
                     if should_block_execution:
                         resolved_next = (
                             next_card_uuid
-                            if kind in {"run_flow", "switch_bot_flow"}
+                            if kind in {"run_flow", "switch_bot_flow", "identidade_person"}
                             else resolve_next_card_uuid(definition, next_card_uuid)
                         )
                         last_card_uuid = next_card_uuid
