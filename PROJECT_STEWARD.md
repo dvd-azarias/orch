@@ -1621,7 +1621,7 @@ Antes de operacao mutavel, substituir `<comando-somente-leitura>` pelo menor com
 
 ## Inventario systemd confirmado
 
-As units efetivamente habilitadas no `237` formam uma stack de 19 servicos:
+As units efetivamente habilitadas no `237` formam uma stack de 21 servicos na ultima verificacao de 2026-09-06:
 
 * `orch-api.service`: API FastAPI/Uvicorn, quatro processos, porta `7777`;
 * `orch-celery-beat.service`: beat principal de workflow;
@@ -1629,7 +1629,9 @@ As units efetivamente habilitadas no `237` formam uma stack de 19 servicos:
 * `orch-celery-generate-file-beat.service`: scan periodico do componente generate-file;
 * `orch-celery-worker_01.service` ate `orch-celery-worker_05.service`: cinco workers gerais, hostnames `orch-celery-worker@237_01..05`, consumindo `orch_dispatch`, `orch_execute` e `orch_heartbeat`;
 * `orch-celery-fileapp-worker_01.service` ate `orch-celery-fileapp-worker_05.service`: cinco workers FileApp, hostnames `orch-celery-fileapp-worker@237_01..05`, consumindo `orch_fileapp_ingest_events`, `orch_fileapp_source_list_ingest` e `orch_fileapp_mailing_assoc`;
-* `orch-celery-generate-file-worker_01.service` ate `orch-celery-generate-file-worker_05.service`: cinco workers generate-file, hostnames `orch-celery-generate-file-worker@237_01..05`, consumindo `orch_component_generate_file_run` e `orch_component_generate_file_scan`.
+* `orch-celery-generate-file-worker_01.service` ate `orch-celery-generate-file-worker_05.service`: cinco workers generate-file, hostnames `orch-celery-generate-file-worker@237_01..05`, consumindo `orch_component_generate_file_run` e `orch_component_generate_file_scan`;
+* `orch-celery-billing-worker.service`: worker do billing batch, consumindo `orch.billing.outbox`;
+* `orch-celery-billing-beat.service`: beat dedicado aos schedules do billing batch.
 
 A unit sem sufixo `orch-celery-fileapp-worker.service` existe no host, mas esta `disabled`; nao inicia-la como se fizesse parte da stack escalada sem investigar e aprovar a alteracao.
 
@@ -1669,9 +1671,10 @@ Preservar evidencias antes de reiniciar e reiniciar somente a familia afetada:
 * API/rotas/config carregada pela API: `orch-api.service`;
 * FileApp: `orch-celery-fileapp-worker_01..05.service`; incluir `orch-celery-fileapp-rescue-beat.service` apenas quando a mudanca afetar seus schedules;
 * generate-file: `orch-celery-generate-file-worker_01..05.service`; incluir `orch-celery-generate-file-beat.service` quando a mudanca afetar scan/schedule;
+* billing: `orch-celery-billing-worker.service`; incluir `orch-celery-billing-beat.service` quando a mudanca afetar seus schedules;
 * dispatch, heartbeat ou schedule principal: `orch-celery-beat.service`.
 
-Nao reiniciar automaticamente as 19 units por conveniencia. Depois de qualquer restart, confirmar `active/running`, PID novo, logs sem erro, consumers esperados e comportamento real da fila/sessao afetada.
+Nao reiniciar automaticamente as 21 units por conveniencia. Depois de qualquer restart, confirmar `active/running`, PID novo, logs sem erro, consumers esperados e comportamento real da fila/sessao afetada.
 
 Este inventario e uma baseline operacional confirmada, nao uma garantia eterna. Em troubleshooting, confrontar sempre com `systemctl show`, pois a configuracao efetiva do host prevalece sobre templates e documentacao.
 

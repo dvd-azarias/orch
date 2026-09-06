@@ -39,20 +39,21 @@ Logs: `.runlogs/launchd/`.
 
 ## Linux/systemd — producao `10.1.20.237`
 
-O acesso, as credenciais, o caminho real e o inventario completo das 19 units estao na secao `ACESSO RAPIDO A PRODUCAO — HOST 10.1.20.237` de `PROJECT_STEWARD.md`.
+O acesso, as credenciais, o caminho real e o inventario completo das 21 units estao na secao `ACESSO RAPIDO A PRODUCAO — HOST 10.1.20.237` de `PROJECT_STEWARD.md`.
 
-Baseline confirmada:
+Baseline confirmada e atualizada em 2026-09-06:
 
 - projeto, virtualenv e `.env`: `/etc/gohp/orch`, `/etc/gohp/orch/venv` e `/etc/gohp/orch/.env`;
 - cinco workers workflow consomem `orch_dispatch`, `orch_execute` e `orch_heartbeat`;
 - cinco workers FileApp consomem tambem `orch_fileapp_mailing_assoc`, alem das filas ingest/process;
 - cinco workers generate-file consomem run/scan;
-- tres beats separados executam workflow, FileApp rescue/higiene e generate-file scan;
+- quatro beats separados executam workflow, FileApp rescue/higiene, generate-file scan e billing;
+- um worker billing consome a fila dedicada `orch.billing.outbox`;
 - API FastAPI/Uvicorn executa na porta `7777`.
 
 Os templates em `systemctl/` ainda representam uma topologia generica antiga, com caminhos `/opt/orch`, environment file `/etc/orch/orch.env`, hostnames `136` e units sem escala horizontal. Nao instalar ou copiar esses templates diretamente sobre o `237`.
 
-As units genericas de billing foram apenas adicionadas como referencia e nao fazem parte desta baseline de 19 servicos. Nao as instalar no `237` sem migration, plano de rollout e autorizacao.
+As units de billing fazem parte da baseline observada, mas continuam sendo uma familia operacional separada. Nao reinicia-las junto com workflow, FileApp ou generate-file sem que a mudanca afete explicitamente o billing.
 
 Diagnosticar pela configuracao efetiva:
 
