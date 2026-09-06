@@ -40,6 +40,7 @@ from app.repositories.identidade_person_repository import (
     ensure_person_in_source_list,
     fetch_active_flow_mailing_link,
     fetch_person_by_identifier_for_update,
+    fetch_person_by_uuid_for_update,
     insert_person_if_missing,
     resolve_source_list_by_public_id,
     update_person_from_payload,
@@ -4205,6 +4206,217 @@ async def _run_create_contact(
     return branch
 
 
+SOURCE_LIST_MEMBERSHIP_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _source_list_membership_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _source_list_membership_person_uuid(
+    value: Any,
+    *,
+    resolution_scope: dict[str, Any],
+) -> str | None:
+    raw = _catalog_parameter_scalar(
+        value,
+        preferred_keys=("person_uuid", "uuid"),
+    )
+    rendered = _render_value(raw, resolution_scope)
+    if rendered is None or (isinstance(rendered, str) and not rendered.strip()):
+        return None
+    if isinstance(rendered, (dict, list, tuple, set, bool)):
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_person_uuid",
+            "O campo person_uuid deve resultar em um UUID de pessoa válido.",
+        )
+    try:
+        return str(UUID(str(rendered).strip()))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_person_uuid",
+            "O campo person_uuid deve resultar em um UUID de pessoa válido.",
+        ) from exc
+
+
+def _source_list_membership_mailing_public_id(value: Any) -> str:
+    scalar = _catalog_parameter_scalar(
+        value,
+        preferred_keys=("mailing_id", "public_id", "source_list_id", "uuid"),
+    )
+    normalized = str(scalar or "").strip()
+    if not normalized:
+        raise WorkflowExecutionError(
+            "source_list_membership_missing_mailing_id",
+            "O campo mailing_id deve selecionar uma lista.",
+        )
+    try:
+        return str(UUID(normalized))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_mailing_id",
+            "O campo mailing_id deve conter uma lista válida.",
+        ) from exc
+
+
+def _source_list_membership_output_var(value: Any) -> str:
+    normalized = str(_catalog_parameter_scalar(value) or "source_list_membership").strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or SOURCE_LIST_MEMBERSHIP_OUTPUT_VAR_RE.fullmatch(normalized) is None
+    ):
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return normalized
+
+
+def _store_source_list_membership_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
+    component_ref_id: str | None,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = copy.deepcopy(output)
+    runtime_variables["source_list_membership_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _run_source_list_membership(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str:
+    params = _source_list_membership_parameters(component)
+    output_var = _source_list_membership_output_var(params.get("output_var"))
+    mailing_public_id = _source_list_membership_mailing_public_id(params.get("mailing_id"))
+    variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
+    person_uuid = _source_list_membership_person_uuid(
+        params.get("person_uuid"),
+        resolution_scope=resolution_scope,
+    )
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip() or None
+    branch = "not_found"
+    missing: str | None = None
+    source_list: dict[str, Any] | None = None
+    membership: dict[str, Any] | None = None
+
+    logger.info(
+        "workflow m2 source list membership started",
+        extra={
+            "event": "orch.workflow.m2.source_list_membership.started",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_uuid": person_uuid,
+            "mailing_id": mailing_public_id,
+        },
+    )
+
+    try:
+        async with db_session.begin_nested():
+            if person_uuid is None:
+                missing = "person"
+            else:
+                person = await fetch_person_by_uuid_for_update(
+                    db_session,
+                    person_uuid=person_uuid,
+                )
+                if person is None:
+                    missing = "person"
+                else:
+                    source_list = await resolve_source_list_by_public_id(
+                        db_session,
+                        public_id=mailing_public_id,
+                    )
+                    if source_list is None:
+                        missing = "mailing"
+                    else:
+                        source_status = str(source_list.get("status") or "").strip().upper()
+                        if source_status not in {"READY_TO_INGEST", "PROCESSED"}:
+                            raise WorkflowExecutionError(
+                                "source_list_membership_mailing_not_ready",
+                                "A lista selecionada precisa estar pronta ou processada.",
+                            )
+                        if not str(person.get("identifier") or "").strip():
+                            raise WorkflowExecutionError(
+                                "source_list_membership_person_without_identifier",
+                                "A pessoa selecionada não possui identificador para entrar na lista.",
+                            )
+                        membership = await ensure_person_in_source_list(
+                            db_session,
+                            source_list_id=int(source_list["id"]),
+                            person=person,
+                        )
+                        branch = "linked" if membership.get("created") else "already_linked"
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "source_list_membership_persistence_failed",
+            "Falha ao vincular a pessoa à lista.",
+        ) from exc
+
+    output = {
+        "action": branch,
+        "person_uuid": person_uuid,
+        "mailing_id": mailing_public_id,
+        "source_list_id": source_list.get("id") if source_list is not None else None,
+        "contact_draft_id": membership.get("contact_draft_id") if membership is not None else None,
+        "channels": membership.get("channels") if membership is not None else None,
+        "missing": missing,
+    }
+    _store_source_list_membership_output(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        output=output,
+        component_ref_id=component_ref_id,
+    )
+    runtime_variables.pop("source_list_membership_last_error", None)
+    logger.info(
+        "workflow m2 source list membership completed",
+        extra={
+            "event": "orch.workflow.m2.source_list_membership.completed",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_uuid": person_uuid,
+            "mailing_id": mailing_public_id,
+            "result_action": branch,
+            "missing": missing,
+        },
+    )
+    return branch
+
+
 def _build_generate_file_resolution_scope(
     *,
     runtime_variables: dict[str, Any],
@@ -5950,6 +6162,38 @@ async def execute_workflow_m2_for_session(
                             "workflow m2 create contact failed",
                             extra={
                                 "event": "orch.workflow.m2.create_contact.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                            },
+                        )
+                        branch_label = exception_branch
+                elif kind == "source_list_membership":
+                    try:
+                        branch_label = await _run_source_list_membership(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        if exception_branch is None:
+                            raise
+                        runtime_variables["source_list_membership_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 source list membership failed",
+                            extra={
+                                "event": "orch.workflow.m2.source_list_membership.failed",
                                 "flow_uuid": flow_uuid,
                                 "session_id": session_id,
                                 "component_ref_id": component.get("ref_id"),

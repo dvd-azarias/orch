@@ -62,6 +62,47 @@ async def fetch_person_by_identifier_for_update(
     return dict(row) if row is not None else None
 
 
+async def fetch_person_by_uuid_for_update(
+    db_session: AsyncSession,
+    *,
+    person_uuid: str,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                id,
+                uuid::text AS uuid,
+                identifier,
+                full_name,
+                company,
+                gender,
+                role,
+                country,
+                state,
+                city,
+                birthdate,
+                primary_channel_type,
+                primary_channel_value,
+                primary_channel_label,
+                channels,
+                extras,
+                last_contact_draft_id::text AS last_contact_draft_id,
+                last_source_list_id,
+                last_mailing_id
+            FROM persons
+            WHERE uuid = CAST(:person_uuid AS uuid)
+              AND merged_into_uuid IS NULL
+            LIMIT 1
+            FOR UPDATE
+            """
+        ),
+        {"person_uuid": person_uuid},
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
 async def insert_person_if_missing(
     db_session: AsyncSession,
     *,

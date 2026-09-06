@@ -102,6 +102,17 @@ A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint n
 6. A saída mínima (`action`, `person_uuid`, `identifier`, `changed_fields`) é gravada em `variables.customs[output_var]` e no diagnóstico `create_contact_last_result`.
 7. O fluxo segue por `created`, `updated`, `unchanged` ou `not_found`; falhas controladas seguem pela branch `exception` quando conectada.
 
+## Card `source_list_membership`
+
+1. Renderiza `person_uuid` no runtime; aceita a pessoa contextual ou a saída de um card anterior, como `{{contact_action.person_uuid}}`.
+2. Resolve a pessoa não mesclada por UUID e a lista pelo UUID público do mailing, ambos sob lock transacional. Template de pessoa não resolvido, pessoa ausente ou lista ausente seguem por `not_found` sem escrita parcial.
+3. Aceita somente listas em `READY_TO_INGEST` ou `PROCESSED`. Estado incompatível, UUID inválido ou pessoa sem identificador seguem por `exception` quando a branch estiver conectada.
+4. Cria um `contact_draft` com os dados atuais da pessoa ou reutiliza o draft de mesmo identificador já ligado à lista. Canais válidos são copiados/upsertados e os contadores da lista crescem apenas na criação.
+5. O lock da linha de `source_lists` serializa inserções concorrentes na mesma lista; repetição retorna `already_linked` e não duplica o vínculo.
+6. Atualiza em `persons` somente as referências `last_contact_draft_id`, `last_source_list_id`, `last_mailing_id` e `last_seen_at` relacionadas à associação.
+7. A saída é gravada em `variables.customs[output_var]` e em `source_list_membership_last_result`; branches normais são `linked`, `already_linked` e `not_found`.
+8. O card não chama o Target Core, não associa a lista ao flow, não materializa `contact_list_members` e não inicia sessões. Esses efeitos exigem comandos separados para evitar recursão/fan-out.
+
 ## FileApp — decisao
 
 A resolucao considera UUID de template no evento e configuracao do flow. Template ausente ou nao resolvido conduz ao caminho `tipo_2`; um valor presente mas invalido nao produz erro obrigatorio.
