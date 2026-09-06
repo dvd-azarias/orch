@@ -51,6 +51,7 @@ def test_normalize_identidade_person_excludes_dnd_from_actionable_channels() -> 
 
     assert normalized["identifier"] == "12345678901"
     assert normalized["full_name"] == "Manoel do Carmo"
+    assert normalized["birthdate"] == "1940-08-12"
     assert normalized["state"] == "RJ"
     assert normalized["city"] == "Itaborai"
     assert {(item["type"], item["value"]) for item in normalized["channels"]} == {
