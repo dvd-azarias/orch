@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-09-06 — Engine do card `wait_for_event`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o contrato já publicado no catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco médio por alterar bloqueio, dispatcher, callback e concorrência da sessão, sem migration, endpoint, fila ou efeito externo novo.
+
+### CHANGE
+
+- Armar uma espera finita no próprio cursor, com `state=0`, `frozen_until` e prazo persistido que não se renova em reentradas.
+- Comparar `event_name/result` sem distinção de maiúsculas/minúsculas e consumir somente callback posterior ao baseline do card e recebido até o prazo.
+- Preservar callbacks antigos, não correspondentes e tardios; emitir `received`, `timeout` ou `exception` e gravar saída em `variables.customs[output_var]`.
+- Serializar callback e executor pelo advisory lock `92021/session_id`. Um callback correspondente remove o congelamento e mantém `state=0`, cobrindo a corrida conhecida de enqueue antes do commit.
+- Registrar armamento/conclusão/erro e métricas sem colocar `entity` ou `data` nos logs.
+
+### VALIDATION
+
+- Testes focados de engine, dispatcher e repositório: `27 passed`.
+- Regressão direcionada de workflow/callback/revisão/tasks: `185 passed, 1 failed`; a falha usa a assinatura legada `trigger_orch(flow_uuid=...)` já pertencente à baseline.
+- PostgreSQL real fora da sandbox: `2 passed` para o novo ciclo callback→retomada e a regressão transacional de `source_list_membership`. A sessão de prova foi criada em transação revertida e a consulta posterior confirmou zero resíduo pelo UUID.
+- Suíte completa fora da sandbox: `518 passed, 27 failed`. Vinte e seis falhas reproduzem a baseline legada; a falha adicional de prepared statement em teste antigo com tabela temporária passou isoladamente logo depois.
+- `py_compile` e `git diff --check` passaram. `ruff` não está instalado na `.venv` atual.
+- Stack local completa reiniciada na branch com perfil `f5_local`; API, três workers e dois Beats ficaram `up` em TTY persistente.
+- Smokes encadeados criaram as sessões `7366` e `7367`, ambas concluídas em `state=3` e com zero alarmes. Esses flows não possuem o card novo e comprovam regressão da stack, não o E2E de `wait_for_event`.
+- A busca no workspace de teste não encontrou revisão contendo `wait_for_event`; canário real de `received` e `timeout` permanece pendente.
+
+### RISK / ROLLBACK
+
+A correlação Alpha continua escolhendo uma sessão ativa por `flow_uuid + entity`; sessões paralelas com a mesma entidade permanecem ambíguas (R32). Para rollback, impedir novos usos e resolver/aguardar as esperas ativas antes de reverter a engine, pois o código anterior trataria o cursor ainda posicionado no card como componente não suportado. Não há migration ou efeito externo a desfazer.
+
 ## 2026-09-06 — Engine do card `source_list_membership`
 
 ### REQUEST / CLASSIFICATION

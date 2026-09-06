@@ -113,6 +113,18 @@ A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint n
 7. A saída é gravada em `variables.customs[output_var]` e em `source_list_membership_last_result`; branches normais são `linked`, `already_linked` e `not_found`.
 8. O card não chama o Target Core, não associa a lista ao flow, não materializa `contact_list_members` e não inicia sessões. Esses efeitos exigem comandos separados para evitar recursão/fan-out.
 
+## Card `wait_for_event`
+
+1. Ao alcançar o card pela primeira vez, normaliza o envelope, registra o índice atual de `callbacks_pending` e persiste em `workflow_v2.wait_for_event` o card, origem, resultado, instante de bloqueio e prazo imutável.
+2. Mantém o cursor no próprio card, grava `frozen_until=timeout_at`, marca `blocked_wait_for_event` e retorna a sessão para `state=0`. O dispatcher não a reivindica antes do prazo.
+3. O callback entra pela rota canônica com `event_name=callback`, a mesma `entity` e o `result` esperado. A persistência serializa com o lock `92021/session_id`, anexa o evento e, somente no match exato, remove o congelamento e mantém a sessão elegível.
+4. O índice-base impede que callbacks já pendentes antes do armamento liberem o card. Eventos novos com outra origem/resultado e callbacks recebidos depois do prazo são preservados, não consumidos.
+5. Na retomada, um callback correspondente recebido até o prazo vence e segue por `received`; sem ele, o instante `timeout_at` segue por `timeout`. O prazo nunca é renovado por reentrada ou callback alheio.
+6. O resultado é gravado em `variables.customs[output_var]` e em `wait_for_event_last_result`. O caminho recebido contém `status`, `event_source`, `event_result`, `received_at` e `data`; timeout contém os três primeiros campos e `timeout_at`.
+7. Falha de configuração/estado usa `exception` quando conectada; sem essa branch, termina de forma diagnosticável. O card não cria endpoint, fila, ledger, migration ou retry externo próprio.
+
+A correlação continua sendo o contrato Alpha preexistente `flow_uuid + entity`, que seleciona uma sessão ativa. Ela não distingue duas sessões simultâneas do mesmo flow e entidade; consulte R32.
+
 ## FileApp — decisao
 
 A resolucao considera UUID de template no evento e configuracao do flow. Template ausente ou nao resolvido conduz ao caminho `tipo_2`; um valor presente mas invalido nao produz erro obrigatorio.

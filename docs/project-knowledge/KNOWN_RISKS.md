@@ -613,3 +613,21 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `EVIDENCE`: o E2E local `7340` terminou em `state=3`, zero alarmes, runtime ISO, atualização real e POST externo `200/received`. Após implantação do merge `792f39e` nos hosts `10.1.20.136` e `10.1.20.237`, o canário `7341` repetiu o resultado em produção: `state=3`, zero alarmes, `birth_date=1940-08-12`, ação `updated` e destino externo `200/received`. Todos os dados temporários foram restaurados e a auditoria tardia encontrou zero sessões ativas e zero alarmes.
 
 `V2`: definir um contrato tipado e centralizado de serialização do runtime, com rejeição explícita de valores fora do conjunto JSON.
+
+## R32 — Callback genérico não distingue sessões paralelas da mesma entidade
+
+`STATUS`: ACCEPTED ALPHA LIMITATION / DOCUMENTED
+
+`IMPACT`: high quando há mais de uma sessão ativa; low com entidade única
+
+`PROBABILITY`: low em execução por pessoa ou GenericApp com `external_id` único; high em fan-out por canal que reutilize a mesma entidade
+
+`AFFECTED AREA`: `wait_for_event` / callback genérico / correlação de sessão
+
+`DESCRIPTION`: o contrato existente correlaciona callback por `flow_uuid + entity` e seleciona a sessão ativa mais recente. O card não introduz `session_uuid`, chave arbitrária ou índice adicional. Portanto, duas sessões simultâneas do mesmo flow e entidade não podem ser endereçadas deterministicamente; o callback pode entrar na sessão mais nova e não liberar a espera pretendida. A baseline de `callbacks_pending` evita reaproveitar evento antigo dentro de uma sessão, mas não resolve ambiguidade entre sessões.
+
+`MITIGATION`: usar `external_id/entity` único por execução ou garantir no desenho operacional que exista somente uma sessão ativa por `flow_uuid + entity`. Não habilitar o card em fan-out por canal com entidade compartilhada sem validar essa premissa. O runtime registra card, prazo e resultado esperado sem expor a entidade em logs.
+
+`DETECTION`: procurar sessões `state=0` com `workflow_v2.blocking_stop_reason=blocked_wait_for_event` agrupadas pelo mesmo `flow_uuid/entity`; comparar `callbacks_pending`, `callback_at` e `timeout_at` antes de intervir.
+
+`V2`: correlação explícita e indexada por `session_uuid`/correlation key, com inbox idempotente e política declarada para evento sem consumidor.

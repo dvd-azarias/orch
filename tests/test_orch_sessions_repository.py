@@ -14,6 +14,7 @@ from app.repositories.orch_sessions_repository import (
     apply_switch_bot_flow_callback,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
+    persist_callback_event_for_active_entity,
     persist_contact_member_outbound_hsm,
     persist_run_flow_event_for_recent_entity_address,
     set_session_cdr,
@@ -264,9 +265,62 @@ class _CallbackResult:
 class _CallbackSession:
     def __init__(self, results: list[_CallbackResult]) -> None:
         self.results = results
+        self.statements: list[str] = []
+        self.parameters: list[dict] = []
 
     async def execute(self, _statement, _parameters=None) -> _CallbackResult:  # noqa: ANN001
+        self.statements.append(str(_statement))
+        self.parameters.append(_parameters or {})
         return self.results.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_callback_serializes_with_executor_and_wakes_matching_wait() -> None:
+    session = _CallbackSession(
+        [
+            _CallbackResult(),
+            _CallbackResult(),
+            _CallbackResult(scalar_value=7001),
+            _CallbackResult(),
+            _CallbackResult(
+                row={
+                    "id": 7001,
+                    "uuid": "orch-session-uuid",
+                    "state": 0,
+                }
+            ),
+        ]
+    )
+
+    result = await persist_callback_event_for_active_entity(
+        session,  # type: ignore[arg-type]
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="GenericApp",
+        entity="person-1",
+        payload={
+            "event_name": "callback",
+            "entity": "person-1",
+            "result": "APPROVED",
+            "data": {"approval_id": "ap-1"},
+        },
+        extracted={
+            "entity": "person-1",
+            "entity_type": "person",
+            "entity_address": "person-1",
+            "entity_session_id": "person-1",
+        },
+    )
+
+    assert result is not None
+    assert result.id == 7001
+    assert result.state == 0
+    assert "pg_advisory_xact_lock(:class_id, :object_id)" in session.statements[3]
+    assert session.parameters[3] == {"class_id": 92021, "object_id": 7001}
+    assert "blocked_wait_for_event" in session.statements[4]
+    assert "THEN 0" in session.statements[4]
+    assert "frozen_until = CASE" in session.statements[4]
+    assert session.parameters[4]["event_name"] == "callback"
+    assert session.parameters[4]["event_result"] == "approved"
 
 
 @pytest.mark.asyncio

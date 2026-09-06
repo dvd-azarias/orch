@@ -55,6 +55,7 @@ from app.repositories.orch_channel_events_repository import (
 from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
+    clear_session_frozen_until,
     ensure_session_workflow_revision_pin,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
@@ -106,6 +107,10 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "switch_bot_flow": "blocked_switch_bot_flow",
     "identidade_person": "blocked_identidade_person_flow_link",
 }
+WAIT_FOR_EVENT_BLOCKING_STOP_REASON = "blocked_wait_for_event"
+WAIT_FOR_EVENT_RESULT_RE = re.compile(r"[A-Za-z0-9._:-]+$")
+WAIT_FOR_EVENT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
     "sent": "sent",
@@ -170,6 +175,11 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "whatsapp_hsm_persist_failed",
     "whatsapp_hsm_template_missing",
     "whatsapp_hsm_variable_unresolved",
+    "wait_for_event_invalid_event_source",
+    "wait_for_event_invalid_event_result",
+    "wait_for_event_invalid_timeout_seconds",
+    "wait_for_event_invalid_output_var",
+    "wait_for_event_state_mismatch",
 }
 WHATSAPP_HSM_ERROR_CODES = {
     code for code in TERMINAL_WORKFLOW_ERROR_CODES if code.startswith("whatsapp_hsm_")
@@ -194,6 +204,12 @@ class WorkflowExecutionResult:
     stopped_reason: str
     last_card_uuid: str | None
     next_card_uuid: str | None
+
+
+@dataclass(frozen=True)
+class _WaitForEventExecution:
+    branch_label: str | None
+    timeout_at: datetime
 
 
 @dataclass(frozen=True)
@@ -3239,6 +3255,258 @@ def _catalog_parameter_bool(value: Any) -> bool:
     return str(scalar or "").strip().lower() in {"1", "true", "yes", "sim", "on", "enabled"}
 
 
+def _wait_for_event_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _wait_for_event_config(component: dict[str, Any]) -> tuple[str, str, int, str]:
+    params = _wait_for_event_parameters(component)
+
+    event_source = str(_catalog_parameter_scalar(params.get("event_source")) or "").strip().lower()
+    if event_source != "callback":
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_event_source",
+            "O campo event_source deve ser callback.",
+        )
+
+    event_result = str(_catalog_parameter_scalar(params.get("event_result")) or "").strip().lower()
+    if (
+        not event_result
+        or len(event_result) > 128
+        or WAIT_FOR_EVENT_RESULT_RE.fullmatch(event_result) is None
+    ):
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_event_result",
+            "O campo event_result deve conter um resultado literal válido.",
+        )
+
+    raw_timeout = _catalog_parameter_scalar(params.get("timeout_seconds"))
+    try:
+        if isinstance(raw_timeout, bool):
+            raise ValueError
+        timeout_seconds = int(str(raw_timeout).strip())
+    except (TypeError, ValueError):
+        timeout_seconds = 0
+    if not 1 <= timeout_seconds <= WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS:
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_timeout_seconds",
+            "O campo timeout_seconds deve ser um inteiro entre 1 e 2592000.",
+        )
+
+    output_var = str(_catalog_parameter_scalar(params.get("output_var")) or "wait_event").strip()
+    if (
+        not output_var
+        or len(output_var) > 128
+        or WAIT_FOR_EVENT_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+
+    return event_source, event_result, timeout_seconds, output_var
+
+
+def _clear_wait_for_event_state(runtime_variables: dict[str, Any]) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta.pop("wait_for_event", None)
+
+
+def _wait_for_event_matching_callback_index(
+    runtime_variables: dict[str, Any],
+    *,
+    state: dict[str, Any],
+) -> int | None:
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if not isinstance(callbacks_pending, list):
+        return None
+
+    try:
+        pending_start_index = max(0, int(state.get("pending_start_index", 0)))
+    except (TypeError, ValueError):
+        return None
+
+    timeout_at = _parse_iso_datetime(state.get("timeout_at"))
+    if timeout_at is None:
+        return None
+    timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
+    expected_source = str(state.get("event_source") or "").strip().lower()
+    expected_result = str(state.get("event_result") or "").strip().lower()
+
+    for index, callback in enumerate(callbacks_pending):
+        if index < pending_start_index or not isinstance(callback, dict):
+            continue
+        if str(callback.get("event_name") or "").strip().lower() != expected_source:
+            continue
+        if str(callback.get("result") or "").strip().lower() != expected_result:
+            continue
+        received_at = _parse_iso_datetime(callback.get("received_at"))
+        if received_at is None:
+            continue
+        received_at_utc = received_at if received_at.tzinfo is not None else received_at.replace(tzinfo=timezone.utc)
+        if received_at_utc <= timeout_at_utc:
+            return index
+    return None
+
+
+def _should_resume_wait_for_event_blocking_execution(
+    runtime_variables: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    raw_state = workflow_meta.get("wait_for_event")
+    if not isinstance(raw_state, dict):
+        return True
+    timeout_at = _parse_iso_datetime(raw_state.get("timeout_at"))
+    if timeout_at is None:
+        return True
+    if _wait_for_event_matching_callback_index(runtime_variables, state=raw_state) is not None:
+        return True
+    current_time = now or datetime.now(timezone.utc)
+    current_time_utc = current_time if current_time.tzinfo is not None else current_time.replace(tzinfo=timezone.utc)
+    timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
+    return current_time_utc >= timeout_at_utc
+
+
+def _store_wait_for_event_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
+    component_ref_id: str | None,
+    updated_at: datetime,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = copy.deepcopy(output)
+    runtime_variables["wait_for_event_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
+        "updated_at": updated_at.isoformat(),
+    }
+
+
+def _run_wait_for_event(
+    *,
+    component: dict[str, Any],
+    current_card_uuid: str,
+    runtime_variables: dict[str, Any],
+    now: datetime | None = None,
+) -> _WaitForEventExecution:
+    event_source, event_result, timeout_seconds, output_var = _wait_for_event_config(component)
+    current_time = now or datetime.now(timezone.utc)
+    current_time_utc = current_time if current_time.tzinfo is not None else current_time.replace(tzinfo=timezone.utc)
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    raw_state = workflow_meta.get("wait_for_event")
+
+    if raw_state is None:
+        callbacks_pending = runtime_variables.get("callbacks_pending")
+        pending_start_index = len(callbacks_pending) if isinstance(callbacks_pending, list) else 0
+        timeout_at = current_time_utc + timedelta(seconds=timeout_seconds)
+        workflow_meta["wait_for_event"] = {
+            "component_ref_id": component.get("ref_id"),
+            "card_cursor": current_card_uuid,
+            "event_source": event_source,
+            "event_result": event_result,
+            "timeout_seconds": timeout_seconds,
+            "output_var": output_var,
+            "pending_start_index": pending_start_index,
+            "blocked_at": current_time_utc.isoformat(),
+            "timeout_at": timeout_at.isoformat(),
+            "status": "waiting",
+        }
+        runtime_variables.pop("wait_for_event_last_error", None)
+        return _WaitForEventExecution(branch_label=None, timeout_at=timeout_at)
+
+    if not isinstance(raw_state, dict):
+        raise WorkflowExecutionError(
+            "wait_for_event_state_mismatch",
+            "O estado persistido do wait_for_event é inválido.",
+        )
+
+    expected_state = {
+        "card_cursor": current_card_uuid,
+        "event_source": event_source,
+        "event_result": event_result,
+        "timeout_seconds": timeout_seconds,
+        "output_var": output_var,
+    }
+    if any(raw_state.get(key) != value for key, value in expected_state.items()):
+        raise WorkflowExecutionError(
+            "wait_for_event_state_mismatch",
+            "O estado persistido do wait_for_event não corresponde ao card atual.",
+        )
+
+    timeout_at = _parse_iso_datetime(raw_state.get("timeout_at"))
+    if timeout_at is None:
+        raise WorkflowExecutionError(
+            "wait_for_event_state_mismatch",
+            "O prazo persistido do wait_for_event é inválido.",
+        )
+    timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
+
+    callback_index = _wait_for_event_matching_callback_index(runtime_variables, state=raw_state)
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if callback_index is not None and isinstance(callbacks_pending, list):
+        callback = callbacks_pending.pop(callback_index)
+        if isinstance(callback, dict):
+            runtime_variables["callback"] = copy.deepcopy(callback)
+            output = {
+                "status": "received",
+                "event_source": event_source,
+                "event_result": event_result,
+                "received_at": callback.get("received_at"),
+                "data": copy.deepcopy(callback.get("data")) if isinstance(callback.get("data"), dict) else {},
+            }
+            _store_wait_for_event_output(
+                runtime_variables=runtime_variables,
+                output_var=output_var,
+                output=output,
+                component_ref_id=(str(component.get("ref_id")) if component.get("ref_id") is not None else None),
+                updated_at=current_time_utc,
+            )
+            _clear_wait_for_event_state(runtime_variables)
+            runtime_variables.pop("wait_for_event_last_error", None)
+            return _WaitForEventExecution(branch_label="received", timeout_at=timeout_at_utc)
+
+    if current_time_utc >= timeout_at_utc:
+        output = {
+            "status": "timeout",
+            "event_source": event_source,
+            "event_result": event_result,
+            "timeout_at": timeout_at_utc.isoformat(),
+        }
+        _store_wait_for_event_output(
+            runtime_variables=runtime_variables,
+            output_var=output_var,
+            output=output,
+            component_ref_id=(str(component.get("ref_id")) if component.get("ref_id") is not None else None),
+            updated_at=current_time_utc,
+        )
+        _clear_wait_for_event_state(runtime_variables)
+        runtime_variables.pop("wait_for_event_last_error", None)
+        return _WaitForEventExecution(branch_label="timeout", timeout_at=timeout_at_utc)
+
+    return _WaitForEventExecution(branch_label=None, timeout_at=timeout_at_utc)
+
+
 def _identidade_enum_parameter(
     params: dict[str, Any],
     *,
@@ -5627,6 +5895,7 @@ async def execute_workflow_m2_for_session(
         finished_at = datetime.now(timezone.utc)
         total_latency_ms = (time.perf_counter() - execution_started_perf) * 1000
         success_stop_reasons = {
+            "blocked_wait_for_event",
             "finished_by_component",
             "scheduled_wait",
             "end_of_branch",
@@ -6000,10 +6269,16 @@ async def execute_workflow_m2_for_session(
                 or blocking_stop_reason in DIALER_BLOCKING_STOP_REASONS
             )
         )
+        should_preempt_wait_for_event = (
+            blocking_stop_reason == WAIT_FOR_EVENT_BLOCKING_STOP_REASON
+            and _should_resume_wait_for_event_blocking_execution(runtime_variables)
+        )
         if isinstance(frozen_until, datetime):
             frozen_until_utc = frozen_until if frozen_until.tzinfo is not None else frozen_until.replace(tzinfo=timezone.utc)
             if frozen_until_utc > datetime.now(timezone.utc) and not (
-                should_preempt_to_whatsapp_resume_cursor or should_preempt_to_dialer_resume_cursor
+                should_preempt_to_whatsapp_resume_cursor
+                or should_preempt_to_dialer_resume_cursor
+                or should_preempt_wait_for_event
             ):
                 return await _finalize(
                     WorkflowExecutionResult(
@@ -6054,7 +6329,10 @@ async def execute_workflow_m2_for_session(
                     last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
-            elif _should_resume_run_flow_blocking_execution(runtime_variables):
+            elif (
+                blocking_stop_reason in RUN_FLOW_BLOCKING_STOP_REASONS
+                and _should_resume_run_flow_blocking_execution(runtime_variables)
+            ):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -6063,6 +6341,11 @@ async def execute_workflow_m2_for_session(
                     last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
+            elif (
+                blocking_stop_reason == WAIT_FOR_EVENT_BLOCKING_STOP_REASON
+                and _should_resume_wait_for_event_blocking_execution(runtime_variables)
+            ):
+                _clear_blocking_execution(runtime_variables)
             elif _should_resume_switch_bot_flow_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
@@ -6201,6 +6484,125 @@ async def execute_workflow_m2_for_session(
                             },
                         )
                         branch_label = exception_branch
+                elif kind == "wait_for_event":
+                    try:
+                        wait_execution = _run_wait_for_event(
+                            component=component,
+                            current_card_uuid=next_card_uuid,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        _clear_wait_for_event_state(runtime_variables)
+                        _clear_blocking_execution(runtime_variables)
+                        await clear_session_frozen_until(
+                            db_session,
+                            session_id=session_id,
+                        )
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        runtime_variables["wait_for_event_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 wait for event failed",
+                            extra={
+                                "event": "orch.workflow.m2.wait_for_event.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
+                        branch_label = exception_branch
+                    else:
+                        branch_label = wait_execution.branch_label
+                        if branch_label is None:
+                            last_card_uuid = next_card_uuid
+                            next_card_uuid = last_card_uuid
+                            executed_steps += 1
+                            _set_cursors(
+                                runtime_variables,
+                                last_cursor=last_card_uuid,
+                                next_cursor=next_card_uuid,
+                            )
+                            _mark_blocking_execution(
+                                runtime_variables,
+                                stopped_reason=WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                            )
+                            _reset_loop_guard_counter(runtime_variables)
+                            await replace_session_workflow_state(
+                                db_session,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                                next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                                frozen_until=wait_execution.timeout_at,
+                            )
+                            step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                            step_finished_at = datetime.now(timezone.utc)
+                            _append_metric(
+                                metric_type="card",
+                                status="success",
+                                started_at=step_started_at,
+                                finished_at=step_finished_at,
+                                latency_ms=step_latency_ms,
+                                stopped_reason=WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                                step_index=executed_steps,
+                                card_cursor=last_card_uuid,
+                                component_kind_value=kind,
+                                details={
+                                    "next_card_uuid": next_card_uuid,
+                                    "timeout_at": wait_execution.timeout_at.isoformat(),
+                                },
+                            )
+                            logger.info(
+                                "workflow m2 wait for event armed",
+                                extra={
+                                    "event": "orch.workflow.m2.wait_for_event.armed",
+                                    "flow_uuid": flow_uuid,
+                                    "session_id": session_id,
+                                    "session_uuid": session_uuid_for_metrics,
+                                    "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
+                                    "component_ref_id": component.get("ref_id"),
+                                    "timeout_at": wait_execution.timeout_at.isoformat(),
+                                    "stopped_reason": WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                                },
+                            )
+                            return await _finalize(
+                                WorkflowExecutionResult(
+                                    True,
+                                    executed_steps,
+                                    WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                                    last_card_uuid,
+                                    next_card_uuid,
+                                )
+                            )
+
+                        _clear_wait_for_event_state(runtime_variables)
+                        _clear_blocking_execution(runtime_variables)
+                        await clear_session_frozen_until(
+                            db_session,
+                            session_id=session_id,
+                        )
+                        logger.info(
+                            "workflow m2 wait for event completed",
+                            extra={
+                                "event": "orch.workflow.m2.wait_for_event.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "outcome": branch_label,
+                            },
+                        )
                 elif kind == "condition":
                     branch_label = _resolve_condition_branch_label(
                         definition=definition,

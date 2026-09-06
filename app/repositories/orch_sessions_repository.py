@@ -936,6 +936,34 @@ async def persist_callback_event_for_active_entity(
         {"lock_key": lock_key},
     )
 
+    candidate_result = await db_session.execute(
+        text(
+            """
+            SELECT id
+            FROM orch_sessions
+            WHERE
+                flow_uuid = CAST(:flow_uuid AS uuid)
+                AND entity = :entity
+                AND unassigned_at IS NULL
+                AND ended_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "entity": entity,
+        },
+    )
+    candidate_id = candidate_result.scalar()
+    if candidate_id is None:
+        return None
+
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
+        {"class_id": 92021, "object_id": int(candidate_id)},
+    )
+
     update_result = await db_session.execute(
         text(
             """
@@ -948,25 +976,41 @@ async def persist_callback_event_for_active_entity(
                         || CAST(:callback_payload AS jsonb),
                     true
                 ),
+                state = CASE
+                    WHEN
+                        COALESCE(runtime_variables #>> '{workflow_v2,blocking_stop_reason}', '')
+                            = 'blocked_wait_for_event'
+                        AND LOWER(COALESCE(runtime_variables #>> '{workflow_v2,wait_for_event,event_source}', ''))
+                            = :event_name
+                        AND LOWER(COALESCE(runtime_variables #>> '{workflow_v2,wait_for_event,event_result}', ''))
+                            = :event_result
+                    THEN 0
+                    ELSE state
+                END,
+                frozen_until = CASE
+                    WHEN
+                        COALESCE(runtime_variables #>> '{workflow_v2,blocking_stop_reason}', '')
+                            = 'blocked_wait_for_event'
+                        AND LOWER(COALESCE(runtime_variables #>> '{workflow_v2,wait_for_event,event_source}', ''))
+                            = :event_name
+                        AND LOWER(COALESCE(runtime_variables #>> '{workflow_v2,wait_for_event,event_result}', ''))
+                            = :event_result
+                    THEN NULL
+                    ELSE frozen_until
+                END,
                 callback_at = NOW(),
                 updated_at = NOW()
-            WHERE id = (
-                SELECT id
-                FROM orch_sessions
-                WHERE
-                    flow_uuid = CAST(:flow_uuid AS uuid)
-                    AND entity = :entity
-                    AND unassigned_at IS NULL
-                    AND ended_at IS NULL
-                ORDER BY created_at DESC
-                LIMIT 1
-            )
+            WHERE
+                id = :session_id
+                AND unassigned_at IS NULL
+                AND ended_at IS NULL
             RETURNING id, uuid::text AS uuid, state
             """
         ),
         {
-            "flow_uuid": flow_uuid,
-            "entity": entity,
+            "session_id": int(candidate_id),
+            "event_name": callback_payload["event_name"],
+            "event_result": callback_payload["result"],
             "runtime_patch": runtime_patch_json,
             "callback_payload": callback_payload_json,
         },
@@ -1577,6 +1621,25 @@ async def replace_session_workflow_state(
             "ended_at": ended_at,
             "state": state,
         },
+    )
+
+
+async def clear_session_frozen_until(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+) -> None:
+    await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                frozen_until = NULL,
+                updated_at = NOW()
+            WHERE id = :session_id
+            """
+        ),
+        {"session_id": session_id},
     )
 
 
