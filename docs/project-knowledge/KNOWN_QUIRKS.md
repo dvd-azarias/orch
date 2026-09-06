@@ -49,3 +49,7 @@ Scripts locais usam `--hostname` e `-n` no mesmo comando; ambos representam a me
 ## Smoke e health sao parciais
 
 Smoke confirma aceite HTTP; health Celery aceita qualquer worker. Nenhum deles, isoladamente, prova a topologia ou o E2E.
+
+## Helpers SQL do `create_contact` aposentado
+
+`orch_sessions_repository.py` ainda contém helpers sem callers para o contrato embrionário que criava lista padrão, membro e sessão filha. Eles foram desconectados do motor e não fazem parte do contrato atual. Não os reutilizar; a persistência válida do card fica em `create_contact_repository.py` e alcança somente `persons`.

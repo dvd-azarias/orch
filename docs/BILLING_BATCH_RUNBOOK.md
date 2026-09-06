@@ -19,7 +19,8 @@ O produtor sincrono registra somente `orch_billing_events`. Falha nessa gravacao
 - legado: `ORCH_BILLING_SNAPSHOT_ENABLED=false`;
 - batch: `ORCH_BILLING_ENABLED=false`;
 - o carregamento de configuracao falha se ambas estiverem `true`;
-- `session_service` e o caminho `create_contact` escolhem explicitamente apenas um produtor;
+- somente caminhos que criam `orch_sessions`, como `session_service`, selecionam um produtor;
+- o contrato atual de `create_contact` não cria sessões filhas e, portanto, não publica billing próprio;
 - `orch_billing_usage_snapshots` e o CLI `billing-backfill` continuam legados e nao alimentam o batch;
 - nenhuma tabela legada e removida pela migration `0022`.
 

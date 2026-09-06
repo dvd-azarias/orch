@@ -34,6 +34,7 @@
 - Em cards HSM WhatsApp, o ORCH escreve em `contact_list_members` os campos Target-owned `outbound_hsm`, chave de idempotência, instante, sessão e `component_ref_id`; a migration pertence ao Target Core.
 - Ownership confirmado do Target Core: `contact_list_members` e `linked_actuator_enum`.
 - Ownership formal de `source_lists`, `persons` e drafts: `UNKNOWN`, apesar de haver escrita ORCH no FileApp, `create_contact` e `identidade_person`.
+- O novo contrato de `create_contact` escreve somente campos cadastrais e `extras` de `persons`. Não altera `identifier`, campos de canal, referências de lista/mailing, membros ou `orch_sessions`.
 - `source_list_members`: nao referenciada pelo codigo FileApp.
 
 ## Migrations

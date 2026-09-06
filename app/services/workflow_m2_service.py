@@ -15,7 +15,7 @@ import textwrap
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib import parse, request
@@ -29,6 +29,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
+from app.repositories.create_contact_repository import (
+    fetch_create_contact_person_by_identifier_for_update,
+    fetch_create_contact_person_by_uuid_for_update,
+    insert_create_contact_person_if_missing,
+    update_create_contact_person_profile,
+)
 from app.repositories.flow_v2_repository import fetch_flow_row
 from app.repositories.identidade_person_repository import (
     ensure_person_in_source_list,
@@ -49,21 +55,14 @@ from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
     ensure_session_workflow_revision_pin,
-    ensure_contact_list_member_for_create_contact,
-    ensure_default_source_list_for_create_contact,
-    ensure_session_for_created_contact,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
     fetch_session_workflow_state,
-    increment_source_list_counters_for_create_contact,
     persist_contact_member_outbound_hsm,
     replace_session_workflow_state,
-    upsert_person_for_create_contact,
 )
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
-from app.services.billing_batch_service import try_record_billing_event
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
-from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.identidade_person_service import (
     IdentidadePersonQueryResult,
@@ -3731,302 +3730,476 @@ async def _run_identidade_person(
     return "encontrado"
 
 
-def _normalize_create_contact_mapping_key(raw_key: str) -> str:
-    token = str(raw_key or "").strip().lower()
-    token = (
-        token.replace("ç", "c")
-        .replace("ã", "a")
-        .replace("á", "a")
-        .replace("à", "a")
-        .replace("â", "a")
-        .replace("é", "e")
-        .replace("ê", "e")
-        .replace("í", "i")
-        .replace("ó", "o")
-        .replace("ô", "o")
-        .replace("õ", "o")
-        .replace("ú", "u")
-    )
-    token = token.replace("-", "_").replace(" ", "_")
-    aliases = {
-        "identificador": "identifier",
-        "identifier": "identifier",
-        "id": "identifier",
-        "contact_identifier": "identifier",
-        "endereco": "address",
-        "endereço": "address",
-        "address": "address",
-        "entity_address": "address",
-        "telefone": "address",
-        "phone": "address",
-        "nome": "full_name",
-        "name": "full_name",
-        "full_name": "full_name",
-        "contact_full_name": "full_name",
-    }
-    return aliases.get(token, token)
+CREATE_CONTACT_ACTIONS = {"update_current", "create_if_missing", "upsert"}
+CREATE_CONTACT_ENRICHMENT_POLICIES = {"fill_missing", "overwrite_non_null"}
+CREATE_CONTACT_PROFILE_FIELDS = (
+    "full_name",
+    "company",
+    "gender",
+    "role",
+    "country",
+    "state",
+    "city",
+    "birthdate",
+)
+CREATE_CONTACT_EXTRA_FIELD_RE = re.compile(
+    r"extra\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
+)
+CREATE_CONTACT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _extract_create_contact_mapping(component: dict[str, Any]) -> list[tuple[str, Any]]:
-    params = component.get("parameters")
-    if not isinstance(params, dict):
-        return []
-    raw_mapping = params.get("mapping")
-    entries: list[tuple[str, Any]] = []
-    if isinstance(raw_mapping, list):
-        for item in raw_mapping:
-            if not isinstance(item, dict):
+def _create_contact_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
                 continue
-            raw_key = item.get("key") or item.get("field") or item.get("name")
-            if raw_key is None:
-                continue
-            entries.append((str(raw_key), item.get("value")))
-    elif isinstance(raw_mapping, dict):
-        for raw_key, value in raw_mapping.items():
-            entries.append((str(raw_key), value))
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _create_contact_enum_parameter(
+    params: dict[str, Any],
+    *,
+    field: str,
+    allowed: set[str],
+) -> str:
+    value = str(_catalog_parameter_scalar(params.get(field)) or "").strip().lower()
+    if value not in allowed:
+        raise WorkflowExecutionError(
+            f"create_contact_invalid_{field}",
+            f"O campo {field} possui um valor inválido.",
+        )
+    return value
+
+
+def _create_contact_output_var(value: Any) -> str:
+    normalized = str(_catalog_parameter_scalar(value) or "contact_action").strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or CREATE_CONTACT_OUTPUT_VAR_RE.fullmatch(normalized) is None
+    ):
+        raise WorkflowExecutionError(
+            "create_contact_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return normalized
+
+
+def _create_contact_mapping_entries(mapping: Any) -> list[tuple[str, Any]]:
+    if isinstance(mapping, dict):
+        entries = [(str(key).strip(), value) for key, value in mapping.items()]
+    elif isinstance(mapping, list):
+        entries = []
+        for entry in mapping:
+            if not isinstance(entry, dict):
+                raise WorkflowExecutionError(
+                    "create_contact_invalid_mapping",
+                    "O campo mapping possui uma estrutura inválida.",
+                )
+            entries.append((str(entry.get("key") or "").strip(), entry.get("value")))
+    else:
+        entries = []
+
+    if not entries:
+        raise WorkflowExecutionError(
+            "create_contact_missing_mapping",
+            "O campo mapping deve declarar ao menos um dado do contato.",
+        )
+
+    seen: set[str] = set()
+    extra_paths: list[tuple[str, ...]] = []
+    for key, _ in entries:
+        if (
+            not key
+            or key in seen
+            or len(key) > 128
+            or (
+                key not in CREATE_CONTACT_PROFILE_FIELDS
+                and CREATE_CONTACT_EXTRA_FIELD_RE.fullmatch(key) is None
+            )
+        ):
+            raise WorkflowExecutionError(
+                "create_contact_invalid_mapping_field",
+                "O mapping contém campo vazio, duplicado ou não permitido.",
+            )
+        if key.startswith("extra."):
+            path = tuple(key.removeprefix("extra.").split("."))
+            if any(
+                path[: len(existing_path)] == existing_path
+                or existing_path[: len(path)] == path
+                for existing_path in extra_paths
+            ):
+                raise WorkflowExecutionError(
+                    "create_contact_conflicting_extra_mapping",
+                    "O mapping contém chaves extra com caminhos conflitantes.",
+                )
+            extra_paths.append(path)
+        seen.add(key)
     return entries
 
 
-def _coerce_record_value(value: Any) -> str:
-    if value is None:
-        return ""
+def _create_contact_is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip()) or value == [] or value == {}
+
+
+def _create_contact_profile_value(field: str, value: Any) -> Any:
+    if _create_contact_is_blank(value):
+        return None
+    if isinstance(value, (dict, list, tuple, set)):
+        raise WorkflowExecutionError(
+            "create_contact_invalid_mapping_value",
+            f"O campo {field} deve resultar em um valor simples.",
+        )
+    if field == "birthdate":
+        try:
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, date):
+                return value
+            return date.fromisoformat(str(value).strip())
+        except ValueError as exc:
+            raise WorkflowExecutionError(
+                "create_contact_invalid_birthdate",
+                "O campo birthdate deve usar o formato AAAA-MM-DD.",
+            ) from exc
     return str(value).strip()
 
 
-def _build_create_contact_records(
+def _create_contact_json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _create_contact_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_create_contact_json_safe(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _build_create_contact_payload(
     *,
-    component: dict[str, Any],
+    mapping: Any,
     resolution_scope: dict[str, Any],
-) -> list[dict[str, Any]]:
-    mapping_entries = _extract_create_contact_mapping(component)
-    if not mapping_entries:
+) -> tuple[dict[str, Any], list[str]]:
+    payload: dict[str, Any] = {}
+    extras: dict[str, Any] = {}
+    configured_fields: list[str] = []
+    for key, raw_value in _create_contact_mapping_entries(mapping):
+        value = _render_value(raw_value, resolution_scope)
+        if _create_contact_is_blank(value):
+            continue
+        if key in CREATE_CONTACT_PROFILE_FIELDS:
+            payload[key] = _create_contact_profile_value(key, value)
+        else:
+            _set_by_path(extras, key.removeprefix("extra."), _create_contact_json_safe(value))
+        configured_fields.append(key)
+
+    if not configured_fields:
         raise WorkflowExecutionError(
-            "create_contact_missing_mapping",
-            "Componente create_contact sem parâmetro mapping.",
+            "create_contact_empty_mapping",
+            "Nenhum valor do mapping pôde ser resolvido no runtime.",
         )
-
-    normalized_fields: dict[str, Any] = {}
-    for raw_key, raw_value in mapping_entries:
-        normalized_key = _normalize_create_contact_mapping_key(raw_key)
-        normalized_fields[normalized_key] = _render_value(raw_value, resolution_scope)
-
-    max_items = 1
-    for value in normalized_fields.values():
-        if isinstance(value, list):
-            max_items = max(max_items, len(value))
-
-    records: list[dict[str, Any]] = []
-    for index in range(max_items):
-        row: dict[str, Any] = {}
-        for key, value in normalized_fields.items():
-            if isinstance(value, list):
-                raw_item = value[index] if index < len(value) else None
-                row[key] = _coerce_record_value(raw_item)
-            else:
-                row[key] = _coerce_record_value(value)
-
-        identifier = row.get("identifier", "")
-        address = row.get("address", "")
-        if not identifier or not address:
-            raise WorkflowExecutionError(
-                "create_contact_missing_required_fields",
-                "create_contact requer identificador e endereço preenchidos.",
-            )
-
-        extras = {
-            key: val
-            for key, val in row.items()
-            if key not in {"identifier", "address", "full_name"} and val not in {"", None}
-        }
-        records.append(
-            {
-                "identifier": identifier,
-                "address": address,
-                "full_name": row.get("full_name") or None,
-                "extras": extras,
-            }
-        )
-
-    if not records:
-        raise WorkflowExecutionError(
-            "create_contact_no_records",
-            "create_contact não gerou registros válidos.",
-        )
-    return records
+    payload["extras"] = extras
+    return payload, configured_fields
 
 
-def _build_child_runtime_for_create_contact(
+def _create_contact_existing_extras(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return copy.deepcopy(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _merge_create_contact_extras(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
     *,
-    parent_runtime_variables: dict[str, Any],
-    record: dict[str, Any],
+    overwrite: bool,
+    prefix: str = "extra",
+) -> tuple[dict[str, Any], list[str]]:
+    merged = copy.deepcopy(existing)
+    changed_fields: list[str] = []
+    for key, value in incoming.items():
+        path = f"{prefix}.{key}"
+        current = merged.get(key)
+        if isinstance(value, dict):
+            if isinstance(current, dict):
+                nested_base = current
+            elif overwrite or _create_contact_is_blank(current):
+                nested_base = {}
+            else:
+                continue
+            nested, nested_changes = _merge_create_contact_extras(
+                nested_base, value, overwrite=overwrite, prefix=path
+            )
+            if nested_changes:
+                merged[key] = nested
+                changed_fields.extend(nested_changes)
+        elif (overwrite or _create_contact_is_blank(current)) and current != value:
+            merged[key] = copy.deepcopy(value)
+            changed_fields.append(path)
+    return merged, changed_fields
+
+
+def _merge_create_contact_payload(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    enrichment_policy: str,
+) -> tuple[dict[str, Any], list[str]]:
+    overwrite = enrichment_policy == "overwrite_non_null"
+    merged = {field: existing.get(field) for field in CREATE_CONTACT_PROFILE_FIELDS}
+    changed_fields: list[str] = []
+    for field in CREATE_CONTACT_PROFILE_FIELDS:
+        if field not in incoming:
+            continue
+        current = existing.get(field)
+        value = incoming[field]
+        if (overwrite or _create_contact_is_blank(current)) and current != value:
+            merged[field] = value
+            changed_fields.append(field)
+
+    existing_extras = _create_contact_existing_extras(existing.get("extras"))
+    incoming_extras = incoming.get("extras") if isinstance(incoming.get("extras"), dict) else {}
+    merged_extras, extra_changes = _merge_create_contact_extras(
+        existing_extras,
+        incoming_extras,
+        overwrite=overwrite,
+    )
+    merged["extras"] = merged_extras
+    changed_fields.extend(extra_changes)
+    return merged, changed_fields
+
+
+def _create_contact_identifier(value: Any, resolution_scope: dict[str, Any]) -> str:
+    rendered = _render_value(value, resolution_scope)
+    if isinstance(rendered, (dict, list, tuple, set, bool)):
+        rendered = None
+    normalized = str(rendered or "").strip()
+    if not normalized:
+        raise WorkflowExecutionError(
+            "create_contact_missing_identifier",
+            "O campo identifier deve resultar em um valor não vazio.",
+        )
+    return normalized
+
+
+def _store_create_contact_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
     component_ref_id: str | None,
-    parent_session_id: int,
-    flow_uuid: str,
-    last_card_cursor: str,
-    next_card_cursor: str,
-) -> dict[str, Any]:
-    child_runtime: dict[str, Any] = {
-        "source_app": "CreateContact",
-        "last_event_received_at": datetime.now(timezone.utc).isoformat(),
-        "workflow_v2": {
-            "flow_id": flow_uuid,
-            "engine_phase": "m2",
-            "last_card_cursor": last_card_cursor,
-            "next_card_cursor": next_card_cursor,
-            "definition_loaded_at": datetime.now(timezone.utc).isoformat(),
-        },
-        "create_contact": {
-            "parent_session_id": parent_session_id,
-            "component_ref_id": component_ref_id,
-            "record": record,
-        },
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    _set_by_path(customs, output_var, output)
+    runtime_variables["create_contact_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    parent_variables = parent_runtime_variables.get("variables")
-    if isinstance(parent_variables, dict):
-        child_runtime["variables"] = copy.deepcopy(parent_variables)
-    return child_runtime
 
 
 async def _run_create_contact(
     *,
     db_session: AsyncSession,
     flow_uuid: str,
-    session_id: int,
-    definition: dict[str, Any],
-    current_card_uuid: str,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
 ) -> str:
-    next_for_created_contact = resolve_next_card_uuid_by_branch(
-        definition,
-        current_card_uuid=current_card_uuid,
-        branch_label="action_for_the_created_contact",
+    params = _create_contact_parameters(component)
+    action = _create_contact_enum_parameter(
+        params,
+        field="person_action",
+        allowed=CREATE_CONTACT_ACTIONS,
     )
-    if not next_for_created_contact:
-        raise WorkflowExecutionError(
-            "create_contact_missing_branch_for_created_contact",
-            "Branch 'action_for_the_created_contact' não mapeado no fluxo.",
-        )
-
-    next_for_created_uuid = _to_uuid_or_none(next_for_created_contact)
-    current_card_uuid_cast = _to_uuid_or_none(current_card_uuid)
-    if next_for_created_uuid is None or current_card_uuid_cast is None:
-        raise WorkflowExecutionError(
-            "create_contact_invalid_branch_cursor",
-            "Cursores do create_contact não são UUID válidos.",
-        )
-
+    enrichment_policy = _create_contact_enum_parameter(
+        params,
+        field="enrichment_policy",
+        allowed=CREATE_CONTACT_ENRICHMENT_POLICIES,
+    )
+    output_var = _create_contact_output_var(params.get("output_var"))
     variables = _ensure_variables(runtime_variables)
     resolution_scope = _build_runtime_resolution_scope(
         runtime_variables=runtime_variables,
         variables=variables,
     )
-    records = _build_create_contact_records(
-        component=component,
-        resolution_scope=resolution_scope,
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip() or None
+    identifier: str | None = None
+    person: dict[str, Any] | None = None
+    branch = "unchanged"
+    changed_fields: list[str] = []
+
+    logger.info(
+        "workflow m2 create contact started",
+        extra={
+            "event": "orch.workflow.m2.create_contact.started",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_action": action,
+            "enrichment_policy": enrichment_policy,
+        },
     )
 
-    default_list = await ensure_default_source_list_for_create_contact(
-        db_session,
-        flow_uuid=flow_uuid,
-    )
-    default_list_id = int(default_list["id"])
-
-    created_members = 0
-    created_sessions = 0
-    reused_sessions = 0
-    processed_contacts: list[dict[str, Any]] = []
-    for record in records:
-        person = await upsert_person_for_create_contact(
-            db_session,
-            identifier=record["identifier"],
-            address=record["address"],
-            full_name=record.get("full_name"),
-            extras=record.get("extras") if isinstance(record.get("extras"), dict) else {},
-            source_list_id=default_list_id,
-        )
-        contact_member = await ensure_contact_list_member_for_create_contact(
-            db_session,
-            source_list_id=default_list_id,
-            person_uuid=str(person["uuid"]),
-            identifier=record["identifier"],
-            address=record["address"],
-            full_name=record.get("full_name"),
-            extras=record.get("extras") if isinstance(record.get("extras"), dict) else {},
-        )
-        if contact_member.get("created"):
-            created_members += 1
-
-        child_runtime = _build_child_runtime_for_create_contact(
-            parent_runtime_variables=runtime_variables,
-            record=record,
-            component_ref_id=component.get("ref_id"),
-            parent_session_id=session_id,
-            flow_uuid=flow_uuid,
-            last_card_cursor=current_card_uuid_cast,
-            next_card_cursor=next_for_created_uuid,
-        )
-        child_session = await ensure_session_for_created_contact(
-            db_session,
-            flow_uuid=flow_uuid,
-            entity=str(record["identifier"]),
-            entity_type="person",
-            entity_address=str(record["address"]),
-            entity_session_id=f"{record['address']}:::{flow_uuid}",
-            last_card_uuid=current_card_uuid_cast,
-            next_card_uuid=next_for_created_uuid,
-            runtime_variables=child_runtime,
-        )
-        if child_session.get("created"):
-            created_sessions += 1
-            billing_settings = get_settings()
-            if billing_settings.orch_billing_snapshot_enabled:
-                await try_create_billing_snapshot_outbox(
+    try:
+        async with db_session.begin_nested():
+            existing: dict[str, Any] | None
+            if action == "update_current":
+                person_uuid = str(contact_row.get("person_uuid") or "").strip() if isinstance(contact_row, dict) else ""
+                if not person_uuid:
+                    branch = "not_found"
+                else:
+                    try:
+                        person_uuid = str(UUID(person_uuid))
+                    except (TypeError, ValueError, AttributeError) as exc:
+                        raise WorkflowExecutionError(
+                            "create_contact_invalid_current_person",
+                            "A sessão atual possui uma referência de pessoa inválida.",
+                        ) from exc
+                    existing = await fetch_create_contact_person_by_uuid_for_update(
+                        db_session,
+                        person_uuid=person_uuid,
+                    )
+                    if existing is None:
+                        branch = "not_found"
+                    else:
+                        incoming, _ = _build_create_contact_payload(
+                            mapping=params.get("mapping"),
+                            resolution_scope=resolution_scope,
+                        )
+                        identifier = str(existing.get("identifier") or "").strip() or None
+                        merged, changed_fields = _merge_create_contact_payload(
+                            existing,
+                            incoming,
+                            enrichment_policy=enrichment_policy,
+                        )
+                        if changed_fields:
+                            person = await update_create_contact_person_profile(
+                                db_session,
+                                person_uuid=person_uuid,
+                                payload=merged,
+                            )
+                            if person is None:
+                                raise WorkflowExecutionError(
+                                    "create_contact_current_person_not_found",
+                                    "A pessoa atual deixou de estar disponível durante a atualização.",
+                                )
+                            branch = "updated"
+                        else:
+                            person = existing
+            else:
+                identifier = _create_contact_identifier(params.get("identifier"), resolution_scope)
+                existing = await fetch_create_contact_person_by_identifier_for_update(
                     db_session,
-                    workspace_uuid=get_current_workspace_uuid(),
-                    session_id=int(child_session["id"]),
-                    session_uuid=str(child_session["uuid"]),
+                    identifier=identifier,
                 )
-            elif billing_settings.orch_billing_enabled:
-                await try_record_billing_event(
-                    db_session,
-                    workspace_uuid=get_current_workspace_uuid(),
-                    session_id=int(child_session["id"]),
-                    settings=billing_settings,
-                )
-        else:
-            reused_sessions += 1
+                if existing is None:
+                    incoming, configured_fields = _build_create_contact_payload(
+                        mapping=params.get("mapping"),
+                        resolution_scope=resolution_scope,
+                    )
+                    person = await insert_create_contact_person_if_missing(
+                        db_session,
+                        identifier=identifier,
+                        payload=incoming,
+                    )
+                    if person is not None:
+                        branch = "created"
+                        changed_fields = list(configured_fields)
+                    else:
+                        existing = await fetch_create_contact_person_by_identifier_for_update(
+                            db_session,
+                            identifier=identifier,
+                        )
+                        if existing is None:
+                            raise WorkflowExecutionError(
+                                "create_contact_person_not_found_after_conflict",
+                                "A pessoa não pôde ser recuperada após conflito de criação.",
+                            )
 
-        processed_contacts.append(
-            {
-                "identifier": record["identifier"],
-                "address": record["address"],
-                "session_id": child_session.get("id"),
-                "session_created": bool(child_session.get("created")),
-                "member_id": contact_member.get("id"),
-                "member_created": bool(contact_member.get("created")),
-                "person_uuid": person.get("uuid"),
-            }
-        )
+                if person is None and existing is not None:
+                    person = existing
+                    if action == "upsert":
+                        incoming, _ = _build_create_contact_payload(
+                            mapping=params.get("mapping"),
+                            resolution_scope=resolution_scope,
+                        )
+                        merged, changed_fields = _merge_create_contact_payload(
+                            existing,
+                            incoming,
+                            enrichment_policy=enrichment_policy,
+                        )
+                        if changed_fields:
+                            person = await update_create_contact_person_profile(
+                                db_session,
+                                person_uuid=str(existing["uuid"]),
+                                payload=merged,
+                            )
+                            if person is None:
+                                raise WorkflowExecutionError(
+                                    "create_contact_person_not_found_during_update",
+                                    "A pessoa deixou de estar disponível durante a atualização.",
+                                )
+                            branch = "updated"
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "create_contact_persistence_failed",
+            "Falha ao criar ou atualizar a pessoa.",
+        ) from exc
 
-    await increment_source_list_counters_for_create_contact(
-        db_session,
-        source_list_id=default_list_id,
-        created_members=created_members,
-    )
-
-    runtime_variables["create_contact_last_result"] = {
-        "component_ref_id": component.get("ref_id"),
-        "default_source_list_id": default_list_id,
-        "default_source_list_public_id": default_list.get("public_id"),
-        "processed_count": len(records),
-        "created_members": created_members,
-        "created_sessions": created_sessions,
-        "reused_sessions": reused_sessions,
-        "contacts": processed_contacts,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+    if person is not None:
+        identifier = str(person.get("identifier") or identifier or "").strip() or None
+    output = {
+        "action": branch,
+        "person_uuid": str(person.get("uuid")) if person is not None and person.get("uuid") else None,
+        "identifier": identifier,
+        "changed_fields": changed_fields,
     }
-    return "action_after_creating_contact"
+    _store_create_contact_output(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        output=output,
+        component_ref_id=component_ref_id,
+    )
+    runtime_variables.pop("create_contact_last_error", None)
+    logger.info(
+        "workflow m2 create contact completed",
+        extra={
+            "event": "orch.workflow.m2.create_contact.completed",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_action": action,
+            "result_action": branch,
+            "changed_fields": changed_fields,
+        },
+    )
+    return branch
 
 
 def _build_generate_file_resolution_scope(
@@ -5753,11 +5926,9 @@ async def execute_workflow_m2_for_session(
                         branch_label = await _run_create_contact(
                             db_session=db_session,
                             flow_uuid=flow_uuid,
-                            session_id=session_id,
-                            definition=definition,
-                            current_card_uuid=next_card_uuid,
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
                         )
                     except WorkflowExecutionError as exc:
                         exception_branch = _resolve_component_exception_branch_label(
@@ -5772,6 +5943,16 @@ async def execute_workflow_m2_for_session(
                             "message": exc.message,
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         }
+                        logger.warning(
+                            "workflow m2 create contact failed",
+                            extra={
+                                "event": "orch.workflow.m2.create_contact.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                            },
+                        )
                         branch_label = exception_branch
                 elif kind == "condition":
                     branch_label = _resolve_condition_branch_label(
