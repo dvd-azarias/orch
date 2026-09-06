@@ -24,7 +24,7 @@
 - `app/services/workflow_m2_service.py`: motor e componentes.
 - `app/services/identidade_person_service.py`: cliente fixo da Identidade.io, validação, normalização e merge de pessoa.
 - `app/services/identidade_person_flow_link_service.py`: contrato autenticado e idempotente para o Target Core confirmar mailing→flow sem fan-out de sessões.
-- `app/repositories/identidade_person_repository.py`: persistência transacional de `persons` e associação idempotente a `source_lists`.
+- `app/repositories/identidade_person_repository.py`: persistência transacional de `persons` e associação idempotente a `source_lists`, compartilhada pelos cards `identidade_person` e `source_list_membership`.
 - `app/services/workflow_dispatcher_service.py`: claim e classificacao de parada.
 - `app/tasks/workflow_tasks.py`: dispatch, execute, heartbeat, reconciliacao de eventos e retomada pós-commit do vínculo do Identidade.
 - `app/services/switch_bot_flow_service.py`: resolve/cacheia `runner_token`, valida payload Meta e chama o Runner v5.

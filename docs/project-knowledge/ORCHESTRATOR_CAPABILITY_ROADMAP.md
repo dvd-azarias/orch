@@ -21,7 +21,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 |---:|---|---|---|
 | 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Em implementacao |
 | 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
-| 2 | `source_list_membership` | A classificar no desenho do envelope | Planejado |
+| 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Em implementação |
 | 3 | `wait_for_event` | A classificar no desenho do envelope | Planejado |
 | 4 | `split_random` | A classificar no desenho do envelope | Planejado |
 | 5 | `select_contact_channel` | A classificar no desenho do envelope | Planejado |
@@ -44,7 +44,7 @@ Aplicar este checklist separadamente a cada item de 1 a 8:
 - [ ] Timeout, retry e idempotencia locais definidos quando houver efeito externo.
 - [ ] Logs, alarmes e runtime permitem diagnosticar sucesso e falha sem expor segredos.
 - [ ] Testes automatizados ORCH aprovados.
-- [ ] Stack local completa reiniciada e validada conforme `AGENTS.md`.
+- [x] Stack local completa reiniciada e validada conforme `AGENTS.md`.
 - [ ] Canary/E2E confirmou persistencia e efeitos externos aplicaveis.
 - [ ] PR ORCH integrado e rollout validado.
 - [ ] Documentacao e evidencias atualizadas.
@@ -111,6 +111,39 @@ Contrato concluido:
 Rollback: interromper novos usos do card e reverter a engine `#144` para retirada completa. A correcao generica de serializacao `#145` pode permanecer; se houver motivo independente para remove-la, ela deve ser revertida separadamente. Nao ha migration. Dados ja gravados em `persons` nao devem ser apagados automaticamente.
 
 Proximo item: `source_list_membership`.
+
+## Item 2 — `source_list_membership`
+
+Objetivo: garantir de forma idempotente que uma pessoa existente esteja em uma `source_list`, sem associar a lista a flows, materializar membros ou iniciar sessões.
+
+Contrato aprovado:
+
+- pessoa por `person_uuid`, incluindo `{{contact.person_uuid}}` e saída de `create_contact`;
+- lista pelo UUID público `mailing_id`;
+- operação somente aditiva;
+- branches `linked`, `already_linked`, `not_found` e `exception`;
+- saída com ação, pessoa, mailing, IDs internos do vínculo, quantidade de canais e motivo de ausência;
+- persistência transacional em drafts/lista e referências `last_*` da pessoa;
+- nenhum endpoint, migration, fila ou efeito externo novo.
+
+- [x] Semântica, efeitos e branches definidos.
+- [x] Envelope atual definido no catálogo, sem versões paralelas.
+- [x] Branch Target Core criada do `origin/main` atualizado.
+- [x] Catálogo e validação `422` implementados no Target Core.
+- [x] Testes do contrato Target Core aprovados.
+- [x] PR Target Core `#465` integrada e ambiente alvo atualizado.
+- [x] Branch ORCH criada do `origin/main` atualizado.
+- [x] Engine ORCH implementada com operação aditiva e idempotente.
+- [x] Não há efeito externo; concorrência é serializada pelo lock da pessoa/lista e a operação usa savepoint.
+- [x] Logs, branches e runtime diagnosticam sucesso e falha sem registrar identificador pessoal.
+- [x] Testes automatizados focados e teste transacional em PostgreSQL real aprovados.
+- [x] Stack local completa reiniciada e validada conforme `AGENTS.md`.
+- [x] Canário/E2E confirmou persistência no fluxo real, idempotência e ausência de fan-out.
+- [ ] PR ORCH integrada e rollout validado.
+- [x] Documentação e evidências atualizadas até a etapa local.
+- [ ] Item marcado como concluído no estado geral.
+
+Rollback: interromper novos usos do card e reverter a engine. Não há migration. Drafts e vínculos já criados representam dados funcionais e não devem ser removidos automaticamente no rollback de código.
 
 ## Backlog avancado
 

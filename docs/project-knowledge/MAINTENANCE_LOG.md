@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-09-06 — Engine do card `source_list_membership`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o componente aditivo publicado no catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco médio por escrita transacional em tabelas compartilhadas de pessoa e lista, sem migration, fila ou integração externa nova.
+
+### CHANGE
+
+- Resolver `person_uuid` literal ou por template e `mailing_id` pelo UUID público da lista.
+- Criar ou reutilizar `contact_drafts`/`source_list_contact_drafts` com a rotina já comprovada pelo Identidade, sob savepoint e locks de pessoa/lista.
+- Emitir `linked`, `already_linked` ou `not_found`, com `exception` para falha de contrato/persistência.
+- Persistir resultado em `variables.customs[output_var]` e diagnóstico em `source_list_membership_last_result`/`last_error`.
+- Não chamar o Target Core, associar mailing ao flow, materializar `contact_list_members`, criar sessões ou oferecer remoção.
+
+### VALIDATION
+
+- Testes focados do novo card, `create_contact` e Identidade, incluindo PostgreSQL real: `54 passed`.
+- Teste transacional em PostgreSQL real com tabelas temporárias: `1 passed`; primeira execução `linked`, segunda `already_linked`, exatamente um draft/vínculo/canal e contadores incrementados uma vez. As tabelas foram descartadas no commit e não tocaram dados compartilhados.
+- Regressão ampliada de workflow fora da sandbox: `181 passed, 9 failed`; as nove falhas pertencem à baseline conhecida (sete usam a assinatura legada `trigger_orch(flow_uuid=...)` e duas expectativas dependem de estado compartilhado), sem falha nova atribuível ao card.
+- `py_compile` e `git diff --check` passaram. `ruff` não está instalado na `.venv` atual.
+- Stack local completa reiniciada no perfil isolado `f5_local`; API, três workers e dois Beats permaneceram `up`. Os smokes canônicos criaram as sessões `7347` e `7348`, ambas concluídas em `state=3`.
+- Canário E2E no flow `67c00879-f9e3-4ed3-82c0-a695970acc2b`, revisão publicada `c12c83b2-f6ca-4870-b198-8f3f08cc70ac`: a sessão `7349` seguiu por `linked`, criou um vínculo/draft com 8 canais e incrementou `rows_total/rows_processed` de `1/1` para `2/2`; a sessão `7350` seguiu por `already_linked`, reutilizou o mesmo draft e não alterou contadores. Ambas terminaram em `state=3`, sem alarmes.
+- Após as duas execuções, havia exatamente duas sessões do flow, um vínculo em `source_list_contact_drafts`, zero `contact_list_members` para pessoa/lista e zero `flow_mailing_links` ativos. Os dois marcadores `api_call` foram confirmados pelo destino com HTTP 200/`received` em uma tentativa.
+- No encerramento, `dev_phase_stack.sh stop` reproduziu o risco já documentado de filhos órfãos. Os PIDs foram associados ao worktree/filas `f5_local`, encerrados explicitamente e a auditoria final confirmou porta `7777` livre e nenhum processo das filas locais.
+
+### RISK / ROLLBACK
+
+O principal risco seria confundir associação à source list com materialização no flow. O card é deliberadamente aditivo e local; remoção e materialização permanecem fora do contrato. Para rollback, interromper novos usos e reverter o código; não apagar automaticamente drafts funcionais já criados.
+
 ## 2026-09-06 — Serialização de `contact_birth_date` no runtime
 
 ### REQUEST / CLASSIFICATION

@@ -23,6 +23,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 11. Billing possui dois mecanismos mutuamente exclusivos e desligados por default. `ORCH_BILLING_SNAPSHOT_ENABLED` e legado; `ORCH_BILLING_ENABLED` ativa o batch novo somente apos migration `0022`, worker e Beat dedicados. Nunca reutilizar o backfill legado. Consultar `docs/BILLING_BATCH_RUNBOOK.md`.
 12. O branch `fix/pin-session-flow-revision` faz a sessao executar a `revision_id` gravada no bootstrap, inclusive em retomadas dependentes do grafo. A stack local e dois smokes reais confirmaram runtime/metricas com o mesmo pin; rollout e canario N -> N+1 permanecem pendentes. Draft continua mutavel e nao recebe a mesma garantia forte de uma revisao publicada.
 13. Valores PostgreSQL `DATE` lidos para o runtime precisam ser convertidos para ISO antes de persistir `runtime_variables`. Em 2026-09-06, `contact_birth_date` cru causou 661 retries da sessao `7324`; a correcao minima em `_inject_contact_runtime_scope` foi implantada nos hosts `10.1.20.136` e `10.1.20.237`. O canario pos-deploy `7341` terminou em `state=3`, sem alarmes, com data ISO, escrita controlada e POST externo confirmado; os dados temporarios foram restaurados.
+14. `source_list_membership` e estritamente aditivo: cria ou reutiliza o draft da pessoa na `source_list`, mas nao associa mailing ao flow, nao materializa `contact_list_members` e nao cria sessoes. Retirada e materializacao pertencem a contratos separados; nao ampliar o card silenciosamente.
 
 ## O que e o ORCH
 
@@ -59,6 +60,7 @@ Entrypoints:
 - Canal/callback: correlaciona sessao ativa ou recente -> registra ledger/runtime -> retoma card bloqueante; sem correlacao, audita descarte.
 - `switch_bot_flow`: bloqueia a sessao ORCH no card, resolve/cacheia o `runner_token` do flow alvo e repassa somente payloads Meta com mensagem de usuario ao Runner v5; callback terminal libera `success` ou `exception_*`.
 - `identidade_person`: consulta CPF na Identidade.io e, conforme política explícita, somente retorna, cria ou enriquece `persons`; associação opcional a `source_lists` é transacional e o vínculo ao flow é retomado pós-commit pelo contrato seguro do Target Core.
+- `source_list_membership`: resolve uma pessoa por UUID e uma lista por UUID público, cria ou reutiliza o draft transacionalmente e segue por `linked`, `already_linked`, `not_found` ou `exception`, sem chamada externa ou fan-out.
 - Generate file: card grava job/buffer -> beat scan -> worker produz arquivo SFTP -> auditoria e runtime.
 
 Detalhes: `docs/project-knowledge/DATA_FLOW.md`.
