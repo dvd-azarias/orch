@@ -2,7 +2,7 @@
 
 ## 2026-09-06 — `contact_birth_date` causou retry storm na execução do workflow
 
-`STATUS`: CONTAINED / FIX IMPLEMENTED / LOCAL E2E PASSED / DEPLOY PENDING
+`STATUS`: RESOLVED / DEPLOYED / RUNTIME VALIDATED
 
 `SEVERITY`: high
 
@@ -35,9 +35,14 @@ Entre `16:18:27` e `16:33:33` UTC, a sessão acumulou 661 alarmes `workflow_exec
 - O E2E controlado `7340` executou a revisão draft fixada, leu `birth_date=1940-08-12`, atualizou temporariamente `state/city`, terminou em `state=3` com zero alarmes e teve o POST externo confirmado pelo destino com HTTP 200 e `status=received`.
 - Ao final, definição, checksum, estado draft, ponteiro, `state`, `city` e `updated_at` da pessoa foram restaurados; auditoria tardia confirmou zero sessões ativas e zero alarmes no canário.
 
-### Próximo passo
+### Rollout e confirmação em produção
 
-Publicar e implantar o patch no ORCH antes de repetir o `update_current` nos workers de produção. O incidente não exige mudança no Target Core.
+- O merge `792f39e` foi implantado nos hosts `10.1.20.136` e `10.1.20.237`. Os `.env` locais foram preservados byte a byte durante o fast-forward.
+- A API foi reiniciada nos dois hosts e os cinco workers ORCH foram reiniciados no `10.1.20.237`; health, topologia Celery e unidades permaneceram saudáveis.
+- O canário pós-deploy `7341` terminou em `state=3`, sem alarmes, com `birth_date=1940-08-12`, resultado `updated` e POST externo HTTP 200/`received`.
+- Definição, revisão, checksum, estado draft e dados temporários da pessoa foram restaurados. A auditoria tardia confirmou zero sessões ativas, zero alarmes tardios e ausência de novas falhas de serialização.
+
+O incidente não exigiu mudança no Target Core.
 
 ## 2026-08-26 — FileApp aguardava rescue após status avançado no Target Core
 

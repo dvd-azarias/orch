@@ -25,9 +25,16 @@ O contexto SQL retorna `contact_birth_date` como `datetime.date`. `_inject_conta
 - Canário E2E `7340`: revisão draft fixada, `birth_date=1940-08-12`, resultado `updated` nos campos `state/city`, zero alarmes, sessão `state=3` e confirmação externa HTTP 200/`received`.
 - Restauração auditada: definição, checksum, draft, ponteiro, pessoa e `updated_at` voltaram exatamente à baseline; zero sessão ativa e zero alarme tardio no canário.
 
+### POST-DEPLOY
+
+- O merge `792f39e` foi implantado nos hosts `10.1.20.136` e `10.1.20.237`, preservando byte a byte os `.env` locais durante a atualização.
+- A API foi reiniciada nos dois hosts; os cinco workers ORCH foram reiniciados no `10.1.20.237`. Health, nós Celery e unidades ORCH permaneceram saudáveis.
+- O canário `7341` terminou em `state=3`, sem alarmes, com `birth_date=1940-08-12`, resultado `updated` nos campos controlados e POST externo confirmado com HTTP 200/`received`.
+- A restauração de definição, revisão, checksum, estado draft e pessoa foi confirmada. A auditoria tardia encontrou zero sessões ativas, zero alarmes e nenhuma nova falha de serialização nos logs desde o restart.
+
 ### ROLLBACK
 
-Reverter a conversão e o teste. Não há migration nem dado novo persistente. Não executar novo `update_current` com contato que possua data de nascimento enquanto o código antigo estiver ativo.
+Reverter o merge `792f39e` (ou o commit funcional `d8f55f7`) e reiniciar API/workers. Não há migration nem dado novo persistente. Não executar novo `update_current` com contato que possua data de nascimento enquanto o código antigo estiver ativo.
 
 ## 2026-09-06 — Compatibilidade de `birthdate` no card `identidade_person`
 

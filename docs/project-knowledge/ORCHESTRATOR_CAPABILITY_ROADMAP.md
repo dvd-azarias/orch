@@ -20,7 +20,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | Ordem | Capacidade | Classificacao Alpha | Estado |
 |---:|---|---|---|
 | 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Em implementacao |
-| 1 | `update_contact` | A classificar no desenho do envelope | Planejado |
+| 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
 | 2 | `source_list_membership` | A classificar no desenho do envelope | Planejado |
 | 3 | `wait_for_event` | A classificar no desenho do envelope | Planejado |
 | 4 | `split_random` | A classificar no desenho do envelope | Planejado |
@@ -77,6 +77,40 @@ Branch ORCH: `fix/pin-session-flow-revision`.
 ### Limite conhecido do item 0
 
 A garantia forte se aplica a revisoes publicadas, que permanecem identificaveis no historico. O fallback legado para draft sera preservado para nao quebrar contratos do Alpha; como o Target Core edita o draft existente, uma sessao fixada em draft ainda pode observar alteracoes dentro do mesmo `revision_id`. Bloquear execucao de draft ou transformar cada edicao em revisao imutavel amplia o contrato entre sistemas e fica fora deste patch.
+
+## Item 1 — `create_contact`
+
+Objetivo: permitir que um fluxo crie ou atualize dados cadastrais de uma pessoa de forma explicita, limitada e diagnosticavel, sem assumir responsabilidade por canais, listas, membros ou sessoes filhas.
+
+Contrato concluido:
+
+- acoes `update_current`, `create_if_missing` e `upsert`;
+- politicas `fill_missing` e `overwrite_non_null`;
+- mapping restrito aos campos cadastrais permitidos de `persons` e a caminhos `extra.<campo>`;
+- branches `created`, `updated`, `unchanged`, `not_found` e `exception`;
+- saida minima com `action`, `person_uuid`, `identifier` e `changed_fields`;
+- escrita transacional somente em `persons`, com tratamento concorrente da criacao por identificador.
+
+- [x] Semantica, efeitos e branches definidos.
+- [x] Envelope atual definido no catalogo, sem versoes paralelas.
+- [x] Branch Target Core criada do `origin/main` atualizado.
+- [x] Catalogo e validacao `422` implementados no Target Core.
+- [x] Testes do contrato Target Core aprovados.
+- [x] PR Target Core integrado e ambiente alvo atualizado.
+- [x] Branch ORCH criada do `origin/main` atualizado.
+- [x] Engine ORCH implementada sem reativar os helpers embrionarios de lista/membro/sessao filha.
+- [x] Concorrencia e idempotencia local definidas; o card nao possui efeito externo que exija timeout ou retry proprio.
+- [x] Logs, branches e runtime diagnosticam sucesso e falha sem ampliar dados sensiveis.
+- [x] Testes automatizados ORCH aprovados.
+- [x] Stack local completa reiniciada e validada conforme `AGENTS.md`.
+- [x] Canarios locais e de producao confirmaram persistencia, branches e restauracao dos dados controlados.
+- [x] PR da engine ORCH `#144` e correção de serializacao `#145` integrados; rollout validado nos hosts `10.1.20.136` e `10.1.20.237`.
+- [x] Documentacao e evidencias atualizadas.
+- [x] Item marcado como concluido no estado geral.
+
+Rollback: interromper novos usos do card e reverter a engine `#144` para retirada completa. A correcao generica de serializacao `#145` pode permanecer; se houver motivo independente para remove-la, ela deve ser revertida separadamente. Nao ha migration. Dados ja gravados em `persons` nao devem ser apagados automaticamente.
+
+Proximo item: `source_list_membership`.
 
 ## Backlog avancado
 
