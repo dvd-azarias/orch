@@ -20,7 +20,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | Ordem | Capacidade | Classificacao Alpha | Estado |
 |---:|---|---|---|
 | 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Concluido |
-| 1 | `update_contact` | A classificar no desenho do envelope | Planejado |
+| 1 | `create_contact` (novo contrato) | A classificar no desenho do envelope | Planejado |
 | 2 | `source_list_membership` | A classificar no desenho do envelope | Planejado |
 | 3 | `wait_for_event` | A classificar no desenho do envelope | Planejado |
 | 4 | `split_random` | A classificar no desenho do envelope | Planejado |
