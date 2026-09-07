@@ -1,5 +1,35 @@
 # Maintenance Log
 
+## 2026-09-06 — Engine do card `split_random`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o contrato A/B já integrado ao catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco baixo/médio por introduzir uma nova decisão de branch no executor, sem migration, tabela, endpoint, fila ou efeito externo próprio.
+
+### CHANGE
+
+- Normalizar os percentuais inteiros de A/B e a variável de saída no mesmo contrato aceito pelo Target Core.
+- Gerar bucket `0..99` por SHA-256 de `flow + session + revision + card`; retry ou redelivery da mesma identidade produz a mesma variante.
+- Validar exatamente uma saída `variant_a`, uma `variant_b` e no máximo uma `exception`, evitando o fallback legado para a primeira edge quando o grafo estiver inconsistente.
+- Gravar a variante em `variables.customs[output_var]`, diagnóstico em `split_random_last_result` e falhas em `split_random_last_error`, sem persistir o material usado como seed.
+- Usar `exception` para falhas controladas; sem branch válida, terminalizar uma vez pelos códigos `split_random_*` para impedir loop permanente.
+
+### VALIDATION
+
+- Testes diretos do card: `26 passed`; regressão focada de workflow, revisão e cards comuns: `181 passed`.
+- Suíte completa fora da sandbox: `549 passed, 27 failed`. Vinte e seis falhas pertencem à família de baseline já documentada; a falha adicional de WhatsApp por estado/ordem reproduziu com o mesmo resultado na árvore limpa equivalente à `origin/main`.
+- `py_compile` e `git diff --check` passaram.
+- Stack completa reiniciada em terminal persistente com perfil e filas `f5_local`; API, três workers e dois Beats ficaram `up`. Os smokes encadeados criaram `7431` e `7432`, ambas `state=3`, cursor nulo e zero alarmes.
+- Canary no flow `041c493a-b8cc-4deb-895c-8efa5f73e1bb`, revisão publicada v1 `06fdc5b7-d477-44bf-b055-b2eef1c6260a`: as sessões `7433`–`7440` terminaram em `state=3`, quatro por `variant_a` e quatro por `variant_b`, com zero alarmes. Todos os buckets persistidos coincidiram com o recálculo pela identidade da sessão.
+- Cada sessão executou exatamente um `api_call` posterior e recebeu HTTP 200/`status=received` do API-bin em uma tentativa, com `stream_id` entre `1345978` e `1345987` para os oito resultados observados.
+- Como o banco é compartilhado, o dispatcher de produção alcançou a sessão `7440` antes do worker local e registrou `component_not_supported:split_random`. Ele não avançou o cursor nem chamou o destino; em seguida a engine local escolheu `variant_b`, fez um único POST e finalizou. Os workers do host `237` foram confirmados apenas nas filas de produção, portanto não houve consumo cruzado de `f5_local`; a interferência ocorreu pela varredura do mesmo workspace no banco.
+- A auditoria tardia após desligar a stack manteve estados, cursores, buckets, contagens de métricas e zero alarmes inalterados, sem sinal de hot loop.
+- No encerramento, o script voltou a deixar subprocessos órfãos. Os seis mestres foram identificados pelo diretório do worktree e filas locais, encerrados explicitamente, e a auditoria final confirmou porta `7777` livre e ausência de Uvicorn/Celery locais.
+
+### RISK / ROLLBACK
+
+O percentual representa amostragem determinística, não uma cota exata em lotes pequenos. O grafo inválido não é executado silenciosamente. Para rollback, impedir novos triggers do card, reverter a engine e reiniciar API/workers; não há migration ou dado externo do próprio card a desfazer. Antes do rollout, o flow canário publicado continua sujeito ao stop seguro `component_not_supported:split_random` quando alcançado apenas por código antigo.
+
 ## 2026-09-06 — Terminalização determinística de `api_call_missing_url`
 
 ### REQUEST / CLASSIFICATION

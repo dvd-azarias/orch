@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import posixpath
 import re
@@ -88,6 +89,7 @@ from app.services.switch_bot_flow_service import (
 )
 from app.services.workflow_engine import (
     component_kind,
+    extract_edges,
     index_components,
     outgoing_branch_labels,
     resolve_next_card_uuid,
@@ -111,6 +113,8 @@ WAIT_FOR_EVENT_BLOCKING_STOP_REASON = "blocked_wait_for_event"
 WAIT_FOR_EVENT_RESULT_RE = re.compile(r"[A-Za-z0-9._:-]+$")
 WAIT_FOR_EVENT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
+SPLIT_RANDOM_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
     "sent": "sent",
@@ -170,6 +174,10 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
     "person_scope_channel_component_not_supported",
+    "split_random_invalid_branches",
+    "split_random_invalid_output_var",
+    "split_random_invalid_percentage",
+    "split_random_invalid_total",
     "whatsapp_hsm_contact_missing",
     "whatsapp_hsm_meta_payload_invalid",
     "whatsapp_hsm_number_not_configured",
@@ -3254,6 +3262,185 @@ def _catalog_parameter_bool(value: Any) -> bool:
     if isinstance(scalar, bool):
         return scalar
     return str(scalar or "").strip().lower() in {"1", "true", "yes", "sim", "on", "enabled"}
+
+
+def _split_random_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _split_random_percentage(value: Any, *, parameter_id: str) -> int:
+    scalar = _catalog_parameter_scalar(value)
+    if isinstance(scalar, bool):
+        raise WorkflowExecutionError(
+            "split_random_invalid_percentage",
+            f"O campo {parameter_id} deve ser um inteiro entre 0 e 100.",
+        )
+    try:
+        number = float(scalar)
+    except (TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number) or not number.is_integer() or not 0 <= number <= 100:
+        raise WorkflowExecutionError(
+            "split_random_invalid_percentage",
+            f"O campo {parameter_id} deve ser um inteiro entre 0 e 100.",
+        )
+    return int(number)
+
+
+def _split_random_config(component: dict[str, Any]) -> tuple[int, int, str]:
+    params = _split_random_parameters(component)
+    variant_a_percentage = _split_random_percentage(
+        params.get("variant_a_percentage"),
+        parameter_id="variant_a_percentage",
+    )
+    variant_b_percentage = _split_random_percentage(
+        params.get("variant_b_percentage"),
+        parameter_id="variant_b_percentage",
+    )
+    if variant_a_percentage + variant_b_percentage != 100:
+        raise WorkflowExecutionError(
+            "split_random_invalid_total",
+            "A soma dos percentuais das variantes A e B deve ser exatamente 100.",
+        )
+
+    output_var = str(_catalog_parameter_scalar(params.get("output_var")) or "").strip() or "split_random"
+    if (
+        not output_var
+        or len(output_var) > 128
+        or SPLIT_RANDOM_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "split_random_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return variant_a_percentage, variant_b_percentage, output_var
+
+
+def _split_random_exception_branch_label(
+    *,
+    definition: dict[str, Any],
+    current_card_uuid: str,
+) -> str | None:
+    labels = [
+        edge.label
+        for edge in extract_edges(definition)
+        if edge.source == current_card_uuid
+        and edge.label is not None
+        and edge.label.startswith("exception")
+    ]
+    if len(labels) == 1:
+        return labels[0]
+    return None
+
+
+def _validate_split_random_branches(
+    *,
+    definition: dict[str, Any],
+    current_card_uuid: str,
+) -> None:
+    allowed_labels = {"variant_a", "variant_b"}
+    branch_counts = {"variant_a": 0, "variant_b": 0, "exception": 0}
+    invalid_label = False
+    for edge in extract_edges(definition):
+        if edge.source != current_card_uuid:
+            continue
+        label = edge.label or ""
+        if label in allowed_labels:
+            branch_counts[label] += 1
+        elif label.startswith("exception"):
+            branch_counts["exception"] += 1
+        else:
+            invalid_label = True
+
+    if (
+        branch_counts["variant_a"] != 1
+        or branch_counts["variant_b"] != 1
+        or branch_counts["exception"] > 1
+        or invalid_label
+    ):
+        raise WorkflowExecutionError(
+            "split_random_invalid_branches",
+            "O split_random deve possuir exatamente uma saída variant_a, uma variant_b e no máximo uma exception.",
+        )
+
+
+def _split_random_bucket(
+    *,
+    flow_uuid: str,
+    session_identity: str,
+    revision_id: str,
+    current_card_uuid: str,
+) -> int:
+    seed = "\x1f".join(
+        (
+            SPLIT_RANDOM_HASH_STRATEGY,
+            str(flow_uuid),
+            str(session_identity),
+            str(revision_id),
+            str(current_card_uuid),
+        )
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False) % 100
+
+
+def _run_split_random(
+    *,
+    component: dict[str, Any],
+    definition: dict[str, Any],
+    current_card_uuid: str,
+    runtime_variables: dict[str, Any],
+    flow_uuid: str,
+    session_identity: str,
+    revision_id: str,
+    now: datetime | None = None,
+) -> str:
+    variant_a_percentage, variant_b_percentage, output_var = _split_random_config(component)
+    _validate_split_random_branches(
+        definition=definition,
+        current_card_uuid=current_card_uuid,
+    )
+    bucket = _split_random_bucket(
+        flow_uuid=flow_uuid,
+        session_identity=session_identity,
+        revision_id=revision_id,
+        current_card_uuid=current_card_uuid,
+    )
+    branch_label = "variant_a" if bucket < variant_a_percentage else "variant_b"
+
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = branch_label
+    updated_at = now or datetime.now(timezone.utc)
+    runtime_variables["split_random_last_result"] = {
+        "component_ref_id": component.get("ref_id"),
+        "card_cursor": current_card_uuid,
+        "revision_id": revision_id,
+        "output_var": output_var,
+        "branch": branch_label,
+        "bucket": bucket,
+        "variant_a_percentage": variant_a_percentage,
+        "variant_b_percentage": variant_b_percentage,
+        "strategy": SPLIT_RANDOM_HASH_STRATEGY,
+        "updated_at": updated_at.isoformat(),
+    }
+    runtime_variables.pop("split_random_last_error", None)
+    return branch_label
 
 
 def _wait_for_event_parameters(component: dict[str, Any]) -> dict[str, Any]:
@@ -6485,6 +6672,64 @@ async def execute_workflow_m2_for_session(
                             },
                         )
                         branch_label = exception_branch
+                elif kind == "split_random":
+                    try:
+                        branch_label = _run_split_random(
+                            component=component,
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                            runtime_variables=runtime_variables,
+                            flow_uuid=flow_uuid,
+                            session_identity=str(session_uuid_for_metrics or session_id),
+                            revision_id=str(revision_id_for_metrics),
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _split_random_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        runtime_variables.pop("split_random_last_result", None)
+                        runtime_variables["split_random_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 split random failed",
+                            extra={
+                                "event": "orch.workflow.m2.split_random.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
+                        branch_label = exception_branch
+                    else:
+                        split_result = runtime_variables.get("split_random_last_result")
+                        logger.info(
+                            "workflow m2 split random completed",
+                            extra={
+                                "event": "orch.workflow.m2.split_random.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "outcome": branch_label,
+                                "bucket": (
+                                    split_result.get("bucket")
+                                    if isinstance(split_result, dict)
+                                    else None
+                                ),
+                            },
+                        )
                 elif kind == "wait_for_event":
                     try:
                         wait_execution = _run_wait_for_event(
