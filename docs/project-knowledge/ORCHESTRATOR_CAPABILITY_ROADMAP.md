@@ -24,7 +24,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 5 | `select_contact_channel` | A classificar no desenho do envelope | Planejado |
+| 5 | `select_contact_channel` | `ALPHA_FIX_OPTIONAL` | Em implementação |
 | 6 | `send_with_sms` | A classificar no desenho do envelope | Planejado |
 | 7 | `send_with_email` | A classificar no desenho do envelope | Planejado |
 | 8 | `fail_flow` | A classificar no desenho do envelope | Planejado |
@@ -217,6 +217,44 @@ Contrato aprovado:
 Rollback: interromper novos usos do card antes de reverter a engine e reiniciar API/workers. Não há migration nem dado funcional externo criado pelo card; sessões ainda posicionadas nele seriam tratadas como componente não suportado pelo código anterior.
 
 Próximo item: `select_contact_channel`.
+
+## Item 5 — `select_contact_channel`
+
+Objetivo: tornar explícita a escolha do canal que uma sessão utilizará, preservando a cardinalidade atual em `channel` e permitindo que uma sessão `person` alcance com segurança um card de comunicação posterior.
+
+Contrato aprovado:
+
+- `channel_type` obrigatório em `voice`, `whatsapp`, `sms` ou `email`; `phone` persistido é normalizado para `voice`;
+- `channel_label` opcional, literal e com correspondência exata;
+- `output_var` opcional, com default `selected_channel`;
+- branches `selected`, `not_found` e `exception`;
+- em `channel`, a seleção fica presa ao membro e endereço que originaram a sessão;
+- em `person`, exige `person_uuid` e considera somente membros ativos da mesma pessoa, lista e mailing, priorizando `is_primary` e depois o menor `contact_list_member_id`;
+- uma seleção `person` altera somente `orch_sessions.entity_address`, com guards de escopo, atividade e colisão; o card não altera `linked_actuator`;
+- cards de comunicação posteriores recebem o membro selecionado e continuam sendo a autoridade para definir `linked_actuator`;
+- sucesso persiste o objeto selecionado em `variables.customs[output_var]`; ausência persiste `null` e segue `not_found`.
+- `not_found` ou `exception` invalidam qualquer seleção anterior, impedindo reutilização silenciosa de um canal antigo.
+
+- [x] Semântica, efeitos e branches definidos.
+- [x] Envelope atual definido no catálogo, sem versões paralelas.
+- [x] Branch Target Core criada do `origin/main` atualizado.
+- [x] Catálogo e validação `422` implementados no Target Core.
+- [x] Testes do contrato Target Core aprovados.
+- [x] PR Target Core integrada e ambiente alvo atualizado.
+- [x] Branch ORCH criada do `origin/main` atualizado.
+- [x] Engine ORCH implementada com seleção determinística, rebind guardado e roteamento contextual do membro escolhido.
+- [x] Não há timeout, retry ou efeito externo próprio; retries repetem a mesma escolha enquanto os candidatos não mudarem.
+- [x] Logs, resultado, erro e alarmes permitem diagnosticar o desfecho sem registrar o endereço do contato nos logs.
+- [x] Testes automatizados ORCH aprovados; as falhas da suíte ampla foram comparadas com a baseline.
+- [x] Stack local completa reiniciada e smoke encadeado validado conforme `AGENTS.md`.
+- [ ] Canary/E2E `channel` e `person` concluído.
+- [ ] PR ORCH integrado e rollout validado.
+- [x] Documentação e evidências parciais atualizadas.
+- [ ] Item marcado como concluído no estado geral.
+
+Evidência parcial: a sessão `7477` do flow canário `c114383d-72e1-4401-8877-765e5bfac27f`, em `channel`, selecionou o membro `10768`, preservou o endereço da sessão, seguiu `selected`, terminou em `finish_flow` sem alarme e recebeu `200/status=received` do `api-bin`. A sessão local controlada `7480` repetiu o caminho com `session_scope=person`, `person_uuid` válido e o membro `10769`, também sem alarme e com confirmação externa. Como cada pessoa do mailing possui apenas um canal, a troca efetiva entre membros foi validada no teste PostgreSQL isolado. O rollout da cardinalidade `person` gerada pelo Target permanece pendente até integração e deploy da engine no ORCH; somente então o flow será adicionado à allowlist do Target Core.
+
+Rollback: remover primeiro o UUID da allowlist `person` do Target Core e reiniciar seus produtores; depois interromper novas execuções antes de reverter a engine. Não há migration. Sessões já posicionadas no card seriam tratadas como componente não suportado pelo código anterior.
 
 ## Backlog avancado
 

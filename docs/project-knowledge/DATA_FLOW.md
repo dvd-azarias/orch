@@ -227,10 +227,14 @@ Target Core associa mailing
 ORCH recebe a sessão
   -> valida membro/lista/mailing + endereço da sessão + tipo informado
   -> executa cards genéricos
+  -> select_contact_channel valida o membro atual em channel
+     ou escolhe explicitamente um membro da mesma pessoa/lista/mailing em person
   -> define linked_actuator apenas quando um card autorizado o exige
 ```
 
-`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Se ela alcançar `send_with_dialer`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template`, o M2 terminaliza com `person_scope_channel_component_not_supported`; não escolhe outro canal implicitamente. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Antes de uma seleção explícita, alcançar `send_with_dialer`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template` terminaliza com `person_scope_channel_component_not_supported`; não há escolha implícita. Após `select_contact_channel` retornar `selected`, o M2 hidrata e reutiliza o membro escolhido nas retomadas, e o card de comunicação permanece responsável por definir seu `linked_actuator`. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+
+Em `channel`, `select_contact_channel` só pode selecionar o membro/endereço que já originou a sessão. Em `person`, a busca exige `person_uuid`, permanece dentro da mesma pessoa, `contact_list_id` e `mailing_id`, prioriza o canal marcado como primário e usa o menor `contact_list_member_id` como desempate. O rebind altera apenas `orch_sessions.entity_address` e falha de forma diagnosticável diante de perda de escopo ou colisão com outra sessão ativa. Uma tentativa posterior em `not_found` ou `exception` limpa a seleção anterior e volta a bloquear comunicação até novo `selected`.
 
 ## Generate file
 

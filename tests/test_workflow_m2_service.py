@@ -269,7 +269,7 @@ def test_contact_member_terminal_failures_have_inline_alarms() -> None:
     assert person_scope_alarm == (
         "error",
         "workflow_m2_person_scope_channel_component_not_supported",
-        "Sessão por pessoa encerrada ao alcançar componente de comunicação por canal.",
+        "Sessão por pessoa encerrada ao alcançar comunicação sem seleção explícita de canal.",
     )
 
 

@@ -64,6 +64,10 @@ from app.repositories.orch_sessions_repository import (
     persist_contact_member_outbound_hsm,
     replace_session_workflow_state,
 )
+from app.repositories.select_contact_channel_repository import (
+    fetch_select_contact_channel_candidate,
+    rebind_person_session_to_contact_channel,
+)
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
@@ -115,6 +119,9 @@ WAIT_FOR_EVENT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
 SPLIT_RANDOM_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
+SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email"}
+SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
     "sent": "sent",
@@ -174,6 +181,12 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
     "person_scope_channel_component_not_supported",
+    "select_contact_channel_invalid_channel_label",
+    "select_contact_channel_invalid_channel_type",
+    "select_contact_channel_invalid_output_var",
+    "select_contact_channel_missing_contact_context",
+    "select_contact_channel_persistence_failed",
+    "select_contact_channel_rebind_failed",
     "split_random_invalid_branches",
     "split_random_invalid_output_var",
     "split_random_invalid_percentage",
@@ -219,6 +232,12 @@ class WorkflowExecutionResult:
 class _WaitForEventExecution:
     branch_label: str | None
     timeout_at: datetime
+
+
+@dataclass(frozen=True)
+class _SelectContactChannelExecution:
+    branch_label: str
+    contact_row: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -302,11 +321,15 @@ def _normalize_channel_type(raw_value: Any) -> str | None:
 def _contact_member_channel_type_matches(
     runtime_variables: dict[str, Any],
     contact_row: dict[str, Any],
+    *,
+    expected_channel_type: str | None = None,
 ) -> bool:
-    input_payload = runtime_variables.get("input_payload")
-    if not isinstance(input_payload, dict):
-        return True
-    expected_type = _normalize_channel_type(input_payload.get("channel_type"))
+    expected_type = _normalize_channel_type(expected_channel_type)
+    if expected_type is None:
+        input_payload = runtime_variables.get("input_payload")
+        if not isinstance(input_payload, dict):
+            return True
+        expected_type = _normalize_channel_type(input_payload.get("channel_type"))
     if expected_type is None:
         return True
     return expected_type == _normalize_channel_type(
@@ -314,18 +337,78 @@ def _contact_member_channel_type_matches(
     )
 
 
+def _active_selected_contact_channel(
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    if not isinstance(workflow_meta, dict):
+        return None
+    raw_selection = workflow_meta.get("selected_contact_channel")
+    if not isinstance(raw_selection, dict):
+        return None
+    if raw_selection.get("selected") is not True:
+        return None
+    if str(raw_selection.get("session_scope") or "").strip().lower() != "person":
+        return None
+
+    try:
+        contact_list_member_id = int(raw_selection.get("contact_list_member_id"))
+        mailing_id = int(raw_selection.get("mailing_id"))
+        contact_list_id = str(UUID(str(raw_selection.get("contact_list_id"))))
+    except (TypeError, ValueError):
+        return None
+    channel_type = _normalize_channel_type(raw_selection.get("type"))
+    address = str(raw_selection.get("address") or "").strip()
+    if (
+        contact_list_member_id <= 0
+        or mailing_id <= 0
+        or channel_type not in SELECT_CONTACT_CHANNEL_TYPES
+        or not address
+    ):
+        return None
+
+    try:
+        person_uuid = str(UUID(str(raw_selection.get("person_uuid"))))
+    except (TypeError, ValueError):
+        return None
+
+    return {
+        **raw_selection,
+        "contact_list_member_id": contact_list_member_id,
+        "contact_list_id": contact_list_id,
+        "mailing_id": mailing_id,
+        "person_uuid": person_uuid,
+        "type": channel_type,
+        "address": address,
+    }
+
+
+def _routing_scope_from_selected_contact_channel(
+    selection: dict[str, Any],
+) -> _ContactMemberRoutingScope:
+    return _ContactMemberRoutingScope(
+        contact_list_member_id=int(selection["contact_list_member_id"]),
+        contact_list_id=str(selection["contact_list_id"]),
+        mailing_id=int(selection["mailing_id"]),
+        explicit=True,
+        valid=True,
+    )
+
+
 def _ensure_person_scope_component_supported(
     *,
     session_scope: str,
     component_kind_value: str,
+    selected_contact_channel: dict[str, Any] | None = None,
 ) -> None:
     if (
         session_scope == "person"
         and component_kind_value in PERSON_SCOPE_CHANNEL_COMPONENT_KINDS
+        and selected_contact_channel is None
     ):
         raise WorkflowExecutionError(
             "person_scope_channel_component_not_supported",
-            "Sessões por pessoa não podem executar componentes de comunicação por canal.",
+            "Sessões por pessoa precisam selecionar explicitamente um canal antes de executar componentes de comunicação.",
         )
 
 
@@ -3443,6 +3526,252 @@ def _run_split_random(
     return branch_label
 
 
+def _select_contact_channel_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _select_contact_channel_config(
+    component: dict[str, Any],
+) -> tuple[str, str | None, str]:
+    params = _select_contact_channel_parameters(component)
+    raw_channel_type = params.get("channel_type")
+    if isinstance(raw_channel_type, list) and len(raw_channel_type) != 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_type",
+            "O campo channel_type deve conter uma única opção.",
+        )
+    channel_type = str(_catalog_parameter_scalar(raw_channel_type) or "").strip().lower()
+    if channel_type not in SELECT_CONTACT_CHANNEL_TYPES:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_type",
+            "O campo channel_type deve ser voice, whatsapp, sms ou email.",
+        )
+
+    raw_label = params.get("channel_label")
+    if isinstance(raw_label, list) and len(raw_label) > 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_label",
+            "O campo channel_label deve conter uma única label literal.",
+        )
+    label_scalar = _catalog_parameter_scalar(
+        raw_label,
+        preferred_keys=("label", "name"),
+    )
+    if raw_label not in (None, "", [], {}) and label_scalar is None:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_label",
+            "O campo channel_label deve conter uma única label literal.",
+        )
+    channel_label = str(label_scalar or "").strip() or None
+    if channel_label is not None and (
+        len(channel_label) > SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH
+        or _TEMPLATE_PATTERN.search(channel_label)
+        or any(ord(character) < 32 or ord(character) == 127 for character in channel_label)
+    ):
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_label",
+            "O campo channel_label deve conter uma label literal de até 128 caracteres.",
+        )
+
+    raw_output_var = params.get("output_var")
+    if isinstance(raw_output_var, list) and len(raw_output_var) > 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_output_var",
+            "O campo output_var deve conter um único nome de variável.",
+        )
+    output_var = str(_catalog_parameter_scalar(raw_output_var) or "").strip()
+    output_var = output_var or "selected_channel"
+    if (
+        len(output_var) > 128
+        or _TEMPLATE_PATTERN.search(output_var)
+        or SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return channel_type, channel_label, output_var
+
+
+def _select_contact_channel_anchor(
+    contact_row: dict[str, Any] | None,
+) -> tuple[int, str, int, str | None]:
+    if not isinstance(contact_row, dict):
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão não possui um membro de contato ativo para iniciar a seleção.",
+        )
+    try:
+        contact_list_member_id = int(contact_row.get("contact_list_member_id"))
+        contact_list_id = str(UUID(str(contact_row.get("contact_list_id"))))
+        mailing_id = int(contact_row.get("mailing_id"))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão não possui lista, mailing e membro válidos para selecionar o canal.",
+        ) from exc
+    if contact_list_member_id <= 0 or mailing_id <= 0:
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão não possui lista, mailing e membro válidos para selecionar o canal.",
+        )
+
+    person_uuid = contact_row.get("person_uuid")
+    if person_uuid is not None:
+        try:
+            person_uuid = str(UUID(str(person_uuid)))
+        except (TypeError, ValueError) as exc:
+            raise WorkflowExecutionError(
+                "select_contact_channel_missing_contact_context",
+                "O membro atual possui uma referência de pessoa inválida.",
+            ) from exc
+    return contact_list_member_id, contact_list_id, mailing_id, person_uuid
+
+
+def _store_select_contact_channel_result(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    result: dict[str, Any],
+    selected: bool,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = dict(result) if selected else None
+    runtime_variables["select_contact_channel_last_result"] = dict(result)
+    runtime_variables.pop("select_contact_channel_last_error", None)
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    if selected:
+        workflow_meta["selected_contact_channel"] = dict(result)
+    else:
+        workflow_meta.pop("selected_contact_channel", None)
+
+
+async def _run_select_contact_channel(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    session_scope: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> _SelectContactChannelExecution:
+    channel_type, channel_label, output_var = _select_contact_channel_config(component)
+    (
+        contact_list_member_id,
+        contact_list_id,
+        mailing_id,
+        person_uuid,
+    ) = _select_contact_channel_anchor(contact_row)
+    if session_scope == "person" and person_uuid is None:
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão por pessoa não possui person_uuid válido para selecionar o canal.",
+        )
+
+    try:
+        async with db_session.begin_nested():
+            candidate = await fetch_select_contact_channel_candidate(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+                session_scope=session_scope,
+                contact_list_member_id=contact_list_member_id,
+                contact_list_id=contact_list_id,
+                mailing_id=mailing_id,
+                person_uuid=person_uuid,
+                channel_type=channel_type,
+                channel_label=channel_label,
+            )
+            if candidate is not None and session_scope == "person":
+                rebound = await rebind_person_session_to_contact_channel(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                    session_id=session_id,
+                    contact_list_member_id=int(candidate["contact_list_member_id"]),
+                    contact_list_id=str(candidate["contact_list_id"]),
+                    mailing_id=int(candidate["mailing_id"]),
+                    person_uuid=(
+                        str(candidate["person_uuid"])
+                        if candidate.get("person_uuid") is not None
+                        else None
+                    ),
+                )
+                if not rebound:
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_rebind_failed",
+                        "O canal foi encontrado, mas a sessão não pôde ser vinculada a ele com segurança.",
+                    )
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "select_contact_channel_persistence_failed",
+            "Falha ao selecionar o canal do contato.",
+        ) from exc
+
+    updated_at = now or datetime.now(timezone.utc)
+    if candidate is None:
+        result = {
+            "component_ref_id": component.get("ref_id"),
+            "selected": False,
+            "branch": "not_found",
+            "session_scope": session_scope,
+            "requested_type": channel_type,
+            "requested_label": channel_label,
+            "output_var": output_var,
+            "updated_at": updated_at.isoformat(),
+        }
+        _store_select_contact_channel_result(
+            runtime_variables=runtime_variables,
+            output_var=output_var,
+            result=result,
+            selected=False,
+        )
+        return _SelectContactChannelExecution("not_found", None)
+
+    result = {
+        "component_ref_id": component.get("ref_id"),
+        "selected": True,
+        "branch": "selected",
+        "session_scope": session_scope,
+        "contact_list_member_id": int(candidate["contact_list_member_id"]),
+        "contact_list_id": str(candidate["contact_list_id"]),
+        "mailing_id": int(candidate["mailing_id"]),
+        "person_uuid": candidate.get("person_uuid"),
+        "type": _normalize_channel_type(candidate.get("contact_channel_type")),
+        "label": candidate.get("contact_channel_label"),
+        "address": str(candidate.get("contact_channel_address") or "").strip(),
+        "is_primary": bool(candidate.get("is_primary")),
+        "output_var": output_var,
+        "updated_at": updated_at.isoformat(),
+    }
+    _store_select_contact_channel_result(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        result=result,
+        selected=True,
+    )
+    return _SelectContactChannelExecution("selected", dict(candidate))
+
+
 def _wait_for_event_parameters(component: dict[str, Any]) -> dict[str, Any]:
     raw = component.get("parameters")
     if isinstance(raw, dict):
@@ -6288,21 +6617,31 @@ async def execute_workflow_m2_for_session(
             session_scope=session_scope,
         )
         contact_member_scope = _extract_contact_member_routing_scope(runtime_variables)
+        selected_contact_channel = (
+            _active_selected_contact_channel(runtime_variables)
+            if session_scope == "person"
+            else None
+        )
+        effective_contact_member_scope = (
+            _routing_scope_from_selected_contact_channel(selected_contact_channel)
+            if selected_contact_channel is not None
+            else contact_member_scope
+        )
         person_scope_without_selectors = (
             session_scope == "person" and not contact_member_scope.explicit
         )
         if (
             contextual_member_routing_enabled
-            and contact_member_scope.valid
+            and effective_contact_member_scope.valid
             and not person_scope_without_selectors
         ):
             contact_runtime_context = await fetch_contact_runtime_context_for_session(
                 db_session,
                 flow_uuid=flow_uuid,
                 session_id=session_id,
-                contact_list_member_id=contact_member_scope.contact_list_member_id,
-                contact_list_id=contact_member_scope.contact_list_id,
-                mailing_id=contact_member_scope.mailing_id,
+                contact_list_member_id=effective_contact_member_scope.contact_list_member_id,
+                contact_list_id=effective_contact_member_scope.contact_list_id,
+                mailing_id=effective_contact_member_scope.mailing_id,
             )
         elif contextual_member_routing_enabled:
             contact_runtime_context = None
@@ -6329,6 +6668,11 @@ async def execute_workflow_m2_for_session(
             channel_type_matches = _contact_member_channel_type_matches(
                 runtime_variables,
                 contact_runtime_context,
+                expected_channel_type=(
+                    str(selected_contact_channel["type"])
+                    if selected_contact_channel is not None
+                    else None
+                ),
             )
             if not channel_type_matches:
                 contact_runtime_context = None
@@ -6338,14 +6682,16 @@ async def execute_workflow_m2_for_session(
             workflow_meta = _ensure_workflow_meta(runtime_variables)
             workflow_meta["contact_member_routing"] = {
                 "selectors": contact_member_scope.selectors(),
+                "effective_selectors": effective_contact_member_scope.selectors(),
                 "explicit": contact_member_scope.explicit,
                 "valid": contact_member_scope.valid,
                 "resolved_contact_list_member_id": resolved_contact_list_member_id,
                 "channel_type_matches": channel_type_matches,
+                "selected_contact_channel_active": selected_contact_channel is not None,
             }
 
         routing_contact_list_member_id = _resolved_contact_member_id_for_routing(
-            contact_member_scope,
+            effective_contact_member_scope,
             resolved_contact_list_member_id,
         )
 
@@ -6604,6 +6950,7 @@ async def execute_workflow_m2_for_session(
                 _ensure_person_scope_component_supported(
                     session_scope=session_scope,
                     component_kind_value=kind,
+                    selected_contact_channel=selected_contact_channel,
                 )
                 if kind == "set_variables":
                     _run_set_variables(component, runtime_variables)
@@ -6726,6 +7073,99 @@ async def execute_workflow_m2_for_session(
                                 "bucket": (
                                     split_result.get("bucket")
                                     if isinstance(split_result, dict)
+                                    else None
+                                ),
+                            },
+                        )
+                elif kind == "select_contact_channel":
+                    try:
+                        channel_execution = await _run_select_contact_channel(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            session_scope=session_scope,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        _ensure_workflow_meta(runtime_variables).pop(
+                            "selected_contact_channel", None
+                        )
+                        selected_contact_channel = None
+                        runtime_variables.pop("select_contact_channel_last_result", None)
+                        runtime_variables["select_contact_channel_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 select contact channel failed",
+                            extra={
+                                "event": "orch.workflow.m2.select_contact_channel.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "session_scope": session_scope,
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
+                        branch_label = exception_branch
+                    else:
+                        branch_label = channel_execution.branch_label
+                        selected_contact_channel = None
+                        if channel_execution.contact_row is not None:
+                            contact_runtime_context = channel_execution.contact_row
+                            selected_contact_channel = _active_selected_contact_channel(
+                                runtime_variables
+                            )
+                            try:
+                                routing_contact_list_member_id = int(
+                                    contact_runtime_context["contact_list_member_id"]
+                                )
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise WorkflowExecutionError(
+                                    "select_contact_channel_missing_contact_context",
+                                    "O canal selecionado não possui um membro válido.",
+                                ) from exc
+                            selected_address = str(
+                                contact_runtime_context.get("contact_channel_address") or ""
+                            ).strip()
+                            if selected_address:
+                                session_state["entity_address"] = selected_address
+                            _inject_contact_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                contact_row=contact_runtime_context,
+                            )
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
+                            )
+                        logger.info(
+                            "workflow m2 select contact channel completed",
+                            extra={
+                                "event": "orch.workflow.m2.select_contact_channel.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "session_scope": session_scope,
+                                "outcome": branch_label,
+                                "contact_list_member_id": (
+                                    contact_runtime_context.get("contact_list_member_id")
+                                    if channel_execution.contact_row is not None
                                     else None
                                 ),
                             },
