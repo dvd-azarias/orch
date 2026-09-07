@@ -38,6 +38,7 @@ FINAL_STOP_REASONS = {
     "session_already_terminal",
 }
 TERMINAL_FAILURE_STOP_REASONS = {
+    "api_call_missing_url",
     "condition_branch_not_mapped",
     "contact_member_scope_not_found",
     "contact_member_routing_update_failed",

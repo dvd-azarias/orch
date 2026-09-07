@@ -391,8 +391,13 @@ async def list_stale_pending_channel_event_sessions(
                     MIN(COALESCE(e.event_ts, e.received_at)) AS oldest_pending_at,
                     COUNT(*) AS pending_events
                 FROM orch_channel_events e
+                JOIN orch_sessions candidate_session
+                  ON candidate_session.id = e.session_id
                 WHERE e.processed_at IS NULL
                   AND COALESCE(e.event_ts, e.received_at) <= NOW() - MAKE_INTERVAL(secs => :stale_seconds)
+                  AND candidate_session.state IN (0, 1, 2)
+                  AND candidate_session.ended_at IS NULL
+                  AND candidate_session.unassigned_at IS NULL
                 GROUP BY e.session_id
                 ORDER BY oldest_pending_at ASC
                 LIMIT :limit

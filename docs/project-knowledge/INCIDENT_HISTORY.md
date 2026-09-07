@@ -1,5 +1,37 @@
 # Historico de Incidentes
 
+## 2026-09-06 — `api_call_missing_url` amplificado pelo reconciliador de eventos
+
+`STATUS`: ACTIVE WHEN OBSERVED / FIX VALIDATED LOCALLY
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `dd4aea68-f204-4255-8e4a-02e34a2be7f2`
+
+`FLOW`: `2112aa34-0c48-4cd6-a477-d8b5f5e1f52e` (`ECOM - Recuperação de avaliados`)
+
+### Evidência e causa
+
+- As sessões `809` e `810`, fixadas na revisão publicada v46, estavam em `state=2`, sem `ended_at`/`unassigned_at`, e alcançavam o card `api_call` `14e12b3c...`.
+- A URL `{{contact.extra.callback_url}}` resolvia para vazio porque as sessões não possuíam membro contextual nem `contact.extra.callback_url` no runtime.
+- O card possuía branch `exception` para `finish_flow`, mas o executor não o consultava para `api_call`; `WorkflowExecutionError(api_call_missing_url)` escapava como `task_exception`.
+- Cada sessão possuía cinco eventos WhatsApp pendentes. O reconciliador selecionava qualquer sessão não desatribuída, inclusive depois de terminalização, e reenfileirava o par aproximadamente a cada 30–41 segundos.
+- Na fotografia de produção, o par somava 53.844 alarmes e 400 métricas `task_exception` nas duas horas anteriores. A investigação foi somente leitura; nenhum flow, sessão, evento, serviço ou fila de produção foi alterado.
+
+### Correção preparada
+
+- `api_call_missing_url` usa a branch `exception` quando configurada e persiste diagnóstico em `api_call_last_error`.
+- Sem branch de exceção, o erro torna-se terminal: `state=3`, `ended_at`, cursor nulo, marcador `workflow_v2.terminal_failure` e um alarme pelo caminho Celery.
+- O reconciliador filtra sessões ativas (`state IN (0,1,2)`, sem `ended_at` ou `unassigned_at`) antes do `LIMIT`, impedindo reativação e evitando que terminais antigas ocupem o lote.
+- A validação local real confirmou: sessão `7415` finalizada pela exceção sem alarme; sessão `7416` terminalizada sem branch com exatamente um alarme; evento pendente temporário ligado à sessão terminal não foi selecionado pelo repositório e foi removido.
+
+### Pendências
+
+- Implantar o patch nos workers/beat ORCH e observar se as sessões `809`/`810` drenam pela edge já fixada na v46 e deixam de gerar novos alarmes.
+- Corrigir a origem funcional de `contact.extra.callback_url` ou a regra do flow; o patch evita amplificação, mas não inventa uma URL ausente.
+
 ## 2026-09-06 — `contact_birth_date` causou retry storm na execução do workflow
 
 `STATUS`: RESOLVED / DEPLOYED / RUNTIME VALIDATED

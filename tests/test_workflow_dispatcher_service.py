@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -116,3 +117,41 @@ async def test_wait_for_event_block_remains_pending_for_timeout(
             "only_if_not_finished": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_api_call_missing_url_marks_session_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _DummySession()
+    finished: list[dict] = []
+
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "get_current_workspace_schema",
+        lambda: "ws_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "bootstrap_workflow_for_session",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "execute_workflow_m2_for_session",
+        AsyncMock(return_value=SimpleNamespace(stopped_reason="api_call_missing_url")),
+    )
+
+    async def _finish(*_args, **kwargs) -> None:
+        finished.append(kwargs)
+
+    monkeypatch.setattr(workflow_dispatcher_service, "mark_session_finished", _finish)
+
+    stopped_reason = await workflow_dispatcher_service.advance_session_once(
+        session,
+        flow_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        session_id=126,
+    )
+
+    assert stopped_reason == "api_call_missing_url"
+    assert finished == [{"session_id": 126}]

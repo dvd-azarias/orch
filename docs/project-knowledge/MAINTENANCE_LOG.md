@@ -1,5 +1,31 @@
 # Maintenance Log
 
+## 2026-09-06 — Terminalização determinística de `api_call_missing_url`
+
+### REQUEST / CLASSIFICATION
+
+Interromper a amplificação de erro permanente observada em duas sessões de produção sem processar o card incorretamente. `ALPHA_FIX_REQUIRED`; risco médio por alterar roteamento de exceção, terminalidade e seleção do reconciliador, sem migration, endpoint, fila ou efeito externo novo.
+
+### CHANGE
+
+- O executor do `api_call` passa a usar a branch `exception*` já definida no grafo quando a preparação lança `WorkflowExecutionError`, persistindo `api_call_last_error` sem registrar URL ou payload nos logs.
+- `api_call_missing_url` entra nos conjuntos sincronizados de falha terminal da engine e do dispatcher. Sem branch de exceção, a sessão termina uma vez e o Celery persiste um único alarme.
+- O repositório do reconciliador considera somente sessões `state IN (0,1,2)`, sem `ended_at` e sem `unassigned_at`. O filtro fica dentro da CTE, antes do `LIMIT`, para sessões terminais antigas não causarem starvation do lote.
+
+### VALIDATION
+
+- Testes focados de engine, dispatcher, task e repositório: `18 passed`.
+- Regressão direcionada: `118 passed, 6 failed`; suíte completa: `524 passed, 26 failed`. Todas as falhas reproduzem a baseline legada de `trigger_orch(flow_uuid=...)`, exceto uma expectativa também preexistente de execução inline. Nenhum arquivo desses testes foi alterado pelo patch.
+- `compileall` e `git diff --check` passaram; `ruff` não está instalado na `.venv` atual.
+- Stack local completa em terminal persistente: API, três workers e dois Beats `up`; smoke canônico dos dois flows criou as sessões `7413`/`7414`, e os workers concluíram as tasks.
+- Prova real assíncrona com PostgreSQL/RabbitMQ/Redis: a sessão `7415`, com branch `exception`, terminou em `state=3`, cursor nulo e `api_call_last_error`, sem falha terminal ou alarme. A sessão `7416`, sem branch, terminou em `state=3`, cursor nulo, `terminal_failure=api_call_missing_url` e exatamente um alarme.
+- Foi inserido um evento WhatsApp pendente temporário na sessão terminal `7416`; a consulta real do reconciliador não a selecionou (`selected_by_reconciler=false`) e o evento foi removido.
+- Ao final, a stack foi encerrada; como os wrappers dos PID files deixaram subprocessos órfãos, os seis processos-mestre exatos foram finalizados e uma checagem independente confirmou porta `7777` livre e ausência de workers/beats locais.
+
+### RISK / ROLLBACK
+
+O patch não resolve a variável ausente nem tenta executar uma chamada sem URL. Flows com branch de exceção passam a seguir o contrato já desenhado; flows sem branch deixam de repetir indefinidamente e exigem correção funcional. Rollback é apenas de código e restart dos workers/beat; não há migration. Sessões já terminalizadas não são reabertas automaticamente.
+
 ## 2026-09-06 — Engine do card `wait_for_event`
 
 ### REQUEST / CLASSIFICATION
