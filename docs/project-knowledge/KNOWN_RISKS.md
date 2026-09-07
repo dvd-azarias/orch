@@ -384,7 +384,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R30 — Escopo por pessoa usado em flow de comunicação
 
-`STATUS`: FIX IMPLEMENTED / PERSON E2E AND DEPLOY PENDING
+`STATUS`: FIX DEPLOYED / PERSON E2E VALIDATED
 
 `IMPACT`: high
 
@@ -394,7 +394,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: uma sessão por pessoa não contém uma decisão legítima de canal para cards de comunicação. Selecionar silenciosamente o canal primário ou mais novo poderia enviar mensagem para o endereço errado e voltar a misturar cardinalidade com decisão de atuador.
 
-`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp enquanto não houver seleção explícita. `select_contact_channel` restringe candidatos à mesma pessoa/lista/mailing, prioriza o primário com desempate estável, faz rebind guardado somente do endereço da sessão e não altera `linked_actuator`; o card de comunicação posterior recebe o membro selecionado e continua sendo a autoridade do atuador. O canário `channel` foi aprovado no flow `c114383d-72e1-4401-8877-765e5bfac27f`; sua inclusão na allowlist `person` depende do deploy prévio da engine.
+`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp enquanto não houver seleção explícita. `select_contact_channel` restringe candidatos à mesma pessoa/lista/mailing, prioriza o primário com desempate estável, faz rebind guardado somente do endereço da sessão e não altera `linked_actuator`; o card de comunicação posterior recebe o membro selecionado e continua sendo a autoridade do atuador. A engine foi implantada antes de habilitar o flow canário na allowlist `person`. O vínculo oficial do mailing com duas pessoas criou exatamente duas sessões, ambas selecionaram `voice`, concluíram sem erro e tiveram os POSTs confirmados no destino.
 
 `ROLLBACK`: remover o UUID da allowlist no Target Core e reiniciar seus processos. O comportamento de novas associações volta a `channel`; sessões já materializadas não são expandidas retroativamente.
 
