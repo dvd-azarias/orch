@@ -384,7 +384,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R30 — Escopo por pessoa usado em flow de comunicação
 
-`STATUS`: FIX IMPLEMENTED / E2E AND DEPLOY PENDING
+`STATUS`: FIX IMPLEMENTED / PERSON E2E AND DEPLOY PENDING
 
 `IMPACT`: high
 
@@ -394,7 +394,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: uma sessão por pessoa não contém uma decisão legítima de canal para cards de comunicação. Selecionar silenciosamente o canal primário ou mais novo poderia enviar mensagem para o endereço errado e voltar a misturar cardinalidade com decisão de atuador.
 
-`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp com alarme `workflow_m2_person_scope_channel_component_not_supported`. A allowlist inicial contém somente o flow piloto `e94783ce-74f0-4df6-b868-a4b17f38e1e1`.
+`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp enquanto não houver seleção explícita. `select_contact_channel` restringe candidatos à mesma pessoa/lista/mailing, prioriza o primário com desempate estável, faz rebind guardado somente do endereço da sessão e não altera `linked_actuator`; o card de comunicação posterior recebe o membro selecionado e continua sendo a autoridade do atuador. O canário `channel` foi aprovado no flow `c114383d-72e1-4401-8877-765e5bfac27f`; sua inclusão na allowlist `person` depende do deploy prévio da engine.
 
 `ROLLBACK`: remover o UUID da allowlist no Target Core e reiniciar seus processos. O comportamento de novas associações volta a `channel`; sessões já materializadas não são expandidas retroativamente.
 
@@ -412,7 +412,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: o script grava o PID do wrapper `bash -lc`, mas Uvicorn/Celery criam processos filhos que podem sobreviver ao encerramento do wrapper. `status` consulta somente o pidfile e pode reportar todos os componentes como `down` enquanto API, beats e workers continuam ativos. Uma nova subida reutiliza hostnames, filas e schedule files, misturando processos stale com a stack nova.
 
-`RUNTIME EVIDENCE`: em 2026-08-24, `status` reportou toda a stack down, mas havia API e processos Celery `f5_local` orfaos desde 16:30 BRT. Nova tentativa as 18:11 BRT adicionou consumidores; os processos stale continuaram publicando dispatch, rescue e generate scan. A contencao exigiu encerrar todos os Uvicorn/Celery deste repositorio por command line. A porta 7777 e a lista de processos locais ficaram vazias; `celery inspect active_queues` confirmou nenhum consumer `f5_local`. As metricas globais do workspace continuaram crescendo pelo storm de producao ja conhecido e nao servem como criterio de shutdown local.
+`RUNTIME EVIDENCE`: em 2026-08-24, `status` reportou toda a stack down, mas havia API e processos Celery `f5_local` orfaos desde 16:30 BRT. Nova tentativa as 18:11 BRT adicionou consumidores; os processos stale continuaram publicando dispatch, rescue e generate scan. A contencao exigiu encerrar todos os Uvicorn/Celery deste repositorio por command line. A porta 7777 e a lista de processos locais ficaram vazias; `celery inspect active_queues` confirmou nenhum consumer `f5_local`. Em 2026-09-07, o problema se repetiu durante o card `select_contact_channel`: um Uvicorn da checkout principal respondeu ao primeiro smoke e três gerações de cada worker/beat `f5_local` permaneceram órfãs apesar de `status=down`. Os nove processos-mestre de worker, seus filhos e os seis beats foram resolvidos por comando/PPID, encerrados e a checagem final ficou vazia junto com a porta 7777. As metricas globais do workspace continuaram crescendo pelo storm de producao ja conhecido e nao servem como criterio de shutdown local.
 
 `MITIGATION`: antes de qualquer start, nao confiar apenas em pidfiles. Conferir porta 7777 e processos por command line; se houver stale, interromper e confirmar zero processos antes de subir. Nao repetir stack completa neste ambiente ate corrigir gerenciamento de process group, pid real, hostnames unicos e schedule files.
 

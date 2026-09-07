@@ -851,3 +851,35 @@ Antes de iniciar a sequencia de novos cards do roadmap comum, impedir que uma se
 - Stack local completa reiniciada em terminal dedicado. Smokes reais nos flows `2cb9482a-131e-4b2a-8507-484745661836` e `fea492fb-9420-4690-ba09-bd73dca50717` retornaram `202`, terminaram as sessoes `7283`/`7284` e gravaram nas metricas a mesma revisao fixada no runtime (v26/v16, respectivamente).
 - `compileall` e `git diff --check` passaram antes da consolidacao documental.
 - Canario controlado publicando N+1 durante uma pausa, rollout e deploy ainda pendentes; nenhum deploy foi executado.
+
+## 2026-09-07 — Engine `select_contact_channel`
+
+### REQUEST
+
+Implementar no ORCH o card já publicado no catálogo do Target Core e validá-lo primeiro com o flow canário em `channel`; somente após integração e deploy, incluir o flow na allowlist `person` do Target Core e repetir o E2E.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_OPTIONAL` — mudança contida que permite uma decisão explícita de canal em sessões por pessoa, sem migration, fila ou efeito externo próprio.
+
+### CHANGE
+
+- Em `channel`, a busca permanece presa ao membro e endereço de origem da sessão.
+- Em `person`, a busca fica limitada à mesma pessoa, lista e mailing, prioriza `is_primary` e usa o menor ID como desempate.
+- A seleção `person` atualiza somente `orch_sessions.entity_address`, sob guards de sessão ativa, escopo e colisão.
+- A linha candidata e a sessão são bloqueadas durante a escolha/rebind; `not_found`, `exception` e marcadores incompletos revogam a autorização de comunicação em modo fail-closed.
+- A escolha é persistida em `variables.customs[output_var]` e `workflow_v2.selected_contact_channel`, permitindo hidratação consistente nas retomadas.
+- Cards de comunicação continuam bloqueados em `person` antes de uma escolha explícita; depois dela, recebem o membro selecionado e permanecem responsáveis por `linked_actuator`.
+- Falhas configuracionais ou de persistência seguem `exception*` quando disponível ou terminalizam uma vez com alarme específico.
+
+### VALIDATION PARCIAL
+
+- Testes de configuração, branches, rebind, colisão, retomada, revogação fail-closed, alarmes e integração com o card Dialer: `30 passed` no arquivo dedicado.
+- Regressão direcionada de workflow e repositório: `140 passed`; o teste PostgreSQL isolado do seletor também passou.
+- Suíte completa: `584 passed, 27 failed`. As 27 falhas continuam nos mesmos node IDs e famílias da baseline já comparada: assinatura legada de `trigger_orch`, expectativas antigas de sessão/out-of-order e invalidação de prepared statement em tabela temporária; nenhuma falha nova foi introduzida.
+- Lint dos arquivos alterados/novos, formatação dos arquivos novos e `git diff --check` passaram.
+- Stack local completa iniciou com filas `*_f5_local`; os dois smokes encadeados retornaram `202`.
+- Após a revisão final, um Uvicorn órfão da checkout principal foi identificado pelo `cwd`, encerrado e substituído pela API desta branch. O smoke canônico repetido gerou as sessões `7503`–`7512`; todas terminaram em `state=3`, cursor final e `next_card_uuid=NULL`. No shutdown, três gerações órfãs de workers/beats `f5_local` foram encontradas e encerradas por PID/PPID; a porta 7777 e a busca pelos consumidores/beat schedules isolados terminaram vazias.
+- Sessão canário `7477`, revisão publicada v2, executou `channel -> selected -> api_call -> finish_flow`, terminou sem alarme e preservou membro/endereço. O destino respondeu `200` em uma tentativa com `status=received`.
+- Sessão local controlada `7480` executou o mesmo grafo com `session_scope=person`, `person_uuid` e roteamento contextual válidos, sem alarme e com novo `200/status=received`. O mailing canário possui um canal por pessoa; a troca de membro/endereço em `person` foi provada no teste PostgreSQL isolado.
+- E2E `person`, rollout e deploy permanecem pendentes. A allowlist não foi alterada antes de a engine estar disponível nos servidores ORCH.
