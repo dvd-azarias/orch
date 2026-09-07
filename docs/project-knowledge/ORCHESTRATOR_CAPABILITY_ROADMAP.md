@@ -24,7 +24,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 5 | `select_contact_channel` | `ALPHA_FIX_OPTIONAL` | Em implementação |
+| 5 | `select_contact_channel` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 6 | `send_with_sms` | A classificar no desenho do envelope | Planejado |
 | 7 | `send_with_email` | A classificar no desenho do envelope | Planejado |
 | 8 | `fail_flow` | A classificar no desenho do envelope | Planejado |
@@ -247,14 +247,18 @@ Contrato aprovado:
 - [x] Logs, resultado, erro e alarmes permitem diagnosticar o desfecho sem registrar o endereço do contato nos logs.
 - [x] Testes automatizados ORCH aprovados; as falhas da suíte ampla foram comparadas com a baseline.
 - [x] Stack local completa reiniciada e smoke encadeado validado conforme `AGENTS.md`.
-- [ ] Canary/E2E `channel` e `person` concluído.
-- [ ] PR ORCH integrado e rollout validado.
-- [x] Documentação e evidências parciais atualizadas.
-- [ ] Item marcado como concluído no estado geral.
+- [x] Canary/E2E `channel` e `person` concluído.
+- [x] PR ORCH integrado e rollout validado.
+- [x] Documentação e evidências atualizadas.
+- [x] Item marcado como concluído no estado geral.
 
-Evidência parcial: a sessão `7477` do flow canário `c114383d-72e1-4401-8877-765e5bfac27f`, em `channel`, selecionou o membro `10768`, preservou o endereço da sessão, seguiu `selected`, terminou em `finish_flow` sem alarme e recebeu `200/status=received` do `api-bin`. A sessão local controlada `7480` repetiu o caminho com `session_scope=person`, `person_uuid` válido e o membro `10769`, também sem alarme e com confirmação externa. Como cada pessoa do mailing possui apenas um canal, a troca efetiva entre membros foi validada no teste PostgreSQL isolado. O rollout da cardinalidade `person` gerada pelo Target permanece pendente até integração e deploy da engine no ORCH; somente então o flow será adicionado à allowlist do Target Core.
+Evidência concluída: a sessão `7477` do flow canário `c114383d-72e1-4401-8877-765e5bfac27f`, em `channel`, selecionou o membro `10768`, preservou o endereço da sessão, seguiu `selected`, terminou em `finish_flow` sem alarme e recebeu `200/status=received` do `api-bin`. A sessão local controlada `7480` repetiu o caminho com `session_scope=person`, `person_uuid` válido e o membro `10769`, também sem alarme e com confirmação externa. A PR ORCH `#154`, commit funcional `a27e110` e merge `ed3d84f`, foi implantada nos hosts `10.1.20.136` e `10.1.20.237` com health Celery `200`.
+
+Depois do deploy, o flow entrou em `ORCHESTRATOR_PERSON_SCOPE_FLOW_UUIDS` nos hosts Target Core `10.1.20.128`, `10.1.20.129`, `10.1.20.239` e `10.1.20.249`. As APIs `full`/`crud` foram reiniciadas de forma rolling nos dois hosts de API, carregaram a nova allowlist em seus processos e mantiveram health `200`, sem erro no journal. O desvínculo e novo vínculo do mailing de teste pela rota oficial retornaram `200`; as duas pessoas produziram exatamente as sessões `7513` e `7514`, duas entidades e duas pessoas distintas, ambas em `session_scope=person`, `selected`, canal `voice` primário, `api_call=200`, `state=3` e zero erro. A auditoria tardia permaneceu com duas sessões, sem duplicação. O destino confirmou os dois POSTs pelos `stream_id` `1351296` e `1351297`.
 
 Rollback: remover primeiro o UUID da allowlist `person` do Target Core e reiniciar seus produtores; depois interromper novas execuções antes de reverter a engine. Não há migration. Sessões já posicionadas no card seriam tratadas como componente não suportado pelo código anterior.
+
+Próximo item: `send_with_sms`.
 
 ## Backlog avancado
 
