@@ -260,6 +260,50 @@ Rollback: remover primeiro o UUID da allowlist `person` do Target Core e reinici
 
 Próximo item: `send_with_sms`.
 
+## Item 6 — `send_with_sms`
+
+Objetivo: preparar o handoff de uma sessão para o canal SMS usando o membro selecionado explicitamente, preservando a autoridade do ORCH sobre a execução do flow e sem realizar o envio ao provedor na primeira entrega.
+
+### Primeira entrega — handoff sem envio real
+
+- o card aceita a configuração necessária ao futuro SMS, mas o ORCH não executa chamada HTTP ao provedor;
+- número e membro são derivados do canal SMS já selecionado para a sessão; o card não escolhe fallback silencioso;
+- em escopo `person`, exige seleção SMS válida produzida por `select_contact_channel` dentro da mesma pessoa, lista e mailing;
+- em escopo `channel`, preserva o membro e o endereço que originaram a sessão e valida que o canal é SMS;
+- o próprio ORCH grava `linked_actuator=sms` no `contact_list_member` exato e mantém a sessão bloqueada aguardando a integração externa e seus callbacks;
+- nenhuma credencial, token, mensagem renderizada ou dado pessoal deve aparecer em log, alarme ou métrica;
+- testes da primeira entrega devem provar que nenhum POST de SMS ocorre.
+
+### Invariante para a ativação futura do envio real
+
+`linked_actuator=sms` é somente a marca de roteamento. Isoladamente, ela não contém mensagem renderizada, revisão do flow, configuração completa do provedor, callbacks, chave de idempotência nem credencial segura. Portanto, um emissor não pode considerar a linha pronta para envio apenas porque encontrou essa marca.
+
+Antes de habilitar o POST real, uma mudança separada deve obrigatoriamente:
+
+- definir explicitamente qual serviço é responsável pelo dispatch e pelo tratamento de DLR, MO e status;
+- materializar, sob autoridade do ORCH e a partir da revisão fixada da sessão, um `outbound_sms` ou contrato equivalente contendo o payload final de dispatch;
+- vincular o envelope à sessão, ao card, ao membro exato e à revisão executada;
+- incluir chave de idempotência e estados de claim/entrega que suportem retry sem duplicação silenciosa;
+- guardar segredo como credencial protegida ou referência resolvível pelo emissor, nunca em logs ou respostas de diagnóstico;
+- fazer o Supplier/emissor selecionar somente itens cujo envelope materializado esteja completo e pronto;
+- normalizar os callbacks do provedor em um adaptador com correlação inequívoca antes de retomar a sessão;
+- validar E2E fora da sandbox, observando o POST no destino, o retorno do provedor, os callbacks e a continuação correta do flow.
+
+É proibido resolver a etapa futura fazendo Supplier/Target carregar a definição corrente do flow para descobrir mensagem, credencial ou callbacks. Isso quebraria a revisão fixada e devolveria ao consumidor uma responsabilidade de execução que pertence ao ORCH.
+
+### Checklist específico do item 6
+
+- [ ] Confirmar os campos e branches do envelope no Target Core.
+- [ ] Garantir `422` para combinações estruturalmente inconsistentes.
+- [ ] Implementar o handoff marker-only no ORCH, sem chamada HTTP.
+- [ ] Validar o membro exato em `channel` e a seleção explícita SMS em `person`.
+- [ ] Provar por teste que `linked_actuator=sms` e o bloqueio são atômicos e idempotentes.
+- [ ] Provar por teste que nenhum cliente HTTP de SMS é invocado nesta fase.
+- [ ] Validar canários separados nos escopos `channel` e `person`.
+- [ ] Manter o envio real desabilitado até todas as pré-condições da seção anterior estarem implementadas em mudança própria.
+
+Rollback da primeira entrega: interromper novos usos do card, resolver ou terminalizar de forma auditada as sessões ainda bloqueadas nele e reverter catálogo/engine. Não há envio externo nem efeito remoto para compensar nessa fase. Alterações de `linked_actuator` já consumidas por sistemas externos devem ser auditadas antes de qualquer restauração de dados.
+
 ## Backlog avancado
 
 Nao iniciar antes da revisao explicita posterior a conclusao dos itens comuns:

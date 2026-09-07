@@ -195,6 +195,35 @@ Ao alcançar `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp
 
 O Target Core é consumidor desse estado: seu Contact Supplier seleciona somente linhas WhatsApp com HSM materializado e devolve o JSON sem carregar ou interpretar a definição do flow.
 
+## Handoff SMS planejado e fronteira do envio real
+
+Primeira entrega:
+
+```text
+select_contact_channel seleciona SMS no escopo da sessão
+  -> send_with_sms valida o membro e o endereço exatos
+  -> ORCH grava linked_actuator=sms
+  -> ORCH bloqueia a sessão
+  -> nenhum POST de SMS é executado
+```
+
+O `linked_actuator` informa qual atuador deve assumir o contato, mas não é um payload de dispatch. Diferentemente do caminho WhatsApp com `outbound_hsm`, a primeira entrega de SMS ainda não materializa mensagem, configuração do provedor, callbacks, idempotência ou credencial segura.
+
+Ativação futura obrigatória:
+
+```text
+ORCH executa a revisão fixada e renderiza o card
+  -> materializa outbound_sms ou contrato equivalente
+     (sessão + card + membro + revisão + payload + idempotência + segredo protegido)
+  -> grava linked_actuator=sms de forma consistente com o envelope
+  -> Supplier/emissor reivindica somente envelope completo
+  -> emissor realiza o POST ao provedor
+  -> adaptador correlaciona DLR/MO/status
+  -> ORCH retoma a mesma sessão pela branch correspondente
+```
+
+Supplier/Target não deve carregar a definição corrente do flow para reconstruir o SMS. O conteúdo final é responsabilidade da execução do ORCH e deve permanecer ligado à revisão fixada da sessão. Enquanto esse contrato e os callbacks não existirem e não forem comprovados E2E, envio real permanece fora do escopo do card.
+
 ## `switch_bot_flow` — hub WhatsApp para BOT
 
 ```text

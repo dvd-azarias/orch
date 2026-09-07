@@ -631,3 +631,23 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `DETECTION`: procurar sessões `state=0` com `workflow_v2.blocking_stop_reason=blocked_wait_for_event` agrupadas pelo mesmo `flow_uuid/entity`; comparar `callbacks_pending`, `callback_at` e `timeout_at` antes de intervir.
 
 `V2`: correlação explícita e indexada por `session_uuid`/correlation key, com inbox idempotente e política declarada para evento sem consumidor.
+
+## R33 — `linked_actuator=sms` pode ser confundido com envelope pronto para envio
+
+`STATUS`: OPEN / FUTURE ACTIVATION GATE
+
+`IMPACT`: critical se o envio real for habilitado sem contrato materializado
+
+`PROBABILITY`: low enquanto a primeira entrega permanecer marker-only; high se um emissor selecionar apenas por `linked_actuator=sms`
+
+`AFFECTED AREA`: `send_with_sms` / Contact Supplier / dispatch SMS / callbacks DLR, MO e status
+
+`DESCRIPTION`: a marca `linked_actuator=sms` identifica a intenção e o membro escolhido, mas não transporta mensagem renderizada, revisão fixada do flow, configuração completa do provedor, callbacks, chave de idempotência ou credencial protegida. Um emissor que trate somente essa marca como item pronto teria de adivinhar dados ausentes ou carregar a definição corrente do flow. Além de poder enviar conteúdo vazio, incorreto ou duplicado, essa leitura quebraria o pin de revisão e faria Supplier/Target executar parte do grafo que pertence ao ORCH.
+
+`MITIGATION`: manter a primeira entrega estritamente sem POST externo. Antes de ativar envio real, materializar no ORCH um `outbound_sms` ou contrato equivalente, ligado a sessão/card/membro/revisão, com payload final, credencial protegida ou referência, idempotência e estados de entrega. O Supplier/emissor deve selecionar apenas envelopes completos; nunca deve interpretar o flow. Implementar também adaptador de callbacks com correlação inequívoca e teste E2E no provedor.
+
+`DETECTION`: alertar qualquer tentativa de dispatch SMS sem envelope completo; consultas do Supplier/Target ao grafo do flow para montar SMS; SMS marcado sem payload materializado quando o modo de envio real estiver ativo; repetição da mesma chave de idempotência; callback sem correlação única; segredo ou mensagem expostos em log, alarme ou métrica.
+
+`EVIDENCE`: decisão arquitetural registrada antes da implementação do item 6. A primeira fase planejada grava somente `linked_actuator=sms`, bloqueia a sessão e deve provar por teste que não chama o provedor.
+
+`V2`: registry de conectores e credenciais, outbox transacional de comunicação, dispatch idempotente e inbox normalizado de callbacks como contratos nativos da plataforma.
