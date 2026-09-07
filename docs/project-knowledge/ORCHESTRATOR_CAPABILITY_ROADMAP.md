@@ -19,7 +19,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 
 | Ordem | Capacidade | Classificacao Alpha | Estado |
 |---:|---|---|---|
-| 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Em implementacao |
+| 0 | Fixacao da revisao por sessao | `ALPHA_FIX_OPTIONAL` | Concluido |
 | 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
 | 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
@@ -54,7 +54,7 @@ Aplicar este checklist separadamente a cada item de 1 a 8:
 
 Objetivo: uma sessao iniciada na revisao publicada N deve continuar na revisao N mesmo depois da publicacao da revisao N+1. Sessoes novas usam N+1.
 
-Branch ORCH: `fix/pin-session-flow-revision`.
+Branch ORCH: `fix/pin-session-flow-revision`. PR: `#142`.
 
 - [x] Risco existente confirmado no bootstrap e no executor M2.
 - [x] Confirmado que o bootstrap ja persiste `revision_id`, `revision_version` e `revision_mode` em `runtime_variables.workflow_v2`.
@@ -70,9 +70,9 @@ Branch ORCH: `fix/pin-session-flow-revision`.
 - [x] Testar: sessao legada sem pin recebe uma revisao e permanece nela.
 - [x] Executar regressao direcionada de workflow, eventos de canal, callbacks, metricas e dispatcher.
 - [x] Reiniciar a stack local completa e executar smoke encadeado antes de qualquer homologacao.
-- [ ] Executar canario controlado com uma sessao pausada entre duas publicacoes.
+- [x] Executar canario controlado com uma sessao pausada entre duas publicacoes.
 - [x] Atualizar R7 em `KNOWN_RISKS.md`, `DATA_FLOW.md` e o registro da manutencao.
-- [ ] Revisao final e estrategia de rollback aprovadas.
+- [x] Revisao final e estrategia de rollback aprovadas: sem migration; em caso de regressao, reverter o commit funcional `1e3b878` e reiniciar API/workers de workflow de forma gradual.
 
 ### Limite conhecido do item 0
 
