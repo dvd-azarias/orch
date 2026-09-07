@@ -23,7 +23,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
 | 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Em implementação |
+| 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 5 | `select_contact_channel` | A classificar no desenho do envelope | Planejado |
 | 6 | `send_with_sms` | A classificar no desenho do envelope | Planejado |
 | 7 | `send_with_email` | A classificar no desenho do envelope | Planejado |
@@ -210,13 +210,13 @@ Contrato aprovado:
 - [x] Testes automatizados ORCH aprovados; falhas da suíte ampla foram comparadas com a baseline.
 - [x] Stack local completa reiniciada e smoke encadeado validado conforme `AGENTS.md`.
 - [x] Canary/E2E confirmou as duas variantes, terminalidade, ausência de alarmes e os POSTs posteriores no destino.
-- [ ] PR ORCH integrada e rollout validado.
+- [x] PR ORCH `#152` integrada e rollout validado.
 - [x] Documentação e evidências atualizadas.
-- [ ] Item marcado como concluído no estado geral.
+- [x] Item marcado como concluído no estado geral.
 
 Rollback: interromper novos usos do card antes de reverter a engine e reiniciar API/workers. Não há migration nem dado funcional externo criado pelo card; sessões ainda posicionadas nele seriam tratadas como componente não suportado pelo código anterior.
 
-Próximo item após rollout: `select_contact_channel`.
+Próximo item: `select_contact_channel`.
 
 ## Backlog avancado
 

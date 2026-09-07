@@ -26,9 +26,17 @@ Implementar no ORCH o contrato A/B já integrado ao catálogo do Target Core. `A
 - A auditoria tardia após desligar a stack manteve estados, cursores, buckets, contagens de métricas e zero alarmes inalterados, sem sinal de hot loop.
 - No encerramento, o script voltou a deixar subprocessos órfãos. Os seis mestres foram identificados pelo diretório do worktree e filas locais, encerrados explicitamente, e a auditoria final confirmou porta `7777` livre e ausência de Uvicorn/Celery locais.
 
+### POST-DEPLOY
+
+- A PR ORCH `#152` foi integrada em `main` pelo merge commit `8345284`. O rollout fez fast-forward nos hosts `10.1.20.136` e `10.1.20.237`; os checksums dos respectivos `.env` permaneceram idênticos antes e depois, com backups restritos em `.maintenance-backups/.env.pre-split-random-20260907T0203Z`.
+- No `136` foi reiniciada somente a API. No `237`, a API e os workers de workflow `01`–`05` foram reiniciados de forma gradual; cada worker confirmou `ready`. FileApp, generate-file, billing e Beats não foram reiniciados.
+- Após o rollout, API, banco, broker, workers e Beat ficaram saudáveis nos dois hosts, sem unidade ORCH falha ou erro novo no journal. Os cinco workers `orch-celery-worker@237_01`–`05` ficaram visíveis no health check.
+- O canário de produção criou as sessões `7441`–`7448`: todas terminaram em `state=3`, três por `variant_a` e cinco por `variant_b`, com os oito buckets iguais ao recálculo determinístico. Cada sessão registrou exatamente um `split_random`, um `api_call` e um `finish_flow`.
+- Os oito POSTs posteriores foram observados no API-bin com HTTP 200/`status=received` na primeira tentativa, `stream_id` `1346110`–`1346117`. Não houve alarme, `component_not_supported:split_random` ou erro `split_random_*`; a auditoria tardia manteve estados e contagens inalterados.
+
 ### RISK / ROLLBACK
 
-O percentual representa amostragem determinística, não uma cota exata em lotes pequenos. O grafo inválido não é executado silenciosamente. Para rollback, impedir novos triggers do card, reverter a engine e reiniciar API/workers; não há migration ou dado externo do próprio card a desfazer. Antes do rollout, o flow canário publicado continua sujeito ao stop seguro `component_not_supported:split_random` quando alcançado apenas por código antigo.
+O percentual representa amostragem determinística, não uma cota exata em lotes pequenos. O grafo inválido não é executado silenciosamente. Para rollback, impedir novos triggers do card, reverter a engine e reiniciar API/workers; não há migration ou dado externo do próprio card a desfazer. Sessões ainda posicionadas no card voltariam ao stop seguro `component_not_supported:split_random` caso fossem alcançadas somente por código anterior.
 
 ## 2026-09-06 — Terminalização determinística de `api_call_missing_url`
 
