@@ -6,6 +6,7 @@ from app.repositories.orch_channel_events_repository import (
     fetch_channel_event_by_identity,
     fetch_next_pending_channel_event,
     has_channel_event_identity,
+    list_stale_pending_channel_event_sessions,
     mark_channel_event_processed,
     mark_channel_event_processed_by_identity,
     mark_pending_channel_events_processed,
@@ -16,8 +17,9 @@ from app.repositories.orch_channel_events_repository import (
 class _Result:
     rowcount = 2
 
-    def __init__(self, row: dict | None = None) -> None:
+    def __init__(self, row: dict | None = None, rows: list[dict] | None = None) -> None:
         self._row = row
+        self._rows = rows or []
 
     def mappings(self) -> "_Result":
         return self
@@ -28,17 +30,21 @@ class _Result:
     def scalar(self) -> bool:
         return bool(self._row)
 
+    def all(self) -> list[dict]:
+        return self._rows
+
 
 class _Session:
-    def __init__(self, row: dict | None = None) -> None:
+    def __init__(self, row: dict | None = None, rows: list[dict] | None = None) -> None:
         self.statement = ""
         self.parameters: dict = {}
         self.row = row
+        self.rows = rows
 
     async def execute(self, statement, parameters):  # noqa: ANN001
         self.statement = str(statement)
         self.parameters = parameters
-        return _Result(self.row)
+        return _Result(self.row, self.rows)
 
 
 @pytest.mark.asyncio
@@ -171,3 +177,25 @@ async def test_mark_whatsapp_messages_processed_by_ids_only_matches_message_even
     assert "event_type LIKE 'message%'" in session.statement
     assert "jsonb_array_elements_text" in session.statement
     assert session.parameters["message_ids"] == '["wamid.001", "wamid.002"]'
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_event_candidates_filter_terminal_sessions_before_limit() -> None:
+    expected = [{"session_id": 7002, "flow_uuid": "flow-active", "pending_events": 3}]
+    session = _Session(rows=expected)
+
+    rows = await list_stale_pending_channel_event_sessions(
+        session,  # type: ignore[arg-type]
+        stale_seconds=30,
+        limit=200,
+    )
+
+    assert rows == expected
+    assert "JOIN orch_sessions candidate_session" in session.statement
+    assert "candidate_session.state IN (0, 1, 2)" in session.statement
+    assert "candidate_session.ended_at IS NULL" in session.statement
+    assert "candidate_session.unassigned_at IS NULL" in session.statement
+    assert session.statement.index("candidate_session.state IN (0, 1, 2)") < session.statement.index(
+        "LIMIT :limit"
+    )
+    assert session.parameters == {"stale_seconds": 30, "limit": 200}

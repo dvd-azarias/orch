@@ -166,6 +166,7 @@ LOOP_GUARD_COUNTER_KEY = "continuous_steps"
 LOOP_GUARD_LAST_TRANSITION_KEY = "last_transition_signature"
 POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 TERMINAL_WORKFLOW_ERROR_CODES = {
+    "api_call_missing_url",
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
     "person_scope_channel_component_not_supported",
@@ -6630,10 +6631,37 @@ async def execute_workflow_m2_for_session(
                             execution_error=exc,
                         )
                 elif kind == "api_call":
-                    branch_label = _run_api_call(
-                        component=component,
-                        runtime_variables=runtime_variables,
-                    )
+                    try:
+                        branch_label = _run_api_call(
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        if exception_branch is None:
+                            raise
+                        runtime_variables["api_call_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 api_call preparation failed",
+                            extra={
+                                "event": "orch.workflow.m2.api_call_preparation_failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": True,
+                            },
+                        )
+                        branch_label = exception_branch
                 elif kind == "cache_post":
                     try:
                         branch_label = await _run_cache_post(

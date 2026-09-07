@@ -280,7 +280,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R16 — Definicao invalida pode executar e entrar em retry permanente
 
-`STATUS`: CONFIRMED RUNTIME / INCIDENT CONTAINED / FIX PREPARED
+`STATUS`: CONFIRMED RUNTIME / RECURRENCE ACTIVE WHEN OBSERVED / FIX VALIDATED LOCALLY
 
 `IMPACT`: critical
 
@@ -290,9 +290,9 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: o runtime aceita flow `draft`, seleciona sua revisao draft e nao valida previamente branches obrigatorias ou configuracao minima de componentes. Excecao permanente na task nao terminaliza nem aplica backoff duravel. Com o comportamento de claim de R1, a mesma sessao pode ser enfileirada continuamente.
 
-`RUNTIME EVIDENCE`: o flow `0e378237-4a61-4d5f-89f3-b07b594df38f` tinha condition sem `false/exception`, duas `api_call` sem URL e sessoes presas no primeiro card. As sessoes `256` e `257`, ainda elegiveis ao dispatcher, foram terminalizadas em 2026-08-24 16:15 BRT. Durante a validacao, um reconciliador local sem escopo reenfileirou a sessao WhatsApp `263`, `state=2`, que falhou em `api_call_missing_url`; ela foi terminalizada as 16:50 BRT. A contagem final estabilizou em 1.154.025 alarmes.
+`RUNTIME EVIDENCE`: o flow `0e378237-4a61-4d5f-89f3-b07b594df38f` tinha condition sem `false/exception`, duas `api_call` sem URL e sessoes presas no primeiro card. As sessoes `256` e `257`, ainda elegiveis ao dispatcher, foram terminalizadas em 2026-08-24 16:15 BRT. Durante a validacao, um reconciliador local sem escopo reenfileirou a sessao WhatsApp `263`, `state=2`, que falhou em `api_call_missing_url`; ela foi terminalizada as 16:50 BRT. A contagem final estabilizou em 1.154.025 alarmes. Em 2026-09-06, o flow ativo `2112aa34-0c48-4cd6-a477-d8b5f5e1f52e` apresentou nova variante: as sessoes `809` e `810`, fixadas na revisao publicada v46, chegaram a um `api_call` cuja URL `{{contact.extra.callback_url}}` resolveu vazia. A definicao tinha edge `exception`, mas o executor relancava o erro. Cada sessao mantinha cinco eventos WhatsApp pendentes; o reconciliador as reenfileirava aproximadamente a cada 30–41 segundos. A fotografia registrou 53.844 alarmes somados e 400 metricas `task_exception` nas duas horas anteriores.
 
-`MITIGATION`: nao publicar/acionar o flow; preservar evidencias e isolar dispatcher/sessoes somente por procedimento aprovado. A correcao preparada terminaliza `condition_branch_not_mapped` com `state=3`, `ended_at`, cursor nulo, metadado de falha e alarme unico; ainda depende de deploy validado para proteger novas sessoes.
+`MITIGATION`: validar grafo e configuração no Target Core, sem assumir que templates podem ser resolvidos estaticamente para todos os contatos. O ORCH terminaliza `condition_branch_not_mapped`. Para `api_call_missing_url`, a correção Alpha preparada segue a edge `exception` quando ela existe; sem a edge, persiste `state=3`, `ended_at`, cursor nulo, metadado de falha e alarme único. A seleção do reconciliador filtra `state IN (0,1,2)`, `ended_at IS NULL` e `unassigned_at IS NULL` antes do lote, evitando reativação e starvation por sessões terminais. Até o deploy, preservar evidências e isolar sessões/dispatcher somente por procedimento aprovado.
 
 `DETECTION`: validar grafo/config antes de publish, agregar alarmes por `flow_uuid/session_id/exception_message` e alertar para repeticao de erro permanente.
 
