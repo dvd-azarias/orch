@@ -125,6 +125,17 @@ A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint n
 
 A correlação continua sendo o contrato Alpha preexistente `flow_uuid + entity`, que seleciona uma sessão ativa. Ela não distingue duas sessões simultâneas do mesmo flow e entidade; consulte R32.
 
+## Card `split_random`
+
+1. Normaliza os percentuais inteiros de `variant_a` e `variant_b`, aceita os extremos `0/100` e `100/0` e exige soma exatamente igual a 100.
+2. Antes da seleção, valida no grafo exatamente uma saída `variant_a`, uma `variant_b` e no máximo uma `exception`. Isso impede que o fallback legado do resolvedor de branches encaminhe silenciosamente uma sessão por uma saída diferente da escolhida.
+3. Calcula um bucket de `0` a `99` com SHA-256 sobre a identidade estável `flow + session + revision + card`. Bucket menor que o percentual A segue por `variant_a`; os demais seguem por `variant_b`.
+4. A mesma sessão, revisão e card produzem sempre o mesmo bucket, inclusive em retry ou redelivery. Sessões distintas são amostradas de forma pseudoaleatória; o percentual é uma probabilidade por sessão, não uma cota exata em lotes pequenos.
+5. Grava somente o nome da variante em `variables.customs[output_var]`. O diagnóstico `split_random_last_result` inclui bucket, percentuais, revisão e estratégia, sem persistir o material usado como seed.
+6. Configuração ou grafo inválido segue por `exception` quando há exatamente uma saída desse tipo. Sem ela, a sessão é terminalizada uma vez, impedindo repetição permanente pelo dispatcher.
+
+O card não usa gerador aleatório de processo, não acessa rede ou tabelas adicionais, não cria fila, migration ou retry próprio.
+
 ## FileApp — decisao
 
 A resolucao considera UUID de template no evento e configuracao do flow. Template ausente ou nao resolvido conduz ao caminho `tipo_2`; um valor presente mas invalido nao produz erro obrigatorio.

@@ -23,7 +23,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 1 | `create_contact` | `ALPHA_FIX_OPTIONAL` | Concluido |
 | 2 | `source_list_membership` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 4 | `split_random` | A classificar no desenho do envelope | Planejado |
+| 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Em implementação |
 | 5 | `select_contact_channel` | A classificar no desenho do envelope | Planejado |
 | 6 | `send_with_sms` | A classificar no desenho do envelope | Planejado |
 | 7 | `send_with_email` | A classificar no desenho do envelope | Planejado |
@@ -184,6 +184,39 @@ Limite Alpha: a correlação genérica existente escolhe uma sessão ativa por `
 Rollback: interromper novos usos e aguardar ou resolver as esperas ativas antes de reverter a engine. Uma sessão ainda posicionada no card seria encerrada como componente não suportado pelo código anterior. Não há migration nem efeito externo a desfazer.
 
 Próximo item: `split_random`.
+
+## Item 4 — `split_random`
+
+Objetivo: distribuir cada sessão por uma única variante A ou B conforme percentuais configurados, mantendo a escolha estável em retries e redeliveries sem introduzir estado compartilhado ou efeito externo próprio.
+
+Contrato aprovado:
+
+- percentuais inteiros entre 0 e 100, com soma exata 100 e extremos aceitos;
+- branches `variant_a`, `variant_b` e `exception`;
+- bucket determinístico por `flow + session + revision + card`, usando `sha256_mod_100_v1`;
+- saída textual em `variables.customs[output_var]` e diagnóstico em `split_random_last_result`;
+- percentual como probabilidade por sessão, não como cota exata de lote.
+
+- [x] Semântica, efeitos e branches definidos.
+- [x] Envelope atual definido no catálogo, sem versões paralelas.
+- [x] Branch Target Core criada do `origin/main` atualizado.
+- [x] Catálogo e validação `422` implementados no Target Core.
+- [x] Testes do contrato Target Core aprovados.
+- [x] PR Target Core `#468` integrada e ambiente alvo atualizado.
+- [x] Branch ORCH criada do `origin/main` atualizado.
+- [x] Engine ORCH implementada com seleção determinística e validação explícita do grafo.
+- [x] Não há timeout, retry ou efeito externo próprio; retries do executor recalculam o mesmo bucket.
+- [x] Logs, resultado e erro permitem diagnosticar variante, bucket, revisão e configuração sem registrar o material do seed.
+- [x] Testes automatizados ORCH aprovados; falhas da suíte ampla foram comparadas com a baseline.
+- [x] Stack local completa reiniciada e smoke encadeado validado conforme `AGENTS.md`.
+- [x] Canary/E2E confirmou as duas variantes, terminalidade, ausência de alarmes e os POSTs posteriores no destino.
+- [ ] PR ORCH integrada e rollout validado.
+- [x] Documentação e evidências atualizadas.
+- [ ] Item marcado como concluído no estado geral.
+
+Rollback: interromper novos usos do card antes de reverter a engine e reiniciar API/workers. Não há migration nem dado funcional externo criado pelo card; sessões ainda posicionadas nele seriam tratadas como componente não suportado pelo código anterior.
+
+Próximo item após rollout: `select_contact_channel`.
 
 ## Backlog avancado
 
