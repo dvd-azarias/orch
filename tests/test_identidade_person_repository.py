@@ -52,6 +52,40 @@ def _person_payload(**overrides):  # type: ignore[no-untyped-def]
     return payload
 
 
+@pytest.mark.asyncio
+async def test_fetch_person_by_uuid_for_membership_loads_profile_and_channels() -> None:
+    person_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    session = _Session(
+        [
+            _Result(
+                {
+                    "id": 1,
+                    "uuid": person_uuid,
+                    "identifier": "12345678901",
+                    "channels": [{"type": "phone", "value": "21999999999"}],
+                }
+            )
+        ]
+    )
+
+    person = await repository.fetch_person_by_uuid_for_update(
+        session,  # type: ignore[arg-type]
+        person_uuid=person_uuid,
+    )
+
+    assert person == {
+        "id": 1,
+        "uuid": person_uuid,
+        "identifier": "12345678901",
+        "channels": [{"type": "phone", "value": "21999999999"}],
+    }
+    statement = str(session.calls[0][0]).lower()
+    assert "from persons" in statement
+    assert "merged_into_uuid is null" in statement
+    assert "for update" in statement
+    assert session.calls[0][1] == {"person_uuid": person_uuid}
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

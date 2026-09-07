@@ -270,7 +270,13 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
         return (
             "error",
             "workflow_m2_person_scope_channel_component_not_supported",
-            "Sessão por pessoa encerrada ao alcançar componente de comunicação por canal.",
+            "Sessão por pessoa encerrada ao alcançar comunicação sem seleção explícita de canal.",
+        )
+    if stopped_reason.startswith("select_contact_channel_"):
+        return (
+            "error",
+            f"workflow_m2_{stopped_reason}",
+            "Sessão encerrada porque a seleção de canal falhou de forma determinística.",
         )
     if stopped_reason == "condition_branch_not_mapped":
         return (

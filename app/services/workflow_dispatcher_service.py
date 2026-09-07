@@ -16,6 +16,7 @@ from app.services.workflow_runtime_service import bootstrap_workflow_for_session
 
 logger = get_logger(__name__)
 RESUMABLE_STOP_REASONS = {
+    "blocked_wait_for_event",
     "scheduled_wait",
     "frozen_wait_active",
     "max_steps_reached",
@@ -37,11 +38,17 @@ FINAL_STOP_REASONS = {
     "session_already_terminal",
 }
 TERMINAL_FAILURE_STOP_REASONS = {
+    "api_call_missing_url",
     "condition_branch_not_mapped",
     "contact_member_scope_not_found",
     "contact_member_routing_update_failed",
     "pinned_revision_invalid",
     "pinned_revision_not_found",
+    "wait_for_event_invalid_event_source",
+    "wait_for_event_invalid_event_result",
+    "wait_for_event_invalid_timeout_seconds",
+    "wait_for_event_invalid_output_var",
+    "wait_for_event_state_mismatch",
 }
 FATAL_NON_RESUMABLE_STOP_REASONS = {
     "flow_not_found",

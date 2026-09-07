@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from types import SimpleNamespace
+import json
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,7 +11,6 @@ from app.services.workflow_m2_service import (
     WorkflowExecutionError,
     _build_send_whatsapp_template_hsm,
     _build_runtime_utils_payload,
-    _build_create_contact_records,
     _blocking_stop_reason_for_component,
     _clear_blocking_execution,
     _compute_whatsapp_status_order_delay,
@@ -270,7 +269,7 @@ def test_contact_member_terminal_failures_have_inline_alarms() -> None:
     assert person_scope_alarm == (
         "error",
         "workflow_m2_person_scope_channel_component_not_supported",
-        "Sessão por pessoa encerrada ao alcançar componente de comunicação por canal.",
+        "Sessão por pessoa encerrada ao alcançar comunicação sem seleção explícita de canal.",
     )
 
 
@@ -332,103 +331,6 @@ def test_render_value_resolves_utils_builtin_without_prefix() -> None:
     assert _render_value("hoje={{dia_atual}}", variables) == "hoje=2026-06-23"
 
 
-def test_build_create_contact_records_renders_required_fields() -> None:
-    component = {
-        "parameters": {
-            "mapping": [
-                {"key": "identificador", "value": "{{api_body.id}}"},
-                {"key": "endereço", "value": "{{api_body.phone}}"},
-                {"key": "nome", "value": "{{api_body.name}}"},
-                {"key": "origem", "value": "campanha_xyz"},
-            ]
-        }
-    }
-    scope = {
-        "api_body": {
-            "id": "10392279998",
-            "phone": "5594975620806",
-            "name": "Maria Antonieta Dos Reis",
-        }
-    }
-    records = _build_create_contact_records(component=component, resolution_scope=scope)
-    assert len(records) == 1
-    assert records[0]["identifier"] == "10392279998"
-    assert records[0]["address"] == "5594975620806"
-    assert records[0]["full_name"] == "Maria Antonieta Dos Reis"
-    assert records[0]["extras"]["origem"] == "campanha_xyz"
-
-
-def test_build_create_contact_records_supports_list_values() -> None:
-    component = {
-        "parameters": {
-            "mapping": [
-                {"key": "identifier", "value": ["1001", "1002"]},
-                {"key": "address", "value": ["551190000001", "551190000002"]},
-            ]
-        }
-    }
-    records = _build_create_contact_records(component=component, resolution_scope={})
-    assert [item["identifier"] for item in records] == ["1001", "1002"]
-    assert [item["address"] for item in records] == ["551190000001", "551190000002"]
-
-
-def test_build_create_contact_records_raises_when_required_missing() -> None:
-    component = {
-        "parameters": {
-            "mapping": [
-                {"key": "identifier", "value": "1001"},
-                {"key": "address", "value": ""},
-            ]
-        }
-    }
-    with pytest.raises(WorkflowExecutionError) as exc:
-        _build_create_contact_records(component=component, resolution_scope={})
-    assert exc.value.code == "create_contact_missing_required_fields"
-
-
-@pytest.mark.asyncio
-async def test_create_contact_records_new_billing_event_without_legacy_dual_publish(monkeypatch) -> None:
-    child_session_uuid = "55555555-5555-5555-5555-555555555555"
-    batch_event = AsyncMock()
-    legacy_snapshot = AsyncMock()
-    monkeypatch.setattr(
-        workflow_m2_service,
-        "get_settings",
-        lambda: SimpleNamespace(orch_billing_snapshot_enabled=False, orch_billing_enabled=True),
-    )
-    monkeypatch.setattr(workflow_m2_service, "get_current_workspace_uuid", lambda: "11111111-1111-1111-1111-111111111111")
-    monkeypatch.setattr(workflow_m2_service, "resolve_next_card_uuid_by_branch", lambda *_args, **_kwargs: "22222222-2222-2222-2222-222222222222")
-    monkeypatch.setattr(workflow_m2_service, "ensure_default_source_list_for_create_contact", AsyncMock(return_value={"id": 7, "public_id": "list-7"}))
-    monkeypatch.setattr(workflow_m2_service, "upsert_person_for_create_contact", AsyncMock(return_value={"uuid": "33333333-3333-3333-3333-333333333333"}))
-    monkeypatch.setattr(workflow_m2_service, "ensure_contact_list_member_for_create_contact", AsyncMock(return_value={"id": 8, "created": True}))
-    monkeypatch.setattr(workflow_m2_service, "ensure_session_for_created_contact", AsyncMock(return_value={"id": 9, "uuid": child_session_uuid, "created": True}))
-    monkeypatch.setattr(workflow_m2_service, "increment_source_list_counters_for_create_contact", AsyncMock())
-    monkeypatch.setattr(workflow_m2_service, "try_record_billing_event", batch_event)
-    monkeypatch.setattr(workflow_m2_service, "try_create_billing_snapshot_outbox", legacy_snapshot)
-
-    result = await workflow_m2_service._run_create_contact(
-        db_session=None,
-        flow_uuid="44444444-4444-4444-4444-444444444444",
-        session_id=10,
-        definition={},
-        current_card_uuid="66666666-6666-6666-6666-666666666666",
-        component={
-            "ref_id": "create-1",
-            "parameters": {
-                "mapping": [
-                    {"key": "identifier", "value": "1001"},
-                    {"key": "address", "value": "551190000001"},
-                ]
-            },
-        },
-        runtime_variables={},
-    )
-
-    assert result == "action_after_creating_contact"
-    batch_event.assert_awaited_once()
-    legacy_snapshot.assert_not_awaited()
-
-
 def test_resolve_component_exception_branch_label_returns_exception_alias() -> None:
     definition = {
         "components": [
@@ -437,7 +339,7 @@ def test_resolve_component_exception_branch_label_returns_exception_alias() -> N
             {"ref_id": "card-3", "component_id": "api_call"},
         ],
         "branches": [
-            {"from": "card-1", "to": "card-2", "branch": "action_after_creating_contact"},
+            {"from": "card-1", "to": "card-2", "branch": "created"},
             {"from": "card-1", "to": "card-3", "branch": "exception_hgdxh542k"},
         ],
     }
@@ -1338,6 +1240,21 @@ def test_inject_contact_runtime_scope_sets_contact_extra() -> None:
     assert variables["contact"]["channel"]["address"] == "5511900700001"
     assert variables["contact"]["channel"]["type"] == "voice"
     assert variables["customs"]["contact"]["extra"]["data_ocorrencia"] == "01/01/2026"
+
+
+def test_inject_contact_runtime_scope_serializes_birth_date_as_iso() -> None:
+    runtime_variables: dict[str, object] = {}
+    _inject_contact_runtime_scope(
+        runtime_variables=runtime_variables,
+        contact_row={
+            "contact_birth_date": date(1940, 8, 12),
+        },
+    )
+
+    variables = runtime_variables["variables"]
+    assert variables["contact"]["birth_date"] == "1940-08-12"
+    assert variables["customs"]["contact"]["birth_date"] == "1940-08-12"
+    assert json.loads(json.dumps(runtime_variables, ensure_ascii=False)) == runtime_variables
 
 
 def test_inject_contact_runtime_scope_normalizes_carteira_alias() -> None:

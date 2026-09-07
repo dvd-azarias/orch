@@ -49,3 +49,15 @@ Scripts locais usam `--hostname` e `-n` no mesmo comando; ambos representam a me
 ## Smoke e health sao parciais
 
 Smoke confirma aceite HTTP; health Celery aceita qualquer worker. Nenhum deles, isoladamente, prova a topologia ou o E2E.
+
+## Helpers SQL do `create_contact` aposentado
+
+`orch_sessions_repository.py` ainda contém helpers sem callers para o contrato embrionário que criava lista padrão, membro e sessão filha. Eles foram desconectados do motor e não fazem parte do contrato atual. Não os reutilizar; a persistência válida do card fica em `create_contact_repository.py` e alcança somente `persons`.
+
+## Vínculo em `source_list` não é materialização no flow
+
+O card `source_list_membership` garante somente o draft da pessoa em `source_list_contact_drafts`. Mesmo quando a lista já está associada a um flow, o card não cria ou atualiza `contact_list_members` e não inicia sessões. Reprocessar o vínculo mailing→flow dentro do card poderia redisparar o próprio fluxo; por isso a materialização precisa de contrato explícito e protegido separado. Pela mesma razão, a primeira versão não oferece retirada: um draft pode já ter membros e sessões derivados em múltiplos flows.
+
+## Percentual do `split_random` não é cota de lote
+
+O `split_random` aplica o percentual como limiar sobre um bucket determinístico por sessão. Em amostras grandes a distribuição tende ao percentual configurado, mas um lote pequeno pode ficar desbalanceado. Não usar o card quando o requisito for garantir quantidades exatas por variante; isso exigiria coordenação e estado compartilhado, fora do contrato Alpha.

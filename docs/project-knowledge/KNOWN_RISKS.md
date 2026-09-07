@@ -280,7 +280,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R16 — Definicao invalida pode executar e entrar em retry permanente
 
-`STATUS`: CONFIRMED RUNTIME / INCIDENT CONTAINED / FIX PREPARED
+`STATUS`: CONFIRMED RUNTIME / RECURRENCE ACTIVE WHEN OBSERVED / FIX VALIDATED LOCALLY
 
 `IMPACT`: critical
 
@@ -290,9 +290,9 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: o runtime aceita flow `draft`, seleciona sua revisao draft e nao valida previamente branches obrigatorias ou configuracao minima de componentes. Excecao permanente na task nao terminaliza nem aplica backoff duravel. Com o comportamento de claim de R1, a mesma sessao pode ser enfileirada continuamente.
 
-`RUNTIME EVIDENCE`: o flow `0e378237-4a61-4d5f-89f3-b07b594df38f` tinha condition sem `false/exception`, duas `api_call` sem URL e sessoes presas no primeiro card. As sessoes `256` e `257`, ainda elegiveis ao dispatcher, foram terminalizadas em 2026-08-24 16:15 BRT. Durante a validacao, um reconciliador local sem escopo reenfileirou a sessao WhatsApp `263`, `state=2`, que falhou em `api_call_missing_url`; ela foi terminalizada as 16:50 BRT. A contagem final estabilizou em 1.154.025 alarmes.
+`RUNTIME EVIDENCE`: o flow `0e378237-4a61-4d5f-89f3-b07b594df38f` tinha condition sem `false/exception`, duas `api_call` sem URL e sessoes presas no primeiro card. As sessoes `256` e `257`, ainda elegiveis ao dispatcher, foram terminalizadas em 2026-08-24 16:15 BRT. Durante a validacao, um reconciliador local sem escopo reenfileirou a sessao WhatsApp `263`, `state=2`, que falhou em `api_call_missing_url`; ela foi terminalizada as 16:50 BRT. A contagem final estabilizou em 1.154.025 alarmes. Em 2026-09-06, o flow ativo `2112aa34-0c48-4cd6-a477-d8b5f5e1f52e` apresentou nova variante: as sessoes `809` e `810`, fixadas na revisao publicada v46, chegaram a um `api_call` cuja URL `{{contact.extra.callback_url}}` resolveu vazia. A definicao tinha edge `exception`, mas o executor relancava o erro. Cada sessao mantinha cinco eventos WhatsApp pendentes; o reconciliador as reenfileirava aproximadamente a cada 30–41 segundos. A fotografia registrou 53.844 alarmes somados e 400 metricas `task_exception` nas duas horas anteriores.
 
-`MITIGATION`: nao publicar/acionar o flow; preservar evidencias e isolar dispatcher/sessoes somente por procedimento aprovado. A correcao preparada terminaliza `condition_branch_not_mapped` com `state=3`, `ended_at`, cursor nulo, metadado de falha e alarme unico; ainda depende de deploy validado para proteger novas sessoes.
+`MITIGATION`: validar grafo e configuração no Target Core, sem assumir que templates podem ser resolvidos estaticamente para todos os contatos. O ORCH terminaliza `condition_branch_not_mapped`. Para `api_call_missing_url`, a correção Alpha preparada segue a edge `exception` quando ela existe; sem a edge, persiste `state=3`, `ended_at`, cursor nulo, metadado de falha e alarme único. A seleção do reconciliador filtra `state IN (0,1,2)`, `ended_at IS NULL` e `unassigned_at IS NULL` antes do lote, evitando reativação e starvation por sessões terminais. Até o deploy, preservar evidências e isolar sessões/dispatcher somente por procedimento aprovado.
 
 `DETECTION`: validar grafo/config antes de publish, agregar alarmes por `flow_uuid/session_id/exception_message` e alertar para repeticao de erro permanente.
 
@@ -384,7 +384,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R30 — Escopo por pessoa usado em flow de comunicação
 
-`STATUS`: FIX IMPLEMENTED / E2E AND DEPLOY PENDING
+`STATUS`: FIX IMPLEMENTED / PERSON E2E AND DEPLOY PENDING
 
 `IMPACT`: high
 
@@ -394,7 +394,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: uma sessão por pessoa não contém uma decisão legítima de canal para cards de comunicação. Selecionar silenciosamente o canal primário ou mais novo poderia enviar mensagem para o endereço errado e voltar a misturar cardinalidade com decisão de atuador.
 
-`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp com alarme `workflow_m2_person_scope_channel_component_not_supported`. A allowlist inicial contém somente o flow piloto `e94783ce-74f0-4df6-b868-a4b17f38e1e1`.
+`MITIGATION`: o ORCH aceita `person` para cards genéricos, mas terminaliza antes de qualquer saída por Dialer ou WhatsApp enquanto não houver seleção explícita. `select_contact_channel` restringe candidatos à mesma pessoa/lista/mailing, prioriza o primário com desempate estável, faz rebind guardado somente do endereço da sessão e não altera `linked_actuator`; o card de comunicação posterior recebe o membro selecionado e continua sendo a autoridade do atuador. O canário `channel` foi aprovado no flow `c114383d-72e1-4401-8877-765e5bfac27f`; sua inclusão na allowlist `person` depende do deploy prévio da engine.
 
 `ROLLBACK`: remover o UUID da allowlist no Target Core e reiniciar seus processos. O comportamento de novas associações volta a `channel`; sessões já materializadas não são expandidas retroativamente.
 
@@ -412,7 +412,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `DESCRIPTION`: o script grava o PID do wrapper `bash -lc`, mas Uvicorn/Celery criam processos filhos que podem sobreviver ao encerramento do wrapper. `status` consulta somente o pidfile e pode reportar todos os componentes como `down` enquanto API, beats e workers continuam ativos. Uma nova subida reutiliza hostnames, filas e schedule files, misturando processos stale com a stack nova.
 
-`RUNTIME EVIDENCE`: em 2026-08-24, `status` reportou toda a stack down, mas havia API e processos Celery `f5_local` orfaos desde 16:30 BRT. Nova tentativa as 18:11 BRT adicionou consumidores; os processos stale continuaram publicando dispatch, rescue e generate scan. A contencao exigiu encerrar todos os Uvicorn/Celery deste repositorio por command line. A porta 7777 e a lista de processos locais ficaram vazias; `celery inspect active_queues` confirmou nenhum consumer `f5_local`. As metricas globais do workspace continuaram crescendo pelo storm de producao ja conhecido e nao servem como criterio de shutdown local.
+`RUNTIME EVIDENCE`: em 2026-08-24, `status` reportou toda a stack down, mas havia API e processos Celery `f5_local` orfaos desde 16:30 BRT. Nova tentativa as 18:11 BRT adicionou consumidores; os processos stale continuaram publicando dispatch, rescue e generate scan. A contencao exigiu encerrar todos os Uvicorn/Celery deste repositorio por command line. A porta 7777 e a lista de processos locais ficaram vazias; `celery inspect active_queues` confirmou nenhum consumer `f5_local`. Em 2026-09-07, o problema se repetiu durante o card `select_contact_channel`: um Uvicorn da checkout principal respondeu ao primeiro smoke e três gerações de cada worker/beat `f5_local` permaneceram órfãs apesar de `status=down`. Os nove processos-mestre de worker, seus filhos e os seis beats foram resolvidos por comando/PPID, encerrados e a checagem final ficou vazia junto com a porta 7777. As metricas globais do workspace continuaram crescendo pelo storm de producao ja conhecido e nao servem como criterio de shutdown local.
 
 `MITIGATION`: antes de qualquer start, nao confiar apenas em pidfiles. Conferir porta 7777 e processos por command line; se houver stale, interromper e confirmar zero processos antes de subir. Nao repetir stack completa neste ambiente ate corrigir gerenciamento de process group, pid real, hostnames unicos e schedule files.
 
@@ -593,3 +593,41 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `EVIDENCE`: o canário pré-deploy `1b54233b-7075-42c9-8085-35c8afad5db7`, executado pela stack local isolada contra as integrações reais, criou 1 pessoa, 1 draft, 8 canais/membros e 1 vínculo ativo. A chamada protegida ao Target Core retornou HTTP 200 em uma tentativa e a contagem do flow aumentou somente uma sessão. Repetir após deploy do patch de compatibilidade de `birthdate` antes de considerar a versão implantada validada.
 
 `V2`: command/outbox idempotente de pessoa/lista/flow, sem chamada síncrona cruzada dentro da transação do workflow.
+
+## R31 — Tipos SQL não serializáveis podem amplificar retries do workflow
+
+`STATUS`: MITIGATED / DEPLOYED / RUNTIME VALIDATED
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando um campo `DATE` cru entra no runtime persistido
+
+`AFFECTED AREA`: contexto de contato / executor M2 / persistência de `runtime_variables`
+
+`DESCRIPTION`: `fetch_contact_runtime_context_for_session` retorna `contact_birth_date` como `datetime.date`. Antes do patch, a injeção copiava esse objeto para o runtime e `replace_session_workflow_state` falhava em `json.dumps`. Como o cursor não era persistido, o dispatcher voltava a executar a mesma sessão. O canário `7324` acumulou 661 falhas antes da contenção.
+
+`MITIGATION`: normalizar `contact_birth_date` para ISO no limite de `_inject_contact_runtime_scope`, preservando o contrato `YYYY-MM-DD`; manter teste com `date` real e serialização completa. Não aplicar `default=str` global, que ocultaria outros tipos inesperados e ampliaria o contrato silenciosamente.
+
+`DETECTION`: alertar repetição de `workflow_execute_task_failed` com `exception_type=TypeError` e `date is not JSON serializable`; correlacionar com sessão/cursor e interromper a amplificação antes de retestar.
+
+`EVIDENCE`: o E2E local `7340` terminou em `state=3`, zero alarmes, runtime ISO, atualização real e POST externo `200/received`. Após implantação do merge `792f39e` nos hosts `10.1.20.136` e `10.1.20.237`, o canário `7341` repetiu o resultado em produção: `state=3`, zero alarmes, `birth_date=1940-08-12`, ação `updated` e destino externo `200/received`. Todos os dados temporários foram restaurados e a auditoria tardia encontrou zero sessões ativas e zero alarmes.
+
+`V2`: definir um contrato tipado e centralizado de serialização do runtime, com rejeição explícita de valores fora do conjunto JSON.
+
+## R32 — Callback genérico não distingue sessões paralelas da mesma entidade
+
+`STATUS`: ACCEPTED ALPHA LIMITATION / DOCUMENTED
+
+`IMPACT`: high quando há mais de uma sessão ativa; low com entidade única
+
+`PROBABILITY`: low em execução por pessoa ou GenericApp com `external_id` único; high em fan-out por canal que reutilize a mesma entidade
+
+`AFFECTED AREA`: `wait_for_event` / callback genérico / correlação de sessão
+
+`DESCRIPTION`: o contrato existente correlaciona callback por `flow_uuid + entity` e seleciona a sessão ativa mais recente. O card não introduz `session_uuid`, chave arbitrária ou índice adicional. Portanto, duas sessões simultâneas do mesmo flow e entidade não podem ser endereçadas deterministicamente; o callback pode entrar na sessão mais nova e não liberar a espera pretendida. A baseline de `callbacks_pending` evita reaproveitar evento antigo dentro de uma sessão, mas não resolve ambiguidade entre sessões.
+
+`MITIGATION`: usar `external_id/entity` único por execução ou garantir no desenho operacional que exista somente uma sessão ativa por `flow_uuid + entity`. Não habilitar o card em fan-out por canal com entidade compartilhada sem validar essa premissa. O runtime registra card, prazo e resultado esperado sem expor a entidade em logs.
+
+`DETECTION`: procurar sessões `state=0` com `workflow_v2.blocking_stop_reason=blocked_wait_for_event` agrupadas pelo mesmo `flow_uuid/entity`; comparar `callbacks_pending`, `callback_at` e `timeout_at` antes de intervir.
+
+`V2`: correlação explícita e indexada por `session_uuid`/correlation key, com inbox idempotente e política declarada para evento sem consumidor.

@@ -1,5 +1,182 @@
 # Maintenance Log
 
+## 2026-09-06 — Engine do card `split_random`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o contrato A/B já integrado ao catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco baixo/médio por introduzir uma nova decisão de branch no executor, sem migration, tabela, endpoint, fila ou efeito externo próprio.
+
+### CHANGE
+
+- Normalizar os percentuais inteiros de A/B e a variável de saída no mesmo contrato aceito pelo Target Core.
+- Gerar bucket `0..99` por SHA-256 de `flow + session + revision + card`; retry ou redelivery da mesma identidade produz a mesma variante.
+- Validar exatamente uma saída `variant_a`, uma `variant_b` e no máximo uma `exception`, evitando o fallback legado para a primeira edge quando o grafo estiver inconsistente.
+- Gravar a variante em `variables.customs[output_var]`, diagnóstico em `split_random_last_result` e falhas em `split_random_last_error`, sem persistir o material usado como seed.
+- Usar `exception` para falhas controladas; sem branch válida, terminalizar uma vez pelos códigos `split_random_*` para impedir loop permanente.
+
+### VALIDATION
+
+- Testes diretos do card: `26 passed`; regressão focada de workflow, revisão e cards comuns: `181 passed`.
+- Suíte completa fora da sandbox: `549 passed, 27 failed`. Vinte e seis falhas pertencem à família de baseline já documentada; a falha adicional de WhatsApp por estado/ordem reproduziu com o mesmo resultado na árvore limpa equivalente à `origin/main`.
+- `py_compile` e `git diff --check` passaram.
+- Stack completa reiniciada em terminal persistente com perfil e filas `f5_local`; API, três workers e dois Beats ficaram `up`. Os smokes encadeados criaram `7431` e `7432`, ambas `state=3`, cursor nulo e zero alarmes.
+- Canary no flow `041c493a-b8cc-4deb-895c-8efa5f73e1bb`, revisão publicada v1 `06fdc5b7-d477-44bf-b055-b2eef1c6260a`: as sessões `7433`–`7440` terminaram em `state=3`, quatro por `variant_a` e quatro por `variant_b`, com zero alarmes. Todos os buckets persistidos coincidiram com o recálculo pela identidade da sessão.
+- Cada sessão executou exatamente um `api_call` posterior e recebeu HTTP 200/`status=received` do API-bin em uma tentativa, com `stream_id` entre `1345978` e `1345987` para os oito resultados observados.
+- Como o banco é compartilhado, o dispatcher de produção alcançou a sessão `7440` antes do worker local e registrou `component_not_supported:split_random`. Ele não avançou o cursor nem chamou o destino; em seguida a engine local escolheu `variant_b`, fez um único POST e finalizou. Os workers do host `237` foram confirmados apenas nas filas de produção, portanto não houve consumo cruzado de `f5_local`; a interferência ocorreu pela varredura do mesmo workspace no banco.
+- A auditoria tardia após desligar a stack manteve estados, cursores, buckets, contagens de métricas e zero alarmes inalterados, sem sinal de hot loop.
+- No encerramento, o script voltou a deixar subprocessos órfãos. Os seis mestres foram identificados pelo diretório do worktree e filas locais, encerrados explicitamente, e a auditoria final confirmou porta `7777` livre e ausência de Uvicorn/Celery locais.
+
+### POST-DEPLOY
+
+- A PR ORCH `#152` foi integrada em `main` pelo merge commit `8345284`. O rollout fez fast-forward nos hosts `10.1.20.136` e `10.1.20.237`; os checksums dos respectivos `.env` permaneceram idênticos antes e depois, com backups restritos em `.maintenance-backups/.env.pre-split-random-20260907T0203Z`.
+- No `136` foi reiniciada somente a API. No `237`, a API e os workers de workflow `01`–`05` foram reiniciados de forma gradual; cada worker confirmou `ready`. FileApp, generate-file, billing e Beats não foram reiniciados.
+- Após o rollout, API, banco, broker, workers e Beat ficaram saudáveis nos dois hosts, sem unidade ORCH falha ou erro novo no journal. Os cinco workers `orch-celery-worker@237_01`–`05` ficaram visíveis no health check.
+- O canário de produção criou as sessões `7441`–`7448`: todas terminaram em `state=3`, três por `variant_a` e cinco por `variant_b`, com os oito buckets iguais ao recálculo determinístico. Cada sessão registrou exatamente um `split_random`, um `api_call` e um `finish_flow`.
+- Os oito POSTs posteriores foram observados no API-bin com HTTP 200/`status=received` na primeira tentativa, `stream_id` `1346110`–`1346117`. Não houve alarme, `component_not_supported:split_random` ou erro `split_random_*`; a auditoria tardia manteve estados e contagens inalterados.
+
+### RISK / ROLLBACK
+
+O percentual representa amostragem determinística, não uma cota exata em lotes pequenos. O grafo inválido não é executado silenciosamente. Para rollback, impedir novos triggers do card, reverter a engine e reiniciar API/workers; não há migration ou dado externo do próprio card a desfazer. Sessões ainda posicionadas no card voltariam ao stop seguro `component_not_supported:split_random` caso fossem alcançadas somente por código anterior.
+
+## 2026-09-06 — Terminalização determinística de `api_call_missing_url`
+
+### REQUEST / CLASSIFICATION
+
+Interromper a amplificação de erro permanente observada em duas sessões de produção sem processar o card incorretamente. `ALPHA_FIX_REQUIRED`; risco médio por alterar roteamento de exceção, terminalidade e seleção do reconciliador, sem migration, endpoint, fila ou efeito externo novo.
+
+### CHANGE
+
+- O executor do `api_call` passa a usar a branch `exception*` já definida no grafo quando a preparação lança `WorkflowExecutionError`, persistindo `api_call_last_error` sem registrar URL ou payload nos logs.
+- `api_call_missing_url` entra nos conjuntos sincronizados de falha terminal da engine e do dispatcher. Sem branch de exceção, a sessão termina uma vez e o Celery persiste um único alarme.
+- O repositório do reconciliador considera somente sessões `state IN (0,1,2)`, sem `ended_at` e sem `unassigned_at`. O filtro fica dentro da CTE, antes do `LIMIT`, para sessões terminais antigas não causarem starvation do lote.
+
+### VALIDATION
+
+- Testes focados de engine, dispatcher, task e repositório: `18 passed`.
+- Regressão direcionada: `118 passed, 6 failed`; suíte completa: `524 passed, 26 failed`. Todas as falhas reproduzem a baseline legada de `trigger_orch(flow_uuid=...)`, exceto uma expectativa também preexistente de execução inline. Nenhum arquivo desses testes foi alterado pelo patch.
+- `compileall` e `git diff --check` passaram; `ruff` não está instalado na `.venv` atual.
+- Stack local completa em terminal persistente: API, três workers e dois Beats `up`; smoke canônico dos dois flows criou as sessões `7413`/`7414`, e os workers concluíram as tasks.
+- Prova real assíncrona com PostgreSQL/RabbitMQ/Redis: a sessão `7415`, com branch `exception`, terminou em `state=3`, cursor nulo e `api_call_last_error`, sem falha terminal ou alarme. A sessão `7416`, sem branch, terminou em `state=3`, cursor nulo, `terminal_failure=api_call_missing_url` e exatamente um alarme.
+- Foi inserido um evento WhatsApp pendente temporário na sessão terminal `7416`; a consulta real do reconciliador não a selecionou (`selected_by_reconciler=false`) e o evento foi removido.
+- Ao final, a stack foi encerrada; como os wrappers dos PID files deixaram subprocessos órfãos, os seis processos-mestre exatos foram finalizados e uma checagem independente confirmou porta `7777` livre e ausência de workers/beats locais.
+
+### RISK / ROLLBACK
+
+O patch não resolve a variável ausente nem tenta executar uma chamada sem URL. Flows com branch de exceção passam a seguir o contrato já desenhado; flows sem branch deixam de repetir indefinidamente e exigem correção funcional. Rollback é apenas de código e restart dos workers/beat; não há migration. Sessões já terminalizadas não são reabertas automaticamente.
+
+## 2026-09-06 — Engine do card `wait_for_event`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o contrato já publicado no catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco médio por alterar bloqueio, dispatcher, callback e concorrência da sessão, sem migration, endpoint, fila ou efeito externo novo.
+
+### CHANGE
+
+- Armar uma espera finita no próprio cursor, com `state=0`, `frozen_until` e prazo persistido que não se renova em reentradas.
+- Comparar `event_name/result` sem distinção de maiúsculas/minúsculas e consumir somente callback posterior ao baseline do card e recebido até o prazo.
+- Preservar callbacks antigos, não correspondentes e tardios; emitir `received`, `timeout` ou `exception` e gravar saída em `variables.customs[output_var]`.
+- Serializar callback e executor pelo advisory lock `92021/session_id`. Um callback correspondente remove o congelamento e mantém `state=0`, cobrindo a corrida conhecida de enqueue antes do commit.
+- Registrar armamento/conclusão/erro e métricas sem colocar `entity` ou `data` nos logs.
+
+### VALIDATION
+
+- Testes focados de engine, dispatcher e repositório: `28 passed`.
+- Regressão direcionada de workflow/callback/revisão/tasks: `185 passed, 1 failed`; a falha usa a assinatura legada `trigger_orch(flow_uuid=...)` já pertencente à baseline.
+- PostgreSQL real fora da sandbox: `2 passed` para o novo ciclo callback→retomada e a regressão transacional de `source_list_membership`. A sessão de prova foi criada em transação revertida e a consulta posterior confirmou zero resíduo pelo UUID.
+- Suíte completa final fora da sandbox: `517 passed, 28 failed`. As falhas de assinatura reproduzem a baseline legada; as duas falhas potencialmente afetadas por ordem/estado compartilhado passaram isoladamente logo depois.
+- `py_compile` e `git diff --check` passaram. `ruff` não está instalado na `.venv` atual.
+- Stack local completa reiniciada na branch com perfil `f5_local`; API, três workers e dois Beats ficaram `up` em TTY persistente.
+- Smokes encadeados criaram as sessões `7366` e `7367`, ambas concluídas em `state=3` e com zero alarmes. Esses flows não possuem o card novo e comprovam regressão da stack, não o E2E de `wait_for_event`.
+- O flow canário publicado foi configurado depois dessa primeira busca. Antes do rollout, execução transacional e canários locais confirmaram os caminhos `received` e `timeout`; a validação definitiva está registrada abaixo.
+
+### POST-DEPLOY
+
+- A PR ORCH `#149`, merge `ce4764164f28d4371cf8cc38b6efb89395a769c6`, foi implantada por fast-forward em `/etc/gohp/orch` nos hosts `10.1.20.136` e `10.1.20.237`.
+- Os `.env` locais foram preservados e copiados para `.maintenance-backups/.env.pre-wait-for-event-20260906-2030`; os checksums permaneceram idênticos antes e depois do pull.
+- No `237`, os cinco workers gerais foram reiniciados em rolling restart e anunciaram `237_01..05 ready`; o beat principal e a API também foram reiniciados. FileApp, generate-file e billing não foram interrompidos. No `136`, somente a API foi reiniciada, preservando a topologia sem workers.
+- As duas APIs responderam HTTP 200 em `live`, `ready` e `celery`; os cinco workers gerais responderam `pong`, as units afetadas ficaram `active` e nenhuma unit ORCH ficou em `failed`.
+- No flow `f7414852-e4fc-4e5f-8bb6-4e8ec2d317c8`, revisão publicada v3 `ab839afc-53fc-4830-8564-8d5dd4258f5e`, a sessão `7398` aguardou 10 segundos, seguiu pela branch `timeout`, executou o card de marcação com HTTP 200 (`stream_id=1345250`) e terminou em `state=3`, `frozen_until=NULL`, oito métricas e zero alarmes.
+- A sessão `7399` foi armada e recebeu callback `BOLETO_PAGO` pela rota canônica; reutilizou a mesma sessão, consumiu o callback, seguiu pela branch `received`, confirmou HTTP 200 (`stream_id=1345252`) e terminou em `state=3`, `frozen_until=NULL`, oito métricas e zero alarmes.
+- A auditoria tardia manteve ambas as sessões com oito métricas e `finished_by_component`, comprovando ausência do hot loop observado antes do rollout.
+- O journal também mostrou execuções antigas e independentes falhando periodicamente com `api_call sem URL válida`, inclusive antes do restart. Elas não afetaram os canários e nenhuma unit ORCH caiu; o saneamento dessas sessões/flows permanece uma investigação separada.
+
+### RISK / ROLLBACK
+
+A correlação Alpha continua escolhendo uma sessão ativa por `flow_uuid + entity`; sessões paralelas com a mesma entidade permanecem ambíguas (R32). Para rollback, impedir novos usos e resolver/aguardar as esperas ativas antes de reverter a engine, pois o código anterior trataria o cursor ainda posicionado no card como componente não suportado. Não há migration ou efeito externo a desfazer.
+
+## 2026-09-06 — Engine do card `source_list_membership`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o componente aditivo publicado no catálogo do Target Core. `ALPHA_FIX_OPTIONAL`; risco médio por escrita transacional em tabelas compartilhadas de pessoa e lista, sem migration, fila ou integração externa nova.
+
+### CHANGE
+
+- Resolver `person_uuid` literal ou por template e `mailing_id` pelo UUID público da lista.
+- Criar ou reutilizar `contact_drafts`/`source_list_contact_drafts` com a rotina já comprovada pelo Identidade, sob savepoint e locks de pessoa/lista.
+- Emitir `linked`, `already_linked` ou `not_found`, com `exception` para falha de contrato/persistência.
+- Persistir resultado em `variables.customs[output_var]` e diagnóstico em `source_list_membership_last_result`/`last_error`.
+- Não chamar o Target Core, associar mailing ao flow, materializar `contact_list_members`, criar sessões ou oferecer remoção.
+
+### VALIDATION
+
+- Testes focados do novo card, `create_contact` e Identidade, incluindo PostgreSQL real: `54 passed`.
+- Teste transacional em PostgreSQL real com tabelas temporárias: `1 passed`; primeira execução `linked`, segunda `already_linked`, exatamente um draft/vínculo/canal e contadores incrementados uma vez. As tabelas foram descartadas no commit e não tocaram dados compartilhados.
+- Regressão ampliada de workflow fora da sandbox: `181 passed, 9 failed`; as nove falhas pertencem à baseline conhecida (sete usam a assinatura legada `trigger_orch(flow_uuid=...)` e duas expectativas dependem de estado compartilhado), sem falha nova atribuível ao card.
+- `py_compile` e `git diff --check` passaram. `ruff` não está instalado na `.venv` atual.
+- Stack local completa reiniciada no perfil isolado `f5_local`; API, três workers e dois Beats permaneceram `up`. Os smokes canônicos criaram as sessões `7347` e `7348`, ambas concluídas em `state=3`.
+- Canário E2E no flow `67c00879-f9e3-4ed3-82c0-a695970acc2b`, revisão publicada `c12c83b2-f6ca-4870-b198-8f3f08cc70ac`: a sessão `7349` seguiu por `linked`, criou um vínculo/draft com 8 canais e incrementou `rows_total/rows_processed` de `1/1` para `2/2`; a sessão `7350` seguiu por `already_linked`, reutilizou o mesmo draft e não alterou contadores. Ambas terminaram em `state=3`, sem alarmes.
+- Após as duas execuções, havia exatamente duas sessões do flow, um vínculo em `source_list_contact_drafts`, zero `contact_list_members` para pessoa/lista e zero `flow_mailing_links` ativos. Os dois marcadores `api_call` foram confirmados pelo destino com HTTP 200/`received` em uma tentativa.
+- No encerramento, `dev_phase_stack.sh stop` reproduziu o risco já documentado de filhos órfãos. Os PIDs foram associados ao worktree/filas `f5_local`, encerrados explicitamente e a auditoria final confirmou porta `7777` livre e nenhum processo das filas locais.
+
+### POST-DEPLOY
+
+- O merge `c0b1c35` da PR ORCH `#147` foi implantado nos hosts `10.1.20.136` e `10.1.20.237`. Os `.env` locais foram copiados para backups temporários com modo `0600`, comparados byte a byte após o fast-forward e preservaram seus checksums; os backups foram removidos ao final.
+- No `10.1.20.136`, somente `orch-api.service` foi reiniciada, preservando a topologia sem workers. No `10.1.20.237`, `orch-api.service` e `orch-celery-worker_01..05.service` foram reiniciados em rolling restart; FileApp, generate-file e billing não foram interrompidos.
+- Os quatro health checks retornaram HTTP 200 nos dois hosts aplicáveis, os cinco workers de workflow responderam `pong` e nenhuma unit ORCH ficou em estado `failed`.
+- O canário pós-deploy `7351`, na revisão publicada v2 `265f8a89-fe8c-44fe-a999-8e673e92fdaf`, terminou em `state=3` pelo ramo `already_linked`, reutilizou o draft de 8 canais, não alterou os contadores `2/2` e não gerou alarme.
+- A auditoria confirmou um único vínculo em `source_list_contact_drafts`, zero `contact_list_members`, zero `flow_mailing_links`, três sessões totais do flow e nenhuma ativa. O marcador `api_call` foi observado no destino com HTTP 200/`received` em uma tentativa; a auditoria tardia permaneceu idêntica, sem fan-out.
+
+### RISK / ROLLBACK
+
+O principal risco seria confundir associação à source list com materialização no flow. O card é deliberadamente aditivo e local; remoção e materialização permanecem fora do contrato. Para rollback, interromper novos usos, reverter a PR `#147`/commit funcional `c5128f5` e reiniciar API/workers de workflow; não apagar automaticamente drafts funcionais já criados.
+
+## 2026-09-06 — Serialização de `contact_birth_date` no runtime
+
+### REQUEST / CLASSIFICATION
+
+Corrigir o retry storm descoberto durante o canário de `create_contact.update_current`. `ALPHA_FIX_REQUIRED`; mudança cirúrgica no executor M2, sem migration, fila ou contrato externo novo.
+
+### CAUSE
+
+O contexto SQL retorna `contact_birth_date` como `datetime.date`. `_inject_contact_runtime_scope` armazenava o objeto cru nos aliases `variables.contact` e `variables.customs.contact`; a chamada seguinte a `replace_session_workflow_state` executava `json.dumps` e lançava `TypeError`, revertendo card e cursor. A sessão `7324` repetiu esse caminho 661 vezes.
+
+### CHANGE
+
+- Converter `date`/`datetime` para ISO apenas ao montar `contact.birth_date`.
+- Preservar strings e `None` já válidos, todos os demais campos e o comportamento do card.
+- Cobrir os dois aliases e a serialização completa do runtime em teste unitário.
+
+### VALIDATION
+
+- Teste específico de injeção: `3 passed`; regressão `create_contact`/workflow: `132 passed`.
+- Suíte completa: `488 passed, 28 failed`; 27 falhas pertencem à baseline legada e o `InvalidCachedStatementError` adicional passou isoladamente.
+- Stack local completa reiniciada em terminal dedicado, com API, três workers e dois Beats `up`.
+- Smokes canônicos: sessões `7337` e `7338`, ambas encerradas em `state=3`.
+- Canário E2E `7340`: revisão draft fixada, `birth_date=1940-08-12`, resultado `updated` nos campos `state/city`, zero alarmes, sessão `state=3` e confirmação externa HTTP 200/`received`.
+- Restauração auditada: definição, checksum, draft, ponteiro, pessoa e `updated_at` voltaram exatamente à baseline; zero sessão ativa e zero alarme tardio no canário.
+
+### POST-DEPLOY
+
+- O merge `792f39e` foi implantado nos hosts `10.1.20.136` e `10.1.20.237`, preservando byte a byte os `.env` locais durante a atualização.
+- A API foi reiniciada nos dois hosts; os cinco workers ORCH foram reiniciados no `10.1.20.237`. Health, nós Celery e unidades ORCH permaneceram saudáveis.
+- O canário `7341` terminou em `state=3`, sem alarmes, com `birth_date=1940-08-12`, resultado `updated` nos campos controlados e POST externo confirmado com HTTP 200/`received`.
+- A restauração de definição, revisão, checksum, estado draft e pessoa foi confirmada. A auditoria tardia encontrou zero sessões ativas, zero alarmes e nenhuma nova falha de serialização nos logs desde o restart.
+
+### ROLLBACK
+
+Reverter o merge `792f39e` (ou o commit funcional `d8f55f7`) e reiniciar API/workers. Não há migration nem dado novo persistente. Não executar novo `update_current` com contato que possua data de nascimento enquanto o código antigo estiver ativo.
+
 ## 2026-09-06 — Compatibilidade de `birthdate` no card `identidade_person`
 
 ### REQUEST / CLASSIFICATION
@@ -678,3 +855,35 @@ Antes de iniciar a sequencia de novos cards do roadmap comum, impedir que uma se
 - O canario dedicado usou o flow `d32bd97e-78ef-4a3f-8541-bc8fe70ffdf0`: a sessao `7285` iniciou na revisao N/v1, pausou, atravessou a publicacao de N+1/v2 e terminou ainda com runtime, cursor e metricas de N. A sessao nova `7286` iniciou e terminou em N+1, tambem com runtime e metricas coerentes.
 - A limpeza transacional removeu somente os artefatos do flow canario. A FK `orch_billing_events_source_session_id_fkey`, com `ON DELETE RESTRICT`, exigiu remover primeiro os eventos de billing das duas sessoes; a primeira tentativa foi integralmente revertida e a segunda terminou com zero sessoes, metricas e revisoes do canario. O script temporario foi removido.
 - Rollback aprovado sem migration: reverter o commit funcional `1e3b878` e reiniciar gradualmente API/workers de workflow.
+
+## 2026-09-07 — Engine `select_contact_channel`
+
+### REQUEST
+
+Implementar no ORCH o card já publicado no catálogo do Target Core e validá-lo primeiro com o flow canário em `channel`; somente após integração e deploy, incluir o flow na allowlist `person` do Target Core e repetir o E2E.
+
+### CLASSIFICATION
+
+`ALPHA_FIX_OPTIONAL` — mudança contida que permite uma decisão explícita de canal em sessões por pessoa, sem migration, fila ou efeito externo próprio.
+
+### CHANGE
+
+- Em `channel`, a busca permanece presa ao membro e endereço de origem da sessão.
+- Em `person`, a busca fica limitada à mesma pessoa, lista e mailing, prioriza `is_primary` e usa o menor ID como desempate.
+- A seleção `person` atualiza somente `orch_sessions.entity_address`, sob guards de sessão ativa, escopo e colisão.
+- A linha candidata e a sessão são bloqueadas durante a escolha/rebind; `not_found`, `exception` e marcadores incompletos revogam a autorização de comunicação em modo fail-closed.
+- A escolha é persistida em `variables.customs[output_var]` e `workflow_v2.selected_contact_channel`, permitindo hidratação consistente nas retomadas.
+- Cards de comunicação continuam bloqueados em `person` antes de uma escolha explícita; depois dela, recebem o membro selecionado e permanecem responsáveis por `linked_actuator`.
+- Falhas configuracionais ou de persistência seguem `exception*` quando disponível ou terminalizam uma vez com alarme específico.
+
+### VALIDATION PARCIAL
+
+- Testes de configuração, branches, rebind, colisão, retomada, revogação fail-closed, alarmes e integração com o card Dialer: `30 passed` no arquivo dedicado.
+- Regressão direcionada de workflow e repositório: `140 passed`; o teste PostgreSQL isolado do seletor também passou.
+- Suíte completa: `584 passed, 27 failed`. As 27 falhas continuam nos mesmos node IDs e famílias da baseline já comparada: assinatura legada de `trigger_orch`, expectativas antigas de sessão/out-of-order e invalidação de prepared statement em tabela temporária; nenhuma falha nova foi introduzida.
+- Lint dos arquivos alterados/novos, formatação dos arquivos novos e `git diff --check` passaram.
+- Stack local completa iniciou com filas `*_f5_local`; os dois smokes encadeados retornaram `202`.
+- Após a revisão final, um Uvicorn órfão da checkout principal foi identificado pelo `cwd`, encerrado e substituído pela API desta branch. O smoke canônico repetido gerou as sessões `7503`–`7512`; todas terminaram em `state=3`, cursor final e `next_card_uuid=NULL`. No shutdown, três gerações órfãs de workers/beats `f5_local` foram encontradas e encerradas por PID/PPID; a porta 7777 e a busca pelos consumidores/beat schedules isolados terminaram vazias.
+- Sessão canário `7477`, revisão publicada v2, executou `channel -> selected -> api_call -> finish_flow`, terminou sem alarme e preservou membro/endereço. O destino respondeu `200` em uma tentativa com `status=received`.
+- Sessão local controlada `7480` executou o mesmo grafo com `session_scope=person`, `person_uuid` e roteamento contextual válidos, sem alarme e com novo `200/status=received`. O mailing canário possui um canal por pessoa; a troca de membro/endereço em `person` foi provada no teste PostgreSQL isolado.
+- E2E `person`, rollout e deploy permanecem pendentes. A allowlist não foi alterada antes de a engine estar disponível nos servidores ORCH.

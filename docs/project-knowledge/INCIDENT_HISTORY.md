@@ -1,5 +1,81 @@
 # Historico de Incidentes
 
+## 2026-09-06 — `api_call_missing_url` amplificado pelo reconciliador de eventos
+
+`STATUS`: ACTIVE WHEN OBSERVED / FIX VALIDATED LOCALLY
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `dd4aea68-f204-4255-8e4a-02e34a2be7f2`
+
+`FLOW`: `2112aa34-0c48-4cd6-a477-d8b5f5e1f52e` (`ECOM - Recuperação de avaliados`)
+
+### Evidência e causa
+
+- As sessões `809` e `810`, fixadas na revisão publicada v46, estavam em `state=2`, sem `ended_at`/`unassigned_at`, e alcançavam o card `api_call` `14e12b3c...`.
+- A URL `{{contact.extra.callback_url}}` resolvia para vazio porque as sessões não possuíam membro contextual nem `contact.extra.callback_url` no runtime.
+- O card possuía branch `exception` para `finish_flow`, mas o executor não o consultava para `api_call`; `WorkflowExecutionError(api_call_missing_url)` escapava como `task_exception`.
+- Cada sessão possuía cinco eventos WhatsApp pendentes. O reconciliador selecionava qualquer sessão não desatribuída, inclusive depois de terminalização, e reenfileirava o par aproximadamente a cada 30–41 segundos.
+- Na fotografia de produção, o par somava 53.844 alarmes e 400 métricas `task_exception` nas duas horas anteriores. A investigação foi somente leitura; nenhum flow, sessão, evento, serviço ou fila de produção foi alterado.
+
+### Correção preparada
+
+- `api_call_missing_url` usa a branch `exception` quando configurada e persiste diagnóstico em `api_call_last_error`.
+- Sem branch de exceção, o erro torna-se terminal: `state=3`, `ended_at`, cursor nulo, marcador `workflow_v2.terminal_failure` e um alarme pelo caminho Celery.
+- O reconciliador filtra sessões ativas (`state IN (0,1,2)`, sem `ended_at` ou `unassigned_at`) antes do `LIMIT`, impedindo reativação e evitando que terminais antigas ocupem o lote.
+- A validação local real confirmou: sessão `7415` finalizada pela exceção sem alarme; sessão `7416` terminalizada sem branch com exatamente um alarme; evento pendente temporário ligado à sessão terminal não foi selecionado pelo repositório e foi removido.
+
+### Pendências
+
+- Implantar o patch nos workers/beat ORCH e observar se as sessões `809`/`810` drenam pela edge já fixada na v46 e deixam de gerar novos alarmes.
+- Corrigir a origem funcional de `contact.extra.callback_url` ou a regra do flow; o patch evita amplificação, mas não inventa uma URL ausente.
+
+## 2026-09-06 — `contact_birth_date` causou retry storm na execução do workflow
+
+`STATUS`: RESOLVED / DEPLOYED / RUNTIME VALIDATED
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60`
+
+`FLOW`: `2423e4d4-d600-4e47-8ef2-6d05b30e961a`
+
+`SESSION`: `7324`
+
+### Impacto e causa
+
+O canário de `create_contact.update_current` carregou um contato real do mailing cuja `contact_birth_date` era PostgreSQL `DATE`. O driver entregou corretamente um `datetime.date`, mas `_inject_contact_runtime_scope` copiou o objeto cru para `variables.contact.birth_date` e `variables.customs.contact.birth_date`. A persistência do estado usa `json.dumps` sem encoder de datas e falhou antes de gravar o cursor com `TypeError: Object of type date is not JSON serializable`.
+
+Entre `16:18:27` e `16:33:33` UTC, a sessão acumulou 661 alarmes `workflow_execute_task_failed`, 661 métricas `task_exception` e 486 execuções que não obtiveram o lock. Cada tentativa foi revertida pela transação; a pessoa protegida permaneceu com `state=RJ`, `city=Itaborai` e o mesmo `updated_at`.
+
+### Contenção
+
+- A revisão draft usada como bancada foi restaurada byte a byte, incluindo checksum, estado e `published_at`; o ponteiro do flow voltou à revisão publicada v2.
+- O endpoint oficial de `unassign` foi aplicado à sessão. Ela terminou sem mutação da pessoa e não restaram sessões ativas do flow.
+- Nenhum alarme, métrica ou evento foi apagado.
+
+### Correção e validação
+
+- A correção converte somente `contact_birth_date` do tipo `date`/`datetime` para `isoformat()` na fronteira de montagem do runtime. Não há migration nem mudança no repositório SQL.
+- O teste de regressão passa uma instância real de `date`, exige `1940-08-12` nos dois aliases e serializa o runtime completo com `json.dumps`.
+- 132 testes focados em `create_contact`/workflow passaram. Na suíte completa, 488 passaram e 28 falharam: 27 são a baseline legada; o caso adicional de cache de prepared statement passou isoladamente.
+- A stack local completa ficou `up`; os smokes canônicos terminaram as sessões `7337` e `7338` em `state=3`.
+- O E2E controlado `7340` executou a revisão draft fixada, leu `birth_date=1940-08-12`, atualizou temporariamente `state/city`, terminou em `state=3` com zero alarmes e teve o POST externo confirmado pelo destino com HTTP 200 e `status=received`.
+- Ao final, definição, checksum, estado draft, ponteiro, `state`, `city` e `updated_at` da pessoa foram restaurados; auditoria tardia confirmou zero sessões ativas e zero alarmes no canário.
+
+### Rollout e confirmação em produção
+
+- O merge `792f39e` foi implantado nos hosts `10.1.20.136` e `10.1.20.237`. Os `.env` locais foram preservados byte a byte durante o fast-forward.
+- A API foi reiniciada nos dois hosts e os cinco workers ORCH foram reiniciados no `10.1.20.237`; health, topologia Celery e unidades permaneceram saudáveis.
+- O canário pós-deploy `7341` terminou em `state=3`, sem alarmes, com `birth_date=1940-08-12`, resultado `updated` e POST externo HTTP 200/`received`.
+- Definição, revisão, checksum, estado draft e dados temporários da pessoa foram restaurados. A auditoria tardia confirmou zero sessões ativas, zero alarmes tardios e ausência de novas falhas de serialização.
+
+O incidente não exigiu mudança no Target Core.
+
 ## 2026-08-26 — FileApp aguardava rescue após status avançado no Target Core
 
 `STATUS`: ROOT CAUSE CONFIRMED / FIX IMPLEMENTED / ROLLOUT PENDING

@@ -92,6 +92,50 @@ o mesmo `revision_id`.
 
 A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint não permitiria que o Target Core enxergasse o `contact_draft` recém-criado. Mesmo um vínculo previamente ativo é atualizado pela task para materializar o novo membro, sem criar uma nova sessão ORCH.
 
+## Card `create_contact`
+
+1. Exige ação explícita (`update_current`, `create_if_missing` ou `upsert`), política (`fill_missing` ou `overwrite_non_null`) e mapping com ao menos um valor resolvido.
+2. `update_current` resolve a pessoa exclusivamente pelo `person_uuid` do membro contextual já validado para a sessão. O parâmetro `identifier` não participa dessa ação.
+3. `create_if_missing` e `upsert` localizam a pessoa pelo `identifier` renderizado. A criação usa `ON CONFLICT DO NOTHING` e relê a pessoa sob lock para suportar concorrência.
+4. O mapping aceita somente campos cadastrais de `persons` e caminhos `extra.<campo>`. Valores nulos ou vazios nunca apagam dados; `fill_missing` preserva preenchidos e `overwrite_non_null` substitui somente com valores presentes.
+5. Toda escrita ocorre em savepoint e afeta somente `persons`. O card não altera identificador, canais, listas, membros, cursores de outras sessões ou billing.
+6. A saída mínima (`action`, `person_uuid`, `identifier`, `changed_fields`) é gravada em `variables.customs[output_var]` e no diagnóstico `create_contact_last_result`.
+7. O fluxo segue por `created`, `updated`, `unchanged` ou `not_found`; falhas controladas seguem pela branch `exception` quando conectada.
+
+## Card `source_list_membership`
+
+1. Renderiza `person_uuid` no runtime; aceita a pessoa contextual ou a saída de um card anterior, como `{{contact_action.person_uuid}}`.
+2. Resolve a pessoa não mesclada por UUID e a lista pelo UUID público do mailing, ambos sob lock transacional. Template de pessoa não resolvido, pessoa ausente ou lista ausente seguem por `not_found` sem escrita parcial.
+3. Aceita somente listas em `READY_TO_INGEST` ou `PROCESSED`. Estado incompatível, UUID inválido ou pessoa sem identificador seguem por `exception` quando a branch estiver conectada.
+4. Cria um `contact_draft` com os dados atuais da pessoa ou reutiliza o draft de mesmo identificador já ligado à lista. Canais válidos são copiados/upsertados e os contadores da lista crescem apenas na criação.
+5. O lock da linha de `source_lists` serializa inserções concorrentes na mesma lista; repetição retorna `already_linked` e não duplica o vínculo.
+6. Atualiza em `persons` somente as referências `last_contact_draft_id`, `last_source_list_id`, `last_mailing_id` e `last_seen_at` relacionadas à associação.
+7. A saída é gravada em `variables.customs[output_var]` e em `source_list_membership_last_result`; branches normais são `linked`, `already_linked` e `not_found`.
+8. O card não chama o Target Core, não associa a lista ao flow, não materializa `contact_list_members` e não inicia sessões. Esses efeitos exigem comandos separados para evitar recursão/fan-out.
+
+## Card `wait_for_event`
+
+1. Ao alcançar o card pela primeira vez, normaliza o envelope, registra o índice atual de `callbacks_pending` e persiste em `workflow_v2.wait_for_event` o card, origem, resultado, instante de bloqueio e prazo imutável.
+2. Mantém o cursor no próprio card, grava `frozen_until=timeout_at`, marca `blocked_wait_for_event` e retorna a sessão para `state=0`. O dispatcher não a reivindica antes do prazo.
+3. O callback entra pela rota canônica com `event_name=callback`, a mesma `entity` e o `result` esperado. A persistência serializa com o lock `92021/session_id`, anexa o evento e, somente no match exato, remove o congelamento e mantém a sessão elegível.
+4. O índice-base impede que callbacks já pendentes antes do armamento liberem o card. Eventos novos com outra origem/resultado e callbacks recebidos depois do prazo são preservados, não consumidos.
+5. Na retomada, um callback correspondente recebido até o prazo vence e segue por `received`; sem ele, o instante `timeout_at` segue por `timeout`. O prazo nunca é renovado por reentrada ou callback alheio.
+6. O resultado é gravado em `variables.customs[output_var]` e em `wait_for_event_last_result`. O caminho recebido contém `status`, `event_source`, `event_result`, `received_at` e `data`; timeout contém os três primeiros campos e `timeout_at`.
+7. Falha de configuração/estado usa `exception` quando conectada; sem essa branch, termina de forma diagnosticável. O card não cria endpoint, fila, ledger, migration ou retry externo próprio.
+
+A correlação continua sendo o contrato Alpha preexistente `flow_uuid + entity`, que seleciona uma sessão ativa. Ela não distingue duas sessões simultâneas do mesmo flow e entidade; consulte R32.
+
+## Card `split_random`
+
+1. Normaliza os percentuais inteiros de `variant_a` e `variant_b`, aceita os extremos `0/100` e `100/0` e exige soma exatamente igual a 100.
+2. Antes da seleção, valida no grafo exatamente uma saída `variant_a`, uma `variant_b` e no máximo uma `exception`. Isso impede que o fallback legado do resolvedor de branches encaminhe silenciosamente uma sessão por uma saída diferente da escolhida.
+3. Calcula um bucket de `0` a `99` com SHA-256 sobre a identidade estável `flow + session + revision + card`. Bucket menor que o percentual A segue por `variant_a`; os demais seguem por `variant_b`.
+4. A mesma sessão, revisão e card produzem sempre o mesmo bucket, inclusive em retry ou redelivery. Sessões distintas são amostradas de forma pseudoaleatória; o percentual é uma probabilidade por sessão, não uma cota exata em lotes pequenos.
+5. Grava somente o nome da variante em `variables.customs[output_var]`. O diagnóstico `split_random_last_result` inclui bucket, percentuais, revisão e estratégia, sem persistir o material usado como seed.
+6. Configuração ou grafo inválido segue por `exception` quando há exatamente uma saída desse tipo. Sem ela, a sessão é terminalizada uma vez, impedindo repetição permanente pelo dispatcher.
+
+O card não usa gerador aleatório de processo, não acessa rede ou tabelas adicionais, não cria fila, migration ou retry próprio.
+
 ## FileApp — decisao
 
 A resolucao considera UUID de template no evento e configuracao do flow. Template ausente ou nao resolvido conduz ao caminho `tipo_2`; um valor presente mas invalido nao produz erro obrigatorio.
@@ -183,10 +227,14 @@ Target Core associa mailing
 ORCH recebe a sessão
   -> valida membro/lista/mailing + endereço da sessão + tipo informado
   -> executa cards genéricos
+  -> select_contact_channel valida o membro atual em channel
+     ou escolhe explicitamente um membro da mesma pessoa/lista/mailing em person
   -> define linked_actuator apenas quando um card autorizado o exige
 ```
 
-`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Se ela alcançar `send_with_dialer`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template`, o M2 terminaliza com `person_scope_channel_component_not_supported`; não escolhe outro canal implicitamente. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Antes de uma seleção explícita, alcançar `send_with_dialer`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template` terminaliza com `person_scope_channel_component_not_supported`; não há escolha implícita. Após `select_contact_channel` retornar `selected`, o M2 hidrata e reutiliza o membro escolhido nas retomadas, e o card de comunicação permanece responsável por definir seu `linked_actuator`. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+
+Em `channel`, `select_contact_channel` só pode selecionar o membro/endereço que já originou a sessão. Em `person`, a busca exige `person_uuid`, permanece dentro da mesma pessoa, `contact_list_id` e `mailing_id`, prioriza o canal marcado como primário e usa o menor `contact_list_member_id` como desempate. O rebind altera apenas `orch_sessions.entity_address` e falha de forma diagnosticável diante de perda de escopo ou colisão com outra sessão ativa. Uma tentativa posterior em `not_found` ou `exception` limpa a seleção anterior e volta a bloquear comunicação até novo `selected`.
 
 ## Generate file
 

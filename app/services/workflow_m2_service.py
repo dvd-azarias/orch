@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import posixpath
 import re
@@ -15,7 +16,7 @@ import textwrap
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib import parse, request
@@ -29,11 +30,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.workspace import get_current_workspace_schema, get_current_workspace_uuid
+from app.repositories.create_contact_repository import (
+    fetch_create_contact_person_by_identifier_for_update,
+    fetch_create_contact_person_by_uuid_for_update,
+    insert_create_contact_person_if_missing,
+    update_create_contact_person_profile,
+)
 from app.repositories.flow_v2_repository import fetch_flow_row
 from app.repositories.identidade_person_repository import (
     ensure_person_in_source_list,
     fetch_active_flow_mailing_link,
     fetch_person_by_identifier_for_update,
+    fetch_person_by_uuid_for_update,
     insert_person_if_missing,
     resolve_source_list_by_public_id,
     update_person_from_payload,
@@ -48,22 +56,20 @@ from app.repositories.orch_channel_events_repository import (
 from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
+    clear_session_frozen_until,
     ensure_session_workflow_revision_pin,
-    ensure_contact_list_member_for_create_contact,
-    ensure_default_source_list_for_create_contact,
-    ensure_session_for_created_contact,
     fetch_contact_runtime_context_for_session,
     fetch_session_webhook_snapshot,
     fetch_session_workflow_state,
-    increment_source_list_counters_for_create_contact,
     persist_contact_member_outbound_hsm,
     replace_session_workflow_state,
-    upsert_person_for_create_contact,
+)
+from app.repositories.select_contact_channel_repository import (
+    fetch_select_contact_channel_candidate,
+    rebind_person_session_to_contact_channel,
 )
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
-from app.services.billing_batch_service import try_record_billing_event
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
-from app.services.billing_snapshot_service import try_create_billing_snapshot_outbox
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.identidade_person_service import (
     IdentidadePersonQueryResult,
@@ -87,6 +93,7 @@ from app.services.switch_bot_flow_service import (
 )
 from app.services.workflow_engine import (
     component_kind,
+    extract_edges,
     index_components,
     outgoing_branch_labels,
     resolve_next_card_uuid,
@@ -106,6 +113,15 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "switch_bot_flow": "blocked_switch_bot_flow",
     "identidade_person": "blocked_identidade_person_flow_link",
 }
+WAIT_FOR_EVENT_BLOCKING_STOP_REASON = "blocked_wait_for_event"
+WAIT_FOR_EVENT_RESULT_RE = re.compile(r"[A-Za-z0-9._:-]+$")
+WAIT_FOR_EVENT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
+SPLIT_RANDOM_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
+SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email"}
+SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
     "sent": "sent",
@@ -161,15 +177,31 @@ LOOP_GUARD_COUNTER_KEY = "continuous_steps"
 LOOP_GUARD_LAST_TRANSITION_KEY = "last_transition_signature"
 POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 TERMINAL_WORKFLOW_ERROR_CODES = {
+    "api_call_missing_url",
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
     "person_scope_channel_component_not_supported",
+    "select_contact_channel_invalid_channel_label",
+    "select_contact_channel_invalid_channel_type",
+    "select_contact_channel_invalid_output_var",
+    "select_contact_channel_missing_contact_context",
+    "select_contact_channel_persistence_failed",
+    "select_contact_channel_rebind_failed",
+    "split_random_invalid_branches",
+    "split_random_invalid_output_var",
+    "split_random_invalid_percentage",
+    "split_random_invalid_total",
     "whatsapp_hsm_contact_missing",
     "whatsapp_hsm_meta_payload_invalid",
     "whatsapp_hsm_number_not_configured",
     "whatsapp_hsm_persist_failed",
     "whatsapp_hsm_template_missing",
     "whatsapp_hsm_variable_unresolved",
+    "wait_for_event_invalid_event_source",
+    "wait_for_event_invalid_event_result",
+    "wait_for_event_invalid_timeout_seconds",
+    "wait_for_event_invalid_output_var",
+    "wait_for_event_state_mismatch",
 }
 WHATSAPP_HSM_ERROR_CODES = {
     code for code in TERMINAL_WORKFLOW_ERROR_CODES if code.startswith("whatsapp_hsm_")
@@ -194,6 +226,18 @@ class WorkflowExecutionResult:
     stopped_reason: str
     last_card_uuid: str | None
     next_card_uuid: str | None
+
+
+@dataclass(frozen=True)
+class _WaitForEventExecution:
+    branch_label: str | None
+    timeout_at: datetime
+
+
+@dataclass(frozen=True)
+class _SelectContactChannelExecution:
+    branch_label: str
+    contact_row: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -277,11 +321,15 @@ def _normalize_channel_type(raw_value: Any) -> str | None:
 def _contact_member_channel_type_matches(
     runtime_variables: dict[str, Any],
     contact_row: dict[str, Any],
+    *,
+    expected_channel_type: str | None = None,
 ) -> bool:
-    input_payload = runtime_variables.get("input_payload")
-    if not isinstance(input_payload, dict):
-        return True
-    expected_type = _normalize_channel_type(input_payload.get("channel_type"))
+    expected_type = _normalize_channel_type(expected_channel_type)
+    if expected_type is None:
+        input_payload = runtime_variables.get("input_payload")
+        if not isinstance(input_payload, dict):
+            return True
+        expected_type = _normalize_channel_type(input_payload.get("channel_type"))
     if expected_type is None:
         return True
     return expected_type == _normalize_channel_type(
@@ -289,18 +337,78 @@ def _contact_member_channel_type_matches(
     )
 
 
+def _active_selected_contact_channel(
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    if not isinstance(workflow_meta, dict):
+        return None
+    raw_selection = workflow_meta.get("selected_contact_channel")
+    if not isinstance(raw_selection, dict):
+        return None
+    if raw_selection.get("selected") is not True:
+        return None
+    if str(raw_selection.get("session_scope") or "").strip().lower() != "person":
+        return None
+
+    try:
+        contact_list_member_id = int(raw_selection.get("contact_list_member_id"))
+        mailing_id = int(raw_selection.get("mailing_id"))
+        contact_list_id = str(UUID(str(raw_selection.get("contact_list_id"))))
+    except (TypeError, ValueError):
+        return None
+    channel_type = _normalize_channel_type(raw_selection.get("type"))
+    address = str(raw_selection.get("address") or "").strip()
+    if (
+        contact_list_member_id <= 0
+        or mailing_id <= 0
+        or channel_type not in SELECT_CONTACT_CHANNEL_TYPES
+        or not address
+    ):
+        return None
+
+    try:
+        person_uuid = str(UUID(str(raw_selection.get("person_uuid"))))
+    except (TypeError, ValueError):
+        return None
+
+    return {
+        **raw_selection,
+        "contact_list_member_id": contact_list_member_id,
+        "contact_list_id": contact_list_id,
+        "mailing_id": mailing_id,
+        "person_uuid": person_uuid,
+        "type": channel_type,
+        "address": address,
+    }
+
+
+def _routing_scope_from_selected_contact_channel(
+    selection: dict[str, Any],
+) -> _ContactMemberRoutingScope:
+    return _ContactMemberRoutingScope(
+        contact_list_member_id=int(selection["contact_list_member_id"]),
+        contact_list_id=str(selection["contact_list_id"]),
+        mailing_id=int(selection["mailing_id"]),
+        explicit=True,
+        valid=True,
+    )
+
+
 def _ensure_person_scope_component_supported(
     *,
     session_scope: str,
     component_kind_value: str,
+    selected_contact_channel: dict[str, Any] | None = None,
 ) -> None:
     if (
         session_scope == "person"
         and component_kind_value in PERSON_SCOPE_CHANNEL_COMPONENT_KINDS
+        and selected_contact_channel is None
     ):
         raise WorkflowExecutionError(
             "person_scope_channel_component_not_supported",
-            "Sessões por pessoa não podem executar componentes de comunicação por canal.",
+            "Sessões por pessoa precisam selecionar explicitamente um canal antes de executar componentes de comunicação.",
         )
 
 
@@ -2926,6 +3034,9 @@ def _inject_contact_runtime_scope(
         "label": contact_row.get("contact_channel_label"),
         "address": contact_row.get("contact_channel_address"),
     }
+    contact_birth_date = contact_row.get("contact_birth_date")
+    if isinstance(contact_birth_date, (date, datetime)):
+        contact_birth_date = contact_birth_date.isoformat()
 
     contact_payload = {
         "contact_list_member_id": contact_row.get("contact_list_member_id"),
@@ -2936,7 +3047,7 @@ def _inject_contact_runtime_scope(
         "country": contact_row.get("contact_country"),
         "province": contact_row.get("contact_province"),
         "city": contact_row.get("contact_city"),
-        "birth_date": contact_row.get("contact_birth_date"),
+        "birth_date": contact_birth_date,
         "age": contact_row.get("contact_age"),
         "channel_type": contact_row.get("contact_channel_type"),
         "channel_label": contact_row.get("contact_channel_label"),
@@ -3234,6 +3345,683 @@ def _catalog_parameter_bool(value: Any) -> bool:
     if isinstance(scalar, bool):
         return scalar
     return str(scalar or "").strip().lower() in {"1", "true", "yes", "sim", "on", "enabled"}
+
+
+def _split_random_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _split_random_percentage(value: Any, *, parameter_id: str) -> int:
+    scalar = _catalog_parameter_scalar(value)
+    if isinstance(scalar, bool):
+        raise WorkflowExecutionError(
+            "split_random_invalid_percentage",
+            f"O campo {parameter_id} deve ser um inteiro entre 0 e 100.",
+        )
+    try:
+        number = float(scalar)
+    except (TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number) or not number.is_integer() or not 0 <= number <= 100:
+        raise WorkflowExecutionError(
+            "split_random_invalid_percentage",
+            f"O campo {parameter_id} deve ser um inteiro entre 0 e 100.",
+        )
+    return int(number)
+
+
+def _split_random_config(component: dict[str, Any]) -> tuple[int, int, str]:
+    params = _split_random_parameters(component)
+    variant_a_percentage = _split_random_percentage(
+        params.get("variant_a_percentage"),
+        parameter_id="variant_a_percentage",
+    )
+    variant_b_percentage = _split_random_percentage(
+        params.get("variant_b_percentage"),
+        parameter_id="variant_b_percentage",
+    )
+    if variant_a_percentage + variant_b_percentage != 100:
+        raise WorkflowExecutionError(
+            "split_random_invalid_total",
+            "A soma dos percentuais das variantes A e B deve ser exatamente 100.",
+        )
+
+    output_var = str(_catalog_parameter_scalar(params.get("output_var")) or "").strip() or "split_random"
+    if (
+        not output_var
+        or len(output_var) > 128
+        or SPLIT_RANDOM_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "split_random_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return variant_a_percentage, variant_b_percentage, output_var
+
+
+def _split_random_exception_branch_label(
+    *,
+    definition: dict[str, Any],
+    current_card_uuid: str,
+) -> str | None:
+    labels = [
+        edge.label
+        for edge in extract_edges(definition)
+        if edge.source == current_card_uuid
+        and edge.label is not None
+        and edge.label.startswith("exception")
+    ]
+    if len(labels) == 1:
+        return labels[0]
+    return None
+
+
+def _validate_split_random_branches(
+    *,
+    definition: dict[str, Any],
+    current_card_uuid: str,
+) -> None:
+    allowed_labels = {"variant_a", "variant_b"}
+    branch_counts = {"variant_a": 0, "variant_b": 0, "exception": 0}
+    invalid_label = False
+    for edge in extract_edges(definition):
+        if edge.source != current_card_uuid:
+            continue
+        label = edge.label or ""
+        if label in allowed_labels:
+            branch_counts[label] += 1
+        elif label.startswith("exception"):
+            branch_counts["exception"] += 1
+        else:
+            invalid_label = True
+
+    if (
+        branch_counts["variant_a"] != 1
+        or branch_counts["variant_b"] != 1
+        or branch_counts["exception"] > 1
+        or invalid_label
+    ):
+        raise WorkflowExecutionError(
+            "split_random_invalid_branches",
+            "O split_random deve possuir exatamente uma saída variant_a, uma variant_b e no máximo uma exception.",
+        )
+
+
+def _split_random_bucket(
+    *,
+    flow_uuid: str,
+    session_identity: str,
+    revision_id: str,
+    current_card_uuid: str,
+) -> int:
+    seed = "\x1f".join(
+        (
+            SPLIT_RANDOM_HASH_STRATEGY,
+            str(flow_uuid),
+            str(session_identity),
+            str(revision_id),
+            str(current_card_uuid),
+        )
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False) % 100
+
+
+def _run_split_random(
+    *,
+    component: dict[str, Any],
+    definition: dict[str, Any],
+    current_card_uuid: str,
+    runtime_variables: dict[str, Any],
+    flow_uuid: str,
+    session_identity: str,
+    revision_id: str,
+    now: datetime | None = None,
+) -> str:
+    variant_a_percentage, variant_b_percentage, output_var = _split_random_config(component)
+    _validate_split_random_branches(
+        definition=definition,
+        current_card_uuid=current_card_uuid,
+    )
+    bucket = _split_random_bucket(
+        flow_uuid=flow_uuid,
+        session_identity=session_identity,
+        revision_id=revision_id,
+        current_card_uuid=current_card_uuid,
+    )
+    branch_label = "variant_a" if bucket < variant_a_percentage else "variant_b"
+
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = branch_label
+    updated_at = now or datetime.now(timezone.utc)
+    runtime_variables["split_random_last_result"] = {
+        "component_ref_id": component.get("ref_id"),
+        "card_cursor": current_card_uuid,
+        "revision_id": revision_id,
+        "output_var": output_var,
+        "branch": branch_label,
+        "bucket": bucket,
+        "variant_a_percentage": variant_a_percentage,
+        "variant_b_percentage": variant_b_percentage,
+        "strategy": SPLIT_RANDOM_HASH_STRATEGY,
+        "updated_at": updated_at.isoformat(),
+    }
+    runtime_variables.pop("split_random_last_error", None)
+    return branch_label
+
+
+def _select_contact_channel_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _select_contact_channel_config(
+    component: dict[str, Any],
+) -> tuple[str, str | None, str]:
+    params = _select_contact_channel_parameters(component)
+    raw_channel_type = params.get("channel_type")
+    if isinstance(raw_channel_type, list) and len(raw_channel_type) != 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_type",
+            "O campo channel_type deve conter uma única opção.",
+        )
+    channel_type = str(_catalog_parameter_scalar(raw_channel_type) or "").strip().lower()
+    if channel_type not in SELECT_CONTACT_CHANNEL_TYPES:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_type",
+            "O campo channel_type deve ser voice, whatsapp, sms ou email.",
+        )
+
+    raw_label = params.get("channel_label")
+    if isinstance(raw_label, list) and len(raw_label) > 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_label",
+            "O campo channel_label deve conter uma única label literal.",
+        )
+    label_scalar = _catalog_parameter_scalar(
+        raw_label,
+        preferred_keys=("label", "name"),
+    )
+    if raw_label not in (None, "", [], {}) and label_scalar is None:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_label",
+            "O campo channel_label deve conter uma única label literal.",
+        )
+    channel_label = str(label_scalar or "").strip() or None
+    if channel_label is not None and (
+        len(channel_label) > SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH
+        or _TEMPLATE_PATTERN.search(channel_label)
+        or any(ord(character) < 32 or ord(character) == 127 for character in channel_label)
+    ):
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_channel_label",
+            "O campo channel_label deve conter uma label literal de até 128 caracteres.",
+        )
+
+    raw_output_var = params.get("output_var")
+    if isinstance(raw_output_var, list) and len(raw_output_var) > 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_output_var",
+            "O campo output_var deve conter um único nome de variável.",
+        )
+    output_var = str(_catalog_parameter_scalar(raw_output_var) or "").strip()
+    output_var = output_var or "selected_channel"
+    if (
+        len(output_var) > 128
+        or _TEMPLATE_PATTERN.search(output_var)
+        or SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return channel_type, channel_label, output_var
+
+
+def _select_contact_channel_anchor(
+    contact_row: dict[str, Any] | None,
+) -> tuple[int, str, int, str | None]:
+    if not isinstance(contact_row, dict):
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão não possui um membro de contato ativo para iniciar a seleção.",
+        )
+    try:
+        contact_list_member_id = int(contact_row.get("contact_list_member_id"))
+        contact_list_id = str(UUID(str(contact_row.get("contact_list_id"))))
+        mailing_id = int(contact_row.get("mailing_id"))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão não possui lista, mailing e membro válidos para selecionar o canal.",
+        ) from exc
+    if contact_list_member_id <= 0 or mailing_id <= 0:
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão não possui lista, mailing e membro válidos para selecionar o canal.",
+        )
+
+    person_uuid = contact_row.get("person_uuid")
+    if person_uuid is not None:
+        try:
+            person_uuid = str(UUID(str(person_uuid)))
+        except (TypeError, ValueError) as exc:
+            raise WorkflowExecutionError(
+                "select_contact_channel_missing_contact_context",
+                "O membro atual possui uma referência de pessoa inválida.",
+            ) from exc
+    return contact_list_member_id, contact_list_id, mailing_id, person_uuid
+
+
+def _store_select_contact_channel_result(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    result: dict[str, Any],
+    selected: bool,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = dict(result) if selected else None
+    runtime_variables["select_contact_channel_last_result"] = dict(result)
+    runtime_variables.pop("select_contact_channel_last_error", None)
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    if selected:
+        workflow_meta["selected_contact_channel"] = dict(result)
+    else:
+        workflow_meta.pop("selected_contact_channel", None)
+
+
+async def _run_select_contact_channel(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    session_scope: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> _SelectContactChannelExecution:
+    channel_type, channel_label, output_var = _select_contact_channel_config(component)
+    (
+        contact_list_member_id,
+        contact_list_id,
+        mailing_id,
+        person_uuid,
+    ) = _select_contact_channel_anchor(contact_row)
+    if session_scope == "person" and person_uuid is None:
+        raise WorkflowExecutionError(
+            "select_contact_channel_missing_contact_context",
+            "A sessão por pessoa não possui person_uuid válido para selecionar o canal.",
+        )
+
+    try:
+        async with db_session.begin_nested():
+            candidate = await fetch_select_contact_channel_candidate(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+                session_scope=session_scope,
+                contact_list_member_id=contact_list_member_id,
+                contact_list_id=contact_list_id,
+                mailing_id=mailing_id,
+                person_uuid=person_uuid,
+                channel_type=channel_type,
+                channel_label=channel_label,
+            )
+            if candidate is not None and session_scope == "person":
+                rebound = await rebind_person_session_to_contact_channel(
+                    db_session,
+                    flow_uuid=flow_uuid,
+                    session_id=session_id,
+                    contact_list_member_id=int(candidate["contact_list_member_id"]),
+                    contact_list_id=str(candidate["contact_list_id"]),
+                    mailing_id=int(candidate["mailing_id"]),
+                    person_uuid=(
+                        str(candidate["person_uuid"])
+                        if candidate.get("person_uuid") is not None
+                        else None
+                    ),
+                )
+                if not rebound:
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_rebind_failed",
+                        "O canal foi encontrado, mas a sessão não pôde ser vinculada a ele com segurança.",
+                    )
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "select_contact_channel_persistence_failed",
+            "Falha ao selecionar o canal do contato.",
+        ) from exc
+
+    updated_at = now or datetime.now(timezone.utc)
+    if candidate is None:
+        result = {
+            "component_ref_id": component.get("ref_id"),
+            "selected": False,
+            "branch": "not_found",
+            "session_scope": session_scope,
+            "requested_type": channel_type,
+            "requested_label": channel_label,
+            "output_var": output_var,
+            "updated_at": updated_at.isoformat(),
+        }
+        _store_select_contact_channel_result(
+            runtime_variables=runtime_variables,
+            output_var=output_var,
+            result=result,
+            selected=False,
+        )
+        return _SelectContactChannelExecution("not_found", None)
+
+    result = {
+        "component_ref_id": component.get("ref_id"),
+        "selected": True,
+        "branch": "selected",
+        "session_scope": session_scope,
+        "contact_list_member_id": int(candidate["contact_list_member_id"]),
+        "contact_list_id": str(candidate["contact_list_id"]),
+        "mailing_id": int(candidate["mailing_id"]),
+        "person_uuid": candidate.get("person_uuid"),
+        "type": _normalize_channel_type(candidate.get("contact_channel_type")),
+        "label": candidate.get("contact_channel_label"),
+        "address": str(candidate.get("contact_channel_address") or "").strip(),
+        "is_primary": bool(candidate.get("is_primary")),
+        "output_var": output_var,
+        "updated_at": updated_at.isoformat(),
+    }
+    _store_select_contact_channel_result(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        result=result,
+        selected=True,
+    )
+    return _SelectContactChannelExecution("selected", dict(candidate))
+
+
+def _wait_for_event_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _wait_for_event_config(component: dict[str, Any]) -> tuple[str, str, int, str]:
+    params = _wait_for_event_parameters(component)
+
+    event_source = str(_catalog_parameter_scalar(params.get("event_source")) or "").strip().lower()
+    if event_source != "callback":
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_event_source",
+            "O campo event_source deve ser callback.",
+        )
+
+    event_result = str(_catalog_parameter_scalar(params.get("event_result")) or "").strip().lower()
+    if (
+        not event_result
+        or len(event_result) > 128
+        or WAIT_FOR_EVENT_RESULT_RE.fullmatch(event_result) is None
+    ):
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_event_result",
+            "O campo event_result deve conter um resultado literal válido.",
+        )
+
+    raw_timeout = _catalog_parameter_scalar(params.get("timeout_seconds"))
+    try:
+        if isinstance(raw_timeout, bool):
+            raise ValueError
+        timeout_seconds = int(str(raw_timeout).strip())
+    except (TypeError, ValueError):
+        timeout_seconds = 0
+    if not 1 <= timeout_seconds <= WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS:
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_timeout_seconds",
+            "O campo timeout_seconds deve ser um inteiro entre 1 e 2592000.",
+        )
+
+    output_var = str(_catalog_parameter_scalar(params.get("output_var")) or "wait_event").strip()
+    if (
+        not output_var
+        or len(output_var) > 128
+        or WAIT_FOR_EVENT_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+
+    return event_source, event_result, timeout_seconds, output_var
+
+
+def _clear_wait_for_event_state(runtime_variables: dict[str, Any]) -> None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta.pop("wait_for_event", None)
+
+
+def _wait_for_event_matching_callback_index(
+    runtime_variables: dict[str, Any],
+    *,
+    state: dict[str, Any],
+) -> int | None:
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if not isinstance(callbacks_pending, list):
+        return None
+
+    try:
+        pending_start_index = max(0, int(state.get("pending_start_index", 0)))
+    except (TypeError, ValueError):
+        return None
+
+    timeout_at = _parse_iso_datetime(state.get("timeout_at"))
+    if timeout_at is None:
+        return None
+    timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
+    expected_source = str(state.get("event_source") or "").strip().lower()
+    expected_result = str(state.get("event_result") or "").strip().lower()
+
+    for index, callback in enumerate(callbacks_pending):
+        if index < pending_start_index or not isinstance(callback, dict):
+            continue
+        if str(callback.get("event_name") or "").strip().lower() != expected_source:
+            continue
+        if str(callback.get("result") or "").strip().lower() != expected_result:
+            continue
+        received_at = _parse_iso_datetime(callback.get("received_at"))
+        if received_at is None:
+            continue
+        received_at_utc = received_at if received_at.tzinfo is not None else received_at.replace(tzinfo=timezone.utc)
+        if received_at_utc <= timeout_at_utc:
+            return index
+    return None
+
+
+def _should_resume_wait_for_event_blocking_execution(
+    runtime_variables: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    raw_state = workflow_meta.get("wait_for_event")
+    if not isinstance(raw_state, dict):
+        return True
+    timeout_at = _parse_iso_datetime(raw_state.get("timeout_at"))
+    if timeout_at is None:
+        return True
+    if _wait_for_event_matching_callback_index(runtime_variables, state=raw_state) is not None:
+        return True
+    current_time = now or datetime.now(timezone.utc)
+    current_time_utc = current_time if current_time.tzinfo is not None else current_time.replace(tzinfo=timezone.utc)
+    timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
+    return current_time_utc >= timeout_at_utc
+
+
+def _store_wait_for_event_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
+    component_ref_id: str | None,
+    updated_at: datetime,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = copy.deepcopy(output)
+    runtime_variables["wait_for_event_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
+        "updated_at": updated_at.isoformat(),
+    }
+
+
+def _run_wait_for_event(
+    *,
+    component: dict[str, Any],
+    current_card_uuid: str,
+    runtime_variables: dict[str, Any],
+    now: datetime | None = None,
+) -> _WaitForEventExecution:
+    event_source, event_result, timeout_seconds, output_var = _wait_for_event_config(component)
+    current_time = now or datetime.now(timezone.utc)
+    current_time_utc = current_time if current_time.tzinfo is not None else current_time.replace(tzinfo=timezone.utc)
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    raw_state = workflow_meta.get("wait_for_event")
+
+    if raw_state is None:
+        callbacks_pending = runtime_variables.get("callbacks_pending")
+        pending_start_index = len(callbacks_pending) if isinstance(callbacks_pending, list) else 0
+        timeout_at = current_time_utc + timedelta(seconds=timeout_seconds)
+        workflow_meta["wait_for_event"] = {
+            "component_ref_id": component.get("ref_id"),
+            "card_cursor": current_card_uuid,
+            "event_source": event_source,
+            "event_result": event_result,
+            "timeout_seconds": timeout_seconds,
+            "output_var": output_var,
+            "pending_start_index": pending_start_index,
+            "blocked_at": current_time_utc.isoformat(),
+            "timeout_at": timeout_at.isoformat(),
+            "status": "waiting",
+        }
+        runtime_variables.pop("wait_for_event_last_error", None)
+        return _WaitForEventExecution(branch_label=None, timeout_at=timeout_at)
+
+    if not isinstance(raw_state, dict):
+        raise WorkflowExecutionError(
+            "wait_for_event_state_mismatch",
+            "O estado persistido do wait_for_event é inválido.",
+        )
+
+    expected_state = {
+        "card_cursor": current_card_uuid,
+        "event_source": event_source,
+        "event_result": event_result,
+        "timeout_seconds": timeout_seconds,
+        "output_var": output_var,
+    }
+    if any(raw_state.get(key) != value for key, value in expected_state.items()):
+        raise WorkflowExecutionError(
+            "wait_for_event_state_mismatch",
+            "O estado persistido do wait_for_event não corresponde ao card atual.",
+        )
+
+    timeout_at = _parse_iso_datetime(raw_state.get("timeout_at"))
+    if timeout_at is None:
+        raise WorkflowExecutionError(
+            "wait_for_event_state_mismatch",
+            "O prazo persistido do wait_for_event é inválido.",
+        )
+    timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
+
+    callback_index = _wait_for_event_matching_callback_index(runtime_variables, state=raw_state)
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if callback_index is not None and isinstance(callbacks_pending, list):
+        callback = callbacks_pending.pop(callback_index)
+        if isinstance(callback, dict):
+            runtime_variables["callback"] = copy.deepcopy(callback)
+            output = {
+                "status": "received",
+                "event_source": event_source,
+                "event_result": event_result,
+                "received_at": callback.get("received_at"),
+                "data": copy.deepcopy(callback.get("data")) if isinstance(callback.get("data"), dict) else {},
+            }
+            _store_wait_for_event_output(
+                runtime_variables=runtime_variables,
+                output_var=output_var,
+                output=output,
+                component_ref_id=(str(component.get("ref_id")) if component.get("ref_id") is not None else None),
+                updated_at=current_time_utc,
+            )
+            _clear_wait_for_event_state(runtime_variables)
+            runtime_variables.pop("wait_for_event_last_error", None)
+            return _WaitForEventExecution(branch_label="received", timeout_at=timeout_at_utc)
+
+    if current_time_utc >= timeout_at_utc:
+        output = {
+            "status": "timeout",
+            "event_source": event_source,
+            "event_result": event_result,
+            "timeout_at": timeout_at_utc.isoformat(),
+        }
+        _store_wait_for_event_output(
+            runtime_variables=runtime_variables,
+            output_var=output_var,
+            output=output,
+            component_ref_id=(str(component.get("ref_id")) if component.get("ref_id") is not None else None),
+            updated_at=current_time_utc,
+        )
+        _clear_wait_for_event_state(runtime_variables)
+        runtime_variables.pop("wait_for_event_last_error", None)
+        return _WaitForEventExecution(branch_label="timeout", timeout_at=timeout_at_utc)
+
+    return _WaitForEventExecution(branch_label=None, timeout_at=timeout_at_utc)
 
 
 def _identidade_enum_parameter(
@@ -3731,302 +4519,687 @@ async def _run_identidade_person(
     return "encontrado"
 
 
-def _normalize_create_contact_mapping_key(raw_key: str) -> str:
-    token = str(raw_key or "").strip().lower()
-    token = (
-        token.replace("ç", "c")
-        .replace("ã", "a")
-        .replace("á", "a")
-        .replace("à", "a")
-        .replace("â", "a")
-        .replace("é", "e")
-        .replace("ê", "e")
-        .replace("í", "i")
-        .replace("ó", "o")
-        .replace("ô", "o")
-        .replace("õ", "o")
-        .replace("ú", "u")
-    )
-    token = token.replace("-", "_").replace(" ", "_")
-    aliases = {
-        "identificador": "identifier",
-        "identifier": "identifier",
-        "id": "identifier",
-        "contact_identifier": "identifier",
-        "endereco": "address",
-        "endereço": "address",
-        "address": "address",
-        "entity_address": "address",
-        "telefone": "address",
-        "phone": "address",
-        "nome": "full_name",
-        "name": "full_name",
-        "full_name": "full_name",
-        "contact_full_name": "full_name",
-    }
-    return aliases.get(token, token)
+CREATE_CONTACT_ACTIONS = {"update_current", "create_if_missing", "upsert"}
+CREATE_CONTACT_ENRICHMENT_POLICIES = {"fill_missing", "overwrite_non_null"}
+CREATE_CONTACT_PROFILE_FIELDS = (
+    "full_name",
+    "company",
+    "gender",
+    "role",
+    "country",
+    "state",
+    "city",
+    "birthdate",
+)
+CREATE_CONTACT_EXTRA_FIELD_RE = re.compile(
+    r"extra\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
+)
+CREATE_CONTACT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _extract_create_contact_mapping(component: dict[str, Any]) -> list[tuple[str, Any]]:
-    params = component.get("parameters")
-    if not isinstance(params, dict):
-        return []
-    raw_mapping = params.get("mapping")
-    entries: list[tuple[str, Any]] = []
-    if isinstance(raw_mapping, list):
-        for item in raw_mapping:
-            if not isinstance(item, dict):
+def _create_contact_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
                 continue
-            raw_key = item.get("key") or item.get("field") or item.get("name")
-            if raw_key is None:
-                continue
-            entries.append((str(raw_key), item.get("value")))
-    elif isinstance(raw_mapping, dict):
-        for raw_key, value in raw_mapping.items():
-            entries.append((str(raw_key), value))
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _create_contact_enum_parameter(
+    params: dict[str, Any],
+    *,
+    field: str,
+    allowed: set[str],
+) -> str:
+    value = str(_catalog_parameter_scalar(params.get(field)) or "").strip().lower()
+    if value not in allowed:
+        raise WorkflowExecutionError(
+            f"create_contact_invalid_{field}",
+            f"O campo {field} possui um valor inválido.",
+        )
+    return value
+
+
+def _create_contact_output_var(value: Any) -> str:
+    normalized = str(_catalog_parameter_scalar(value) or "contact_action").strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or CREATE_CONTACT_OUTPUT_VAR_RE.fullmatch(normalized) is None
+    ):
+        raise WorkflowExecutionError(
+            "create_contact_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return normalized
+
+
+def _create_contact_mapping_entries(mapping: Any) -> list[tuple[str, Any]]:
+    if isinstance(mapping, dict):
+        entries = [(str(key).strip(), value) for key, value in mapping.items()]
+    elif isinstance(mapping, list):
+        entries = []
+        for entry in mapping:
+            if not isinstance(entry, dict):
+                raise WorkflowExecutionError(
+                    "create_contact_invalid_mapping",
+                    "O campo mapping possui uma estrutura inválida.",
+                )
+            entries.append((str(entry.get("key") or "").strip(), entry.get("value")))
+    else:
+        entries = []
+
+    if not entries:
+        raise WorkflowExecutionError(
+            "create_contact_missing_mapping",
+            "O campo mapping deve declarar ao menos um dado do contato.",
+        )
+
+    seen: set[str] = set()
+    extra_paths: list[tuple[str, ...]] = []
+    for key, _ in entries:
+        if (
+            not key
+            or key in seen
+            or len(key) > 128
+            or (
+                key not in CREATE_CONTACT_PROFILE_FIELDS
+                and CREATE_CONTACT_EXTRA_FIELD_RE.fullmatch(key) is None
+            )
+        ):
+            raise WorkflowExecutionError(
+                "create_contact_invalid_mapping_field",
+                "O mapping contém campo vazio, duplicado ou não permitido.",
+            )
+        if key.startswith("extra."):
+            path = tuple(key.removeprefix("extra.").split("."))
+            if any(
+                path[: len(existing_path)] == existing_path
+                or existing_path[: len(path)] == path
+                for existing_path in extra_paths
+            ):
+                raise WorkflowExecutionError(
+                    "create_contact_conflicting_extra_mapping",
+                    "O mapping contém chaves extra com caminhos conflitantes.",
+                )
+            extra_paths.append(path)
+        seen.add(key)
     return entries
 
 
-def _coerce_record_value(value: Any) -> str:
-    if value is None:
-        return ""
+def _create_contact_is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip()) or value == [] or value == {}
+
+
+def _create_contact_profile_value(field: str, value: Any) -> Any:
+    if _create_contact_is_blank(value):
+        return None
+    if isinstance(value, (dict, list, tuple, set)):
+        raise WorkflowExecutionError(
+            "create_contact_invalid_mapping_value",
+            f"O campo {field} deve resultar em um valor simples.",
+        )
+    if field == "birthdate":
+        try:
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, date):
+                return value
+            return date.fromisoformat(str(value).strip())
+        except ValueError as exc:
+            raise WorkflowExecutionError(
+                "create_contact_invalid_birthdate",
+                "O campo birthdate deve usar o formato AAAA-MM-DD.",
+            ) from exc
     return str(value).strip()
 
 
-def _build_create_contact_records(
+def _create_contact_json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _create_contact_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_create_contact_json_safe(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _build_create_contact_payload(
     *,
-    component: dict[str, Any],
+    mapping: Any,
     resolution_scope: dict[str, Any],
-) -> list[dict[str, Any]]:
-    mapping_entries = _extract_create_contact_mapping(component)
-    if not mapping_entries:
+) -> tuple[dict[str, Any], list[str]]:
+    payload: dict[str, Any] = {}
+    extras: dict[str, Any] = {}
+    configured_fields: list[str] = []
+    for key, raw_value in _create_contact_mapping_entries(mapping):
+        value = _render_value(raw_value, resolution_scope)
+        if _create_contact_is_blank(value):
+            continue
+        if key in CREATE_CONTACT_PROFILE_FIELDS:
+            payload[key] = _create_contact_profile_value(key, value)
+        else:
+            _set_by_path(extras, key.removeprefix("extra."), _create_contact_json_safe(value))
+        configured_fields.append(key)
+
+    if not configured_fields:
         raise WorkflowExecutionError(
-            "create_contact_missing_mapping",
-            "Componente create_contact sem parâmetro mapping.",
+            "create_contact_empty_mapping",
+            "Nenhum valor do mapping pôde ser resolvido no runtime.",
         )
-
-    normalized_fields: dict[str, Any] = {}
-    for raw_key, raw_value in mapping_entries:
-        normalized_key = _normalize_create_contact_mapping_key(raw_key)
-        normalized_fields[normalized_key] = _render_value(raw_value, resolution_scope)
-
-    max_items = 1
-    for value in normalized_fields.values():
-        if isinstance(value, list):
-            max_items = max(max_items, len(value))
-
-    records: list[dict[str, Any]] = []
-    for index in range(max_items):
-        row: dict[str, Any] = {}
-        for key, value in normalized_fields.items():
-            if isinstance(value, list):
-                raw_item = value[index] if index < len(value) else None
-                row[key] = _coerce_record_value(raw_item)
-            else:
-                row[key] = _coerce_record_value(value)
-
-        identifier = row.get("identifier", "")
-        address = row.get("address", "")
-        if not identifier or not address:
-            raise WorkflowExecutionError(
-                "create_contact_missing_required_fields",
-                "create_contact requer identificador e endereço preenchidos.",
-            )
-
-        extras = {
-            key: val
-            for key, val in row.items()
-            if key not in {"identifier", "address", "full_name"} and val not in {"", None}
-        }
-        records.append(
-            {
-                "identifier": identifier,
-                "address": address,
-                "full_name": row.get("full_name") or None,
-                "extras": extras,
-            }
-        )
-
-    if not records:
-        raise WorkflowExecutionError(
-            "create_contact_no_records",
-            "create_contact não gerou registros válidos.",
-        )
-    return records
+    payload["extras"] = extras
+    return payload, configured_fields
 
 
-def _build_child_runtime_for_create_contact(
+def _create_contact_existing_extras(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return copy.deepcopy(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _merge_create_contact_extras(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
     *,
-    parent_runtime_variables: dict[str, Any],
-    record: dict[str, Any],
+    overwrite: bool,
+    prefix: str = "extra",
+) -> tuple[dict[str, Any], list[str]]:
+    merged = copy.deepcopy(existing)
+    changed_fields: list[str] = []
+    for key, value in incoming.items():
+        path = f"{prefix}.{key}"
+        current = merged.get(key)
+        if isinstance(value, dict):
+            if isinstance(current, dict):
+                nested_base = current
+            elif overwrite or _create_contact_is_blank(current):
+                nested_base = {}
+            else:
+                continue
+            nested, nested_changes = _merge_create_contact_extras(
+                nested_base, value, overwrite=overwrite, prefix=path
+            )
+            if nested_changes:
+                merged[key] = nested
+                changed_fields.extend(nested_changes)
+        elif (overwrite or _create_contact_is_blank(current)) and current != value:
+            merged[key] = copy.deepcopy(value)
+            changed_fields.append(path)
+    return merged, changed_fields
+
+
+def _merge_create_contact_payload(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    enrichment_policy: str,
+) -> tuple[dict[str, Any], list[str]]:
+    overwrite = enrichment_policy == "overwrite_non_null"
+    merged = {field: existing.get(field) for field in CREATE_CONTACT_PROFILE_FIELDS}
+    changed_fields: list[str] = []
+    for field in CREATE_CONTACT_PROFILE_FIELDS:
+        if field not in incoming:
+            continue
+        current = existing.get(field)
+        value = incoming[field]
+        if (overwrite or _create_contact_is_blank(current)) and current != value:
+            merged[field] = value
+            changed_fields.append(field)
+
+    existing_extras = _create_contact_existing_extras(existing.get("extras"))
+    incoming_extras = incoming.get("extras") if isinstance(incoming.get("extras"), dict) else {}
+    merged_extras, extra_changes = _merge_create_contact_extras(
+        existing_extras,
+        incoming_extras,
+        overwrite=overwrite,
+    )
+    merged["extras"] = merged_extras
+    changed_fields.extend(extra_changes)
+    return merged, changed_fields
+
+
+def _create_contact_identifier(value: Any, resolution_scope: dict[str, Any]) -> str:
+    rendered = _render_value(value, resolution_scope)
+    if isinstance(rendered, (dict, list, tuple, set, bool)):
+        rendered = None
+    normalized = str(rendered or "").strip()
+    if not normalized:
+        raise WorkflowExecutionError(
+            "create_contact_missing_identifier",
+            "O campo identifier deve resultar em um valor não vazio.",
+        )
+    return normalized
+
+
+def _store_create_contact_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
     component_ref_id: str | None,
-    parent_session_id: int,
-    flow_uuid: str,
-    last_card_cursor: str,
-    next_card_cursor: str,
-) -> dict[str, Any]:
-    child_runtime: dict[str, Any] = {
-        "source_app": "CreateContact",
-        "last_event_received_at": datetime.now(timezone.utc).isoformat(),
-        "workflow_v2": {
-            "flow_id": flow_uuid,
-            "engine_phase": "m2",
-            "last_card_cursor": last_card_cursor,
-            "next_card_cursor": next_card_cursor,
-            "definition_loaded_at": datetime.now(timezone.utc).isoformat(),
-        },
-        "create_contact": {
-            "parent_session_id": parent_session_id,
-            "component_ref_id": component_ref_id,
-            "record": record,
-        },
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    _set_by_path(customs, output_var, output)
+    runtime_variables["create_contact_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    parent_variables = parent_runtime_variables.get("variables")
-    if isinstance(parent_variables, dict):
-        child_runtime["variables"] = copy.deepcopy(parent_variables)
-    return child_runtime
 
 
 async def _run_create_contact(
     *,
     db_session: AsyncSession,
     flow_uuid: str,
-    session_id: int,
-    definition: dict[str, Any],
-    current_card_uuid: str,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
 ) -> str:
-    next_for_created_contact = resolve_next_card_uuid_by_branch(
-        definition,
-        current_card_uuid=current_card_uuid,
-        branch_label="action_for_the_created_contact",
+    params = _create_contact_parameters(component)
+    action = _create_contact_enum_parameter(
+        params,
+        field="person_action",
+        allowed=CREATE_CONTACT_ACTIONS,
     )
-    if not next_for_created_contact:
-        raise WorkflowExecutionError(
-            "create_contact_missing_branch_for_created_contact",
-            "Branch 'action_for_the_created_contact' não mapeado no fluxo.",
-        )
-
-    next_for_created_uuid = _to_uuid_or_none(next_for_created_contact)
-    current_card_uuid_cast = _to_uuid_or_none(current_card_uuid)
-    if next_for_created_uuid is None or current_card_uuid_cast is None:
-        raise WorkflowExecutionError(
-            "create_contact_invalid_branch_cursor",
-            "Cursores do create_contact não são UUID válidos.",
-        )
-
+    enrichment_policy = _create_contact_enum_parameter(
+        params,
+        field="enrichment_policy",
+        allowed=CREATE_CONTACT_ENRICHMENT_POLICIES,
+    )
+    output_var = _create_contact_output_var(params.get("output_var"))
     variables = _ensure_variables(runtime_variables)
     resolution_scope = _build_runtime_resolution_scope(
         runtime_variables=runtime_variables,
         variables=variables,
     )
-    records = _build_create_contact_records(
-        component=component,
-        resolution_scope=resolution_scope,
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip() or None
+    identifier: str | None = None
+    person: dict[str, Any] | None = None
+    branch = "unchanged"
+    changed_fields: list[str] = []
+
+    logger.info(
+        "workflow m2 create contact started",
+        extra={
+            "event": "orch.workflow.m2.create_contact.started",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_action": action,
+            "enrichment_policy": enrichment_policy,
+        },
     )
 
-    default_list = await ensure_default_source_list_for_create_contact(
-        db_session,
-        flow_uuid=flow_uuid,
-    )
-    default_list_id = int(default_list["id"])
-
-    created_members = 0
-    created_sessions = 0
-    reused_sessions = 0
-    processed_contacts: list[dict[str, Any]] = []
-    for record in records:
-        person = await upsert_person_for_create_contact(
-            db_session,
-            identifier=record["identifier"],
-            address=record["address"],
-            full_name=record.get("full_name"),
-            extras=record.get("extras") if isinstance(record.get("extras"), dict) else {},
-            source_list_id=default_list_id,
-        )
-        contact_member = await ensure_contact_list_member_for_create_contact(
-            db_session,
-            source_list_id=default_list_id,
-            person_uuid=str(person["uuid"]),
-            identifier=record["identifier"],
-            address=record["address"],
-            full_name=record.get("full_name"),
-            extras=record.get("extras") if isinstance(record.get("extras"), dict) else {},
-        )
-        if contact_member.get("created"):
-            created_members += 1
-
-        child_runtime = _build_child_runtime_for_create_contact(
-            parent_runtime_variables=runtime_variables,
-            record=record,
-            component_ref_id=component.get("ref_id"),
-            parent_session_id=session_id,
-            flow_uuid=flow_uuid,
-            last_card_cursor=current_card_uuid_cast,
-            next_card_cursor=next_for_created_uuid,
-        )
-        child_session = await ensure_session_for_created_contact(
-            db_session,
-            flow_uuid=flow_uuid,
-            entity=str(record["identifier"]),
-            entity_type="person",
-            entity_address=str(record["address"]),
-            entity_session_id=f"{record['address']}:::{flow_uuid}",
-            last_card_uuid=current_card_uuid_cast,
-            next_card_uuid=next_for_created_uuid,
-            runtime_variables=child_runtime,
-        )
-        if child_session.get("created"):
-            created_sessions += 1
-            billing_settings = get_settings()
-            if billing_settings.orch_billing_snapshot_enabled:
-                await try_create_billing_snapshot_outbox(
+    try:
+        async with db_session.begin_nested():
+            existing: dict[str, Any] | None
+            if action == "update_current":
+                person_uuid = str(contact_row.get("person_uuid") or "").strip() if isinstance(contact_row, dict) else ""
+                if not person_uuid:
+                    branch = "not_found"
+                else:
+                    try:
+                        person_uuid = str(UUID(person_uuid))
+                    except (TypeError, ValueError, AttributeError) as exc:
+                        raise WorkflowExecutionError(
+                            "create_contact_invalid_current_person",
+                            "A sessão atual possui uma referência de pessoa inválida.",
+                        ) from exc
+                    existing = await fetch_create_contact_person_by_uuid_for_update(
+                        db_session,
+                        person_uuid=person_uuid,
+                    )
+                    if existing is None:
+                        branch = "not_found"
+                    else:
+                        incoming, _ = _build_create_contact_payload(
+                            mapping=params.get("mapping"),
+                            resolution_scope=resolution_scope,
+                        )
+                        identifier = str(existing.get("identifier") or "").strip() or None
+                        merged, changed_fields = _merge_create_contact_payload(
+                            existing,
+                            incoming,
+                            enrichment_policy=enrichment_policy,
+                        )
+                        if changed_fields:
+                            person = await update_create_contact_person_profile(
+                                db_session,
+                                person_uuid=person_uuid,
+                                payload=merged,
+                            )
+                            if person is None:
+                                raise WorkflowExecutionError(
+                                    "create_contact_current_person_not_found",
+                                    "A pessoa atual deixou de estar disponível durante a atualização.",
+                                )
+                            branch = "updated"
+                        else:
+                            person = existing
+            else:
+                identifier = _create_contact_identifier(params.get("identifier"), resolution_scope)
+                existing = await fetch_create_contact_person_by_identifier_for_update(
                     db_session,
-                    workspace_uuid=get_current_workspace_uuid(),
-                    session_id=int(child_session["id"]),
-                    session_uuid=str(child_session["uuid"]),
+                    identifier=identifier,
                 )
-            elif billing_settings.orch_billing_enabled:
-                await try_record_billing_event(
-                    db_session,
-                    workspace_uuid=get_current_workspace_uuid(),
-                    session_id=int(child_session["id"]),
-                    settings=billing_settings,
-                )
-        else:
-            reused_sessions += 1
+                if existing is None:
+                    incoming, configured_fields = _build_create_contact_payload(
+                        mapping=params.get("mapping"),
+                        resolution_scope=resolution_scope,
+                    )
+                    person = await insert_create_contact_person_if_missing(
+                        db_session,
+                        identifier=identifier,
+                        payload=incoming,
+                    )
+                    if person is not None:
+                        branch = "created"
+                        changed_fields = list(configured_fields)
+                    else:
+                        existing = await fetch_create_contact_person_by_identifier_for_update(
+                            db_session,
+                            identifier=identifier,
+                        )
+                        if existing is None:
+                            raise WorkflowExecutionError(
+                                "create_contact_person_not_found_after_conflict",
+                                "A pessoa não pôde ser recuperada após conflito de criação.",
+                            )
 
-        processed_contacts.append(
-            {
-                "identifier": record["identifier"],
-                "address": record["address"],
-                "session_id": child_session.get("id"),
-                "session_created": bool(child_session.get("created")),
-                "member_id": contact_member.get("id"),
-                "member_created": bool(contact_member.get("created")),
-                "person_uuid": person.get("uuid"),
-            }
-        )
+                if person is None and existing is not None:
+                    person = existing
+                    if action == "upsert":
+                        incoming, _ = _build_create_contact_payload(
+                            mapping=params.get("mapping"),
+                            resolution_scope=resolution_scope,
+                        )
+                        merged, changed_fields = _merge_create_contact_payload(
+                            existing,
+                            incoming,
+                            enrichment_policy=enrichment_policy,
+                        )
+                        if changed_fields:
+                            person = await update_create_contact_person_profile(
+                                db_session,
+                                person_uuid=str(existing["uuid"]),
+                                payload=merged,
+                            )
+                            if person is None:
+                                raise WorkflowExecutionError(
+                                    "create_contact_person_not_found_during_update",
+                                    "A pessoa deixou de estar disponível durante a atualização.",
+                                )
+                            branch = "updated"
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "create_contact_persistence_failed",
+            "Falha ao criar ou atualizar a pessoa.",
+        ) from exc
 
-    await increment_source_list_counters_for_create_contact(
-        db_session,
-        source_list_id=default_list_id,
-        created_members=created_members,
+    if person is not None:
+        identifier = str(person.get("identifier") or identifier or "").strip() or None
+    output = {
+        "action": branch,
+        "person_uuid": str(person.get("uuid")) if person is not None and person.get("uuid") else None,
+        "identifier": identifier,
+        "changed_fields": changed_fields,
+    }
+    _store_create_contact_output(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        output=output,
+        component_ref_id=component_ref_id,
     )
+    runtime_variables.pop("create_contact_last_error", None)
+    logger.info(
+        "workflow m2 create contact completed",
+        extra={
+            "event": "orch.workflow.m2.create_contact.completed",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_action": action,
+            "result_action": branch,
+            "changed_fields": changed_fields,
+        },
+    )
+    return branch
 
-    runtime_variables["create_contact_last_result"] = {
-        "component_ref_id": component.get("ref_id"),
-        "default_source_list_id": default_list_id,
-        "default_source_list_public_id": default_list.get("public_id"),
-        "processed_count": len(records),
-        "created_members": created_members,
-        "created_sessions": created_sessions,
-        "reused_sessions": reused_sessions,
-        "contacts": processed_contacts,
+
+SOURCE_LIST_MEMBERSHIP_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _source_list_membership_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _source_list_membership_person_uuid(
+    value: Any,
+    *,
+    resolution_scope: dict[str, Any],
+) -> str | None:
+    raw = _catalog_parameter_scalar(
+        value,
+        preferred_keys=("person_uuid", "uuid"),
+    )
+    rendered = _render_value(raw, resolution_scope)
+    if rendered is None or (isinstance(rendered, str) and not rendered.strip()):
+        return None
+    if isinstance(rendered, (dict, list, tuple, set, bool)):
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_person_uuid",
+            "O campo person_uuid deve resultar em um UUID de pessoa válido.",
+        )
+    try:
+        return str(UUID(str(rendered).strip()))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_person_uuid",
+            "O campo person_uuid deve resultar em um UUID de pessoa válido.",
+        ) from exc
+
+
+def _source_list_membership_mailing_public_id(value: Any) -> str:
+    scalar = _catalog_parameter_scalar(
+        value,
+        preferred_keys=("mailing_id", "public_id", "source_list_id", "uuid"),
+    )
+    normalized = str(scalar or "").strip()
+    if not normalized:
+        raise WorkflowExecutionError(
+            "source_list_membership_missing_mailing_id",
+            "O campo mailing_id deve selecionar uma lista.",
+        )
+    try:
+        return str(UUID(normalized))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_mailing_id",
+            "O campo mailing_id deve conter uma lista válida.",
+        ) from exc
+
+
+def _source_list_membership_output_var(value: Any) -> str:
+    normalized = str(_catalog_parameter_scalar(value) or "source_list_membership").strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or SOURCE_LIST_MEMBERSHIP_OUTPUT_VAR_RE.fullmatch(normalized) is None
+    ):
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return normalized
+
+
+def _store_source_list_membership_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
+    component_ref_id: str | None,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = copy.deepcopy(output)
+    runtime_variables["source_list_membership_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    return "action_after_creating_contact"
+
+
+async def _run_source_list_membership(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> str:
+    params = _source_list_membership_parameters(component)
+    output_var = _source_list_membership_output_var(params.get("output_var"))
+    mailing_public_id = _source_list_membership_mailing_public_id(params.get("mailing_id"))
+    variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
+    person_uuid = _source_list_membership_person_uuid(
+        params.get("person_uuid"),
+        resolution_scope=resolution_scope,
+    )
+    component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip() or None
+    branch = "not_found"
+    missing: str | None = None
+    source_list: dict[str, Any] | None = None
+    membership: dict[str, Any] | None = None
+
+    logger.info(
+        "workflow m2 source list membership started",
+        extra={
+            "event": "orch.workflow.m2.source_list_membership.started",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_uuid": person_uuid,
+            "mailing_id": mailing_public_id,
+        },
+    )
+
+    try:
+        async with db_session.begin_nested():
+            if person_uuid is None:
+                missing = "person"
+            else:
+                person = await fetch_person_by_uuid_for_update(
+                    db_session,
+                    person_uuid=person_uuid,
+                )
+                if person is None:
+                    missing = "person"
+                else:
+                    source_list = await resolve_source_list_by_public_id(
+                        db_session,
+                        public_id=mailing_public_id,
+                    )
+                    if source_list is None:
+                        missing = "mailing"
+                    else:
+                        source_status = str(source_list.get("status") or "").strip().upper()
+                        if source_status not in {"READY_TO_INGEST", "PROCESSED"}:
+                            raise WorkflowExecutionError(
+                                "source_list_membership_mailing_not_ready",
+                                "A lista selecionada precisa estar pronta ou processada.",
+                            )
+                        if not str(person.get("identifier") or "").strip():
+                            raise WorkflowExecutionError(
+                                "source_list_membership_person_without_identifier",
+                                "A pessoa selecionada não possui identificador para entrar na lista.",
+                            )
+                        membership = await ensure_person_in_source_list(
+                            db_session,
+                            source_list_id=int(source_list["id"]),
+                            person=person,
+                        )
+                        branch = "linked" if membership.get("created") else "already_linked"
+    except WorkflowExecutionError:
+        raise
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "source_list_membership_persistence_failed",
+            "Falha ao vincular a pessoa à lista.",
+        ) from exc
+
+    output = {
+        "action": branch,
+        "person_uuid": person_uuid,
+        "mailing_id": mailing_public_id,
+        "source_list_id": source_list.get("id") if source_list is not None else None,
+        "contact_draft_id": membership.get("contact_draft_id") if membership is not None else None,
+        "channels": membership.get("channels") if membership is not None else None,
+        "missing": missing,
+    }
+    _store_source_list_membership_output(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        output=output,
+        component_ref_id=component_ref_id,
+    )
+    runtime_variables.pop("source_list_membership_last_error", None)
+    logger.info(
+        "workflow m2 source list membership completed",
+        extra={
+            "event": "orch.workflow.m2.source_list_membership.completed",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_uuid": person_uuid,
+            "mailing_id": mailing_public_id,
+            "result_action": branch,
+            "missing": missing,
+        },
+    )
+    return branch
 
 
 def _build_generate_file_resolution_scope(
@@ -5239,6 +6412,7 @@ async def execute_workflow_m2_for_session(
         finished_at = datetime.now(timezone.utc)
         total_latency_ms = (time.perf_counter() - execution_started_perf) * 1000
         success_stop_reasons = {
+            "blocked_wait_for_event",
             "finished_by_component",
             "scheduled_wait",
             "end_of_branch",
@@ -5443,21 +6617,31 @@ async def execute_workflow_m2_for_session(
             session_scope=session_scope,
         )
         contact_member_scope = _extract_contact_member_routing_scope(runtime_variables)
+        selected_contact_channel = (
+            _active_selected_contact_channel(runtime_variables)
+            if session_scope == "person"
+            else None
+        )
+        effective_contact_member_scope = (
+            _routing_scope_from_selected_contact_channel(selected_contact_channel)
+            if selected_contact_channel is not None
+            else contact_member_scope
+        )
         person_scope_without_selectors = (
             session_scope == "person" and not contact_member_scope.explicit
         )
         if (
             contextual_member_routing_enabled
-            and contact_member_scope.valid
+            and effective_contact_member_scope.valid
             and not person_scope_without_selectors
         ):
             contact_runtime_context = await fetch_contact_runtime_context_for_session(
                 db_session,
                 flow_uuid=flow_uuid,
                 session_id=session_id,
-                contact_list_member_id=contact_member_scope.contact_list_member_id,
-                contact_list_id=contact_member_scope.contact_list_id,
-                mailing_id=contact_member_scope.mailing_id,
+                contact_list_member_id=effective_contact_member_scope.contact_list_member_id,
+                contact_list_id=effective_contact_member_scope.contact_list_id,
+                mailing_id=effective_contact_member_scope.mailing_id,
             )
         elif contextual_member_routing_enabled:
             contact_runtime_context = None
@@ -5484,6 +6668,11 @@ async def execute_workflow_m2_for_session(
             channel_type_matches = _contact_member_channel_type_matches(
                 runtime_variables,
                 contact_runtime_context,
+                expected_channel_type=(
+                    str(selected_contact_channel["type"])
+                    if selected_contact_channel is not None
+                    else None
+                ),
             )
             if not channel_type_matches:
                 contact_runtime_context = None
@@ -5493,14 +6682,16 @@ async def execute_workflow_m2_for_session(
             workflow_meta = _ensure_workflow_meta(runtime_variables)
             workflow_meta["contact_member_routing"] = {
                 "selectors": contact_member_scope.selectors(),
+                "effective_selectors": effective_contact_member_scope.selectors(),
                 "explicit": contact_member_scope.explicit,
                 "valid": contact_member_scope.valid,
                 "resolved_contact_list_member_id": resolved_contact_list_member_id,
                 "channel_type_matches": channel_type_matches,
+                "selected_contact_channel_active": selected_contact_channel is not None,
             }
 
         routing_contact_list_member_id = _resolved_contact_member_id_for_routing(
-            contact_member_scope,
+            effective_contact_member_scope,
             resolved_contact_list_member_id,
         )
 
@@ -5612,10 +6803,16 @@ async def execute_workflow_m2_for_session(
                 or blocking_stop_reason in DIALER_BLOCKING_STOP_REASONS
             )
         )
+        should_preempt_wait_for_event = (
+            blocking_stop_reason == WAIT_FOR_EVENT_BLOCKING_STOP_REASON
+            and _should_resume_wait_for_event_blocking_execution(runtime_variables)
+        )
         if isinstance(frozen_until, datetime):
             frozen_until_utc = frozen_until if frozen_until.tzinfo is not None else frozen_until.replace(tzinfo=timezone.utc)
             if frozen_until_utc > datetime.now(timezone.utc) and not (
-                should_preempt_to_whatsapp_resume_cursor or should_preempt_to_dialer_resume_cursor
+                should_preempt_to_whatsapp_resume_cursor
+                or should_preempt_to_dialer_resume_cursor
+                or should_preempt_wait_for_event
             ):
                 return await _finalize(
                     WorkflowExecutionResult(
@@ -5666,7 +6863,10 @@ async def execute_workflow_m2_for_session(
                     last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
-            elif _should_resume_run_flow_blocking_execution(runtime_variables):
+            elif (
+                blocking_stop_reason in RUN_FLOW_BLOCKING_STOP_REASONS
+                and _should_resume_run_flow_blocking_execution(runtime_variables)
+            ):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
                     db_session,
@@ -5675,6 +6875,11 @@ async def execute_workflow_m2_for_session(
                     last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
+            elif (
+                blocking_stop_reason == WAIT_FOR_EVENT_BLOCKING_STOP_REASON
+                and _should_resume_wait_for_event_blocking_execution(runtime_variables)
+            ):
+                _clear_blocking_execution(runtime_variables)
             elif _should_resume_switch_bot_flow_blocking_execution(runtime_variables):
                 _clear_blocking_execution(runtime_variables)
                 await replace_session_workflow_state(
@@ -5745,6 +6950,7 @@ async def execute_workflow_m2_for_session(
                 _ensure_person_scope_component_supported(
                     session_scope=session_scope,
                     component_kind_value=kind,
+                    selected_contact_channel=selected_contact_channel,
                 )
                 if kind == "set_variables":
                     _run_set_variables(component, runtime_variables)
@@ -5753,11 +6959,9 @@ async def execute_workflow_m2_for_session(
                         branch_label = await _run_create_contact(
                             db_session=db_session,
                             flow_uuid=flow_uuid,
-                            session_id=session_id,
-                            definition=definition,
-                            current_card_uuid=next_card_uuid,
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
                         )
                     except WorkflowExecutionError as exc:
                         exception_branch = _resolve_component_exception_branch_label(
@@ -5772,7 +6976,319 @@ async def execute_workflow_m2_for_session(
                             "message": exc.message,
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         }
+                        logger.warning(
+                            "workflow m2 create contact failed",
+                            extra={
+                                "event": "orch.workflow.m2.create_contact.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                            },
+                        )
                         branch_label = exception_branch
+                elif kind == "source_list_membership":
+                    try:
+                        branch_label = await _run_source_list_membership(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        if exception_branch is None:
+                            raise
+                        runtime_variables["source_list_membership_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 source list membership failed",
+                            extra={
+                                "event": "orch.workflow.m2.source_list_membership.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                            },
+                        )
+                        branch_label = exception_branch
+                elif kind == "split_random":
+                    try:
+                        branch_label = _run_split_random(
+                            component=component,
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                            runtime_variables=runtime_variables,
+                            flow_uuid=flow_uuid,
+                            session_identity=str(session_uuid_for_metrics or session_id),
+                            revision_id=str(revision_id_for_metrics),
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _split_random_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        runtime_variables.pop("split_random_last_result", None)
+                        runtime_variables["split_random_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 split random failed",
+                            extra={
+                                "event": "orch.workflow.m2.split_random.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
+                        branch_label = exception_branch
+                    else:
+                        split_result = runtime_variables.get("split_random_last_result")
+                        logger.info(
+                            "workflow m2 split random completed",
+                            extra={
+                                "event": "orch.workflow.m2.split_random.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "outcome": branch_label,
+                                "bucket": (
+                                    split_result.get("bucket")
+                                    if isinstance(split_result, dict)
+                                    else None
+                                ),
+                            },
+                        )
+                elif kind == "select_contact_channel":
+                    try:
+                        channel_execution = await _run_select_contact_channel(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            session_scope=session_scope,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        _ensure_workflow_meta(runtime_variables).pop(
+                            "selected_contact_channel", None
+                        )
+                        selected_contact_channel = None
+                        runtime_variables.pop("select_contact_channel_last_result", None)
+                        runtime_variables["select_contact_channel_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 select contact channel failed",
+                            extra={
+                                "event": "orch.workflow.m2.select_contact_channel.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "session_scope": session_scope,
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
+                        branch_label = exception_branch
+                    else:
+                        branch_label = channel_execution.branch_label
+                        selected_contact_channel = None
+                        if channel_execution.contact_row is not None:
+                            contact_runtime_context = channel_execution.contact_row
+                            selected_contact_channel = _active_selected_contact_channel(
+                                runtime_variables
+                            )
+                            try:
+                                routing_contact_list_member_id = int(
+                                    contact_runtime_context["contact_list_member_id"]
+                                )
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise WorkflowExecutionError(
+                                    "select_contact_channel_missing_contact_context",
+                                    "O canal selecionado não possui um membro válido.",
+                                ) from exc
+                            selected_address = str(
+                                contact_runtime_context.get("contact_channel_address") or ""
+                            ).strip()
+                            if selected_address:
+                                session_state["entity_address"] = selected_address
+                            _inject_contact_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                contact_row=contact_runtime_context,
+                            )
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
+                            )
+                        logger.info(
+                            "workflow m2 select contact channel completed",
+                            extra={
+                                "event": "orch.workflow.m2.select_contact_channel.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "session_scope": session_scope,
+                                "outcome": branch_label,
+                                "contact_list_member_id": (
+                                    contact_runtime_context.get("contact_list_member_id")
+                                    if channel_execution.contact_row is not None
+                                    else None
+                                ),
+                            },
+                        )
+                elif kind == "wait_for_event":
+                    try:
+                        wait_execution = _run_wait_for_event(
+                            component=component,
+                            current_card_uuid=next_card_uuid,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        _clear_wait_for_event_state(runtime_variables)
+                        _clear_blocking_execution(runtime_variables)
+                        await clear_session_frozen_until(
+                            db_session,
+                            session_id=session_id,
+                        )
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        runtime_variables["wait_for_event_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 wait for event failed",
+                            extra={
+                                "event": "orch.workflow.m2.wait_for_event.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
+                        branch_label = exception_branch
+                    else:
+                        branch_label = wait_execution.branch_label
+                        if branch_label is None:
+                            last_card_uuid = next_card_uuid
+                            next_card_uuid = last_card_uuid
+                            executed_steps += 1
+                            _set_cursors(
+                                runtime_variables,
+                                last_cursor=last_card_uuid,
+                                next_cursor=next_card_uuid,
+                            )
+                            _mark_blocking_execution(
+                                runtime_variables,
+                                stopped_reason=WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                            )
+                            _reset_loop_guard_counter(runtime_variables)
+                            await replace_session_workflow_state(
+                                db_session,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                                next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                                frozen_until=wait_execution.timeout_at,
+                            )
+                            step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
+                            step_finished_at = datetime.now(timezone.utc)
+                            _append_metric(
+                                metric_type="card",
+                                status="success",
+                                started_at=step_started_at,
+                                finished_at=step_finished_at,
+                                latency_ms=step_latency_ms,
+                                stopped_reason=WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                                step_index=executed_steps,
+                                card_cursor=last_card_uuid,
+                                component_kind_value=kind,
+                                details={
+                                    "next_card_uuid": next_card_uuid,
+                                    "timeout_at": wait_execution.timeout_at.isoformat(),
+                                },
+                            )
+                            logger.info(
+                                "workflow m2 wait for event armed",
+                                extra={
+                                    "event": "orch.workflow.m2.wait_for_event.armed",
+                                    "flow_uuid": flow_uuid,
+                                    "session_id": session_id,
+                                    "session_uuid": session_uuid_for_metrics,
+                                    "card_uuid": _to_uuid_or_none(last_card_uuid) or last_card_uuid,
+                                    "component_ref_id": component.get("ref_id"),
+                                    "timeout_at": wait_execution.timeout_at.isoformat(),
+                                    "stopped_reason": WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                                },
+                            )
+                            return await _finalize(
+                                WorkflowExecutionResult(
+                                    True,
+                                    executed_steps,
+                                    WAIT_FOR_EVENT_BLOCKING_STOP_REASON,
+                                    last_card_uuid,
+                                    next_card_uuid,
+                                )
+                            )
+
+                        _clear_wait_for_event_state(runtime_variables)
+                        _clear_blocking_execution(runtime_variables)
+                        await clear_session_frozen_until(
+                            db_session,
+                            session_id=session_id,
+                        )
+                        logger.info(
+                            "workflow m2 wait for event completed",
+                            extra={
+                                "event": "orch.workflow.m2.wait_for_event.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "outcome": branch_label,
+                            },
+                        )
                 elif kind == "condition":
                     branch_label = _resolve_condition_branch_label(
                         definition=definition,
@@ -5800,10 +7316,37 @@ async def execute_workflow_m2_for_session(
                             execution_error=exc,
                         )
                 elif kind == "api_call":
-                    branch_label = _run_api_call(
-                        component=component,
-                        runtime_variables=runtime_variables,
-                    )
+                    try:
+                        branch_label = _run_api_call(
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        if exception_branch is None:
+                            raise
+                        runtime_variables["api_call_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 api_call preparation failed",
+                            extra={
+                                "event": "orch.workflow.m2.api_call_preparation_failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": True,
+                            },
+                        )
+                        branch_label = exception_branch
                 elif kind == "cache_post":
                     try:
                         branch_label = await _run_cache_post(
