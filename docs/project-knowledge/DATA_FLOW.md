@@ -227,6 +227,20 @@ ORCH executa a revisão fixada e renderiza o card
 
 Supplier/Target não deve carregar a definição corrente do flow para reconstruir o SMS. O conteúdo final é responsabilidade da execução do ORCH e deve permanecer ligado à revisão fixada da sessão. Enquanto esse contrato e os callbacks não existirem e não forem comprovados E2E, envio real permanece fora do escopo do card.
 
+## Handoff RCS marker-only e fronteira do envio real
+
+```text
+select_contact_channel(rcs) seleciona somente um membro explicitamente RCS
+  -> send_with_rcs valida membro, endereço, lista, mailing e pessoa
+  -> ORCH grava linked_actuator=rcs
+  -> ORCH bloqueia a sessão em state=1
+  -> nenhum POST RCS é executado
+```
+
+RCS não é inferido de um número telefônico genérico. A Identidade materializa um canal `rcs` separado somente quando recebe `has_rcs=true` em telefone fora de “não perturbe”; o seletor usa correspondência exata e o repositório recusa `voice`, `phone`, `sms`, `whatsapp` e `email`. Em `person`, o card exige seleção explícita anterior; em `channel`, preserva o membro/endereço de origem. Marcador, cursor bloqueado e `state=1` pertencem à mesma transação, e a reentrada em `blocked_send_with_rcs` não repete o handoff.
+
+O runtime armazena apenas o card, o membro e o resultado `marked|already_marked`; a mensagem configurada não é materializada nem copiada. Antes do envio real, uma entrega separada deverá definir a API do provedor, credenciais protegidas, payload final ligado à revisão fixada, idempotência, claim/ACK/retry e callbacks inequívocos. `linked_actuator=rcs` isolado nunca autoriza dispatch.
+
 ## `switch_bot_flow` — hub WhatsApp para BOT
 
 ```text
@@ -264,7 +278,7 @@ ORCH recebe a sessão
   -> define linked_actuator apenas quando um card autorizado o exige
 ```
 
-`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Antes de uma seleção explícita, alcançar `send_with_dialer`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template` terminaliza com `person_scope_channel_component_not_supported`; não há escolha implícita. Após `select_contact_channel` retornar `selected`, o M2 hidrata e reutiliza o membro escolhido nas retomadas, e o card de comunicação permanece responsável por definir seu `linked_actuator`. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Antes de uma seleção explícita, alcançar `send_with_dialer`, `send_with_sms`, `send_with_rcs`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template` terminaliza com `person_scope_channel_component_not_supported`; não há escolha implícita. Após `select_contact_channel` retornar `selected`, o M2 hidrata e reutiliza o membro escolhido nas retomadas, e o card de comunicação permanece responsável por definir seu `linked_actuator`. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
 
 Em `channel`, `select_contact_channel` só pode selecionar o membro/endereço que já originou a sessão. Em `person`, a busca exige `person_uuid`, permanece dentro da mesma pessoa, `contact_list_id` e `mailing_id`, prioriza o canal marcado como primário e usa o menor `contact_list_member_id` como desempate. O rebind altera apenas `orch_sessions.entity_address` e falha de forma diagnosticável diante de perda de escopo ou colisão com outra sessão ativa. Uma tentativa posterior em `not_found` ou `exception` limpa a seleção anterior e volta a bloquear comunicação até novo `selected`.
 
