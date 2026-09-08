@@ -195,7 +195,7 @@ Ao alcançar `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp
 
 O Target Core é consumidor desse estado: seu Contact Supplier seleciona somente linhas WhatsApp com HSM materializado e devolve o JSON sem carregar ou interpretar a definição do flow.
 
-## Handoff SMS planejado e fronteira do envio real
+## Handoff SMS marker-only e fronteira do envio real
 
 Primeira entrega:
 
@@ -207,7 +207,9 @@ select_contact_channel seleciona SMS no escopo da sessão
   -> nenhum POST de SMS é executado
 ```
 
-O `linked_actuator` informa qual atuador deve assumir o contato, mas não é um payload de dispatch. Diferentemente do caminho WhatsApp com `outbound_hsm`, a primeira entrega de SMS ainda não materializa mensagem, configuração do provedor, callbacks, idempotência ou credencial segura.
+O M2 implementa essa primeira entrega com um `UPDATE` protegido pela sessão ativa e pelo membro exato. Flow, sessão, identificador, endereço, lista, mailing, pessoa quando disponível e tipo literal `sms` precisam coincidir. Em escopo `person`, o guard geral exige antes uma seleção ativa de `select_contact_channel`; `phone`/`voice` não é fallback de SMS. O marcador, o cursor bloqueado e a transição da sessão para `state=1` participam da mesma transação do dispatcher. Reentrada encontra `blocked_send_with_sms` e não repete o handoff.
+
+O `linked_actuator` informa qual atuador deve assumir o contato, mas não é um payload de dispatch. Diferentemente do caminho WhatsApp com `outbound_hsm`, a primeira entrega de SMS não lê nem materializa mensagem, configuração do provedor, callbacks, idempotência ou credencial segura. O runtime diagnóstico contém somente card, membro, resultado do marcador e instante; token, mensagem, callback e endereço não são copiados.
 
 Ativação futura obrigatória:
 
