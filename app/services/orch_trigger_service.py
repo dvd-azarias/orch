@@ -282,7 +282,7 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
         return (
             "error",
             f"workflow_m2_{stopped_reason}",
-            "Sessão encerrada porque o membro SMS não permaneceu elegível para o handoff.",
+            "Sessão encerrada porque o membro telefônico selecionado para SMS não permaneceu elegível para o handoff.",
         )
     if stopped_reason == "condition_branch_not_mapped":
         return (

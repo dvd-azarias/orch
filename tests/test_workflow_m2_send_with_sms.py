@@ -279,14 +279,48 @@ async def test_person_sms_without_channel_selection_terminalizes_without_marking
 
 
 @pytest.mark.asyncio
-async def test_phone_or_voice_is_not_silently_accepted_as_sms(
+@pytest.mark.parametrize("channel_type", ["phone", "voice"])
+async def test_phone_or_voice_is_accepted_as_sms_capability(
     monkeypatch: pytest.MonkeyPatch,
+    channel_type: str,
+) -> None:
+    runtime = _runtime()
+    _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        contact_row=_contact_row(channel_type=channel_type),
+    )
+    assign_sms = AsyncMock(
+        return_value={
+            "contact_list_member_id": 77,
+            "linked_actuator": "sms",
+            "mode": "marked",
+        }
+    )
+    monkeypatch.setattr(workflow, "assign_sms_routing_for_session", assign_sms)
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_send_with_sms"
+    assert runtime["send_with_sms_routing"]["assignment"]["linked_actuator"] == "sms"
+    assign_sms.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_type", ["email", "whatsapp"])
+async def test_non_phone_channel_is_not_eligible_for_sms(
+    monkeypatch: pytest.MonkeyPatch,
+    channel_type: str,
 ) -> None:
     runtime = _runtime()
     persisted = _configure_execution(
         monkeypatch,
         runtime=runtime,
-        contact_row=_contact_row(channel_type="voice"),
+        contact_row=_contact_row(channel_type=channel_type),
     )
     assign_sms = AsyncMock()
     monkeypatch.setattr(workflow, "assign_sms_routing_for_session", assign_sms)
@@ -372,5 +406,5 @@ def test_sms_block_and_terminal_alarm_are_registered() -> None:
     assert alarm == (
         "error",
         "workflow_m2_send_with_sms_contact_not_eligible",
-        "Sessão encerrada porque o membro SMS não permaneceu elegível para o handoff.",
+        "Sessão encerrada porque o membro telefônico selecionado para SMS não permaneceu elegível para o handoff.",
     )

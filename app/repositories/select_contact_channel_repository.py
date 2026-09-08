@@ -53,6 +53,7 @@ async def fetch_select_contact_channel_candidate(
         """
 
     normalized_type_sql = _channel_type_sql("clm.contact_channel_type")
+    # SMS is the requested actuator capability; the persisted phone type remains voice.
     result = await db_session.execute(
         text(
             f"""
@@ -89,7 +90,13 @@ async def fetch_select_contact_channel_candidate(
               AND clm.unassigned_at IS NULL
               AND clm.contact_channel_address IS NOT NULL
               AND BTRIM(clm.contact_channel_address) <> ''
-              AND {normalized_type_sql} = :channel_type
+              AND (
+                    {normalized_type_sql} = :channel_type
+                    OR (
+                          :channel_type = 'sms'
+                          AND {normalized_type_sql} = 'voice'
+                        )
+                  )
               AND (
                     CAST(:channel_label AS text) IS NULL
                     OR BTRIM(clm.contact_channel_label) = CAST(:channel_label AS text)

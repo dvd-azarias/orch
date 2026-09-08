@@ -166,6 +166,16 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
                 session_scope="person",
                 **common,
             )
+            sms_channel_candidate = await fetch_select_contact_channel_candidate(
+                db_session,
+                session_scope="channel",
+                **{**common, "channel_type": "sms"},
+            )
+            sms_person_candidate = await fetch_select_contact_channel_candidate(
+                db_session,
+                session_scope="person",
+                **{**common, "channel_type": "sms"},
+            )
 
             assert channel_candidate is not None
             assert channel_candidate["contact_list_member_id"] == 77
@@ -173,6 +183,12 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
             assert person_candidate["contact_list_member_id"] == 88
             assert person_candidate["contact_channel_type"] == "voice"
             assert person_candidate["is_primary"] is True
+            assert sms_channel_candidate is not None
+            assert sms_channel_candidate["contact_list_member_id"] == 77
+            assert sms_channel_candidate["contact_channel_type"] == "voice"
+            assert sms_person_candidate is not None
+            assert sms_person_candidate["contact_list_member_id"] == 88
+            assert sms_person_candidate["contact_channel_type"] == "voice"
 
             rebound = await rebind_person_session_to_contact_channel(
                 db_session,

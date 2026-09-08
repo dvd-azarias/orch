@@ -99,6 +99,30 @@ async def test_person_candidate_can_change_member_but_preserves_person_list_and_
 
 
 @pytest.mark.asyncio
+async def test_sms_candidate_accepts_phone_source_without_reclassifying_it() -> None:
+    session = _RecordingSession(
+        {
+            "contact_list_member_id": 77,
+            "contact_channel_type": "voice",
+        }
+    )
+
+    row = await fetch_select_contact_channel_candidate(
+        session,  # type: ignore[arg-type]
+        session_scope="channel",
+        **{**BASE, "channel_type": "sms"},
+    )
+
+    assert row == {
+        "contact_list_member_id": 77,
+        "contact_channel_type": "voice",
+    }
+    assert ":channel_type = 'sms'" in session.statement
+    assert "= 'voice'" in session.statement
+    assert session.parameters["channel_type"] == "sms"
+
+
+@pytest.mark.asyncio
 async def test_person_rebind_validates_scope_and_active_session_without_actuator_write() -> (
     None
 ):
