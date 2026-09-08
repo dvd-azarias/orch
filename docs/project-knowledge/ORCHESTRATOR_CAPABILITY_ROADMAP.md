@@ -25,7 +25,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 5 | `select_contact_channel` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 6 | `send_with_sms` | A classificar no desenho do envelope | Planejado |
+| 6 | `send_with_sms` | `ALPHA_FIX_OPTIONAL` | Em validação |
 | 7 | `send_with_email` | A classificar no desenho do envelope | Planejado |
 | 8 | `fail_flow` | A classificar no desenho do envelope | Planejado |
 
@@ -293,14 +293,18 @@ Antes de habilitar o POST real, uma mudança separada deve obrigatoriamente:
 
 ### Checklist específico do item 6
 
-- [ ] Confirmar os campos e branches do envelope no Target Core.
-- [ ] Garantir `422` para combinações estruturalmente inconsistentes.
-- [ ] Implementar o handoff marker-only no ORCH, sem chamada HTTP.
-- [ ] Validar o membro exato em `channel` e a seleção explícita SMS em `person`.
-- [ ] Provar por teste que `linked_actuator=sms` e o bloqueio são atômicos e idempotentes.
-- [ ] Provar por teste que nenhum cliente HTTP de SMS é invocado nesta fase.
+- [x] Confirmar os campos e branches do envelope no Target Core.
+- [x] Garantir `422` para combinações estruturalmente inconsistentes.
+- [x] Implementar o handoff marker-only no ORCH, sem chamada HTTP.
+- [x] Validar o membro exato em `channel` e a seleção explícita SMS em `person`.
+- [x] Provar por teste que `linked_actuator=sms` e o bloqueio são atômicos e idempotentes.
+- [x] Provar por teste que nenhum cliente HTTP de SMS é invocado nesta fase.
 - [ ] Validar canários separados nos escopos `channel` e `person`.
-- [ ] Manter o envio real desabilitado até todas as pré-condições da seção anterior estarem implementadas em mudança própria.
+- [x] Manter o envio real desabilitado até todas as pré-condições da seção anterior estarem implementadas em mudança própria.
+
+Evidência local em 2026-09-07: o catálogo e o `422` já estavam integrados no Target Core, e o flow `f890dfa3-0657-4655-8a88-2ed7ae815e21` publicou `select_contact_channel(sms) -> send_with_sms` na revisão v1 `fef62654-c99b-4a4e-a364-7f51537d1b65`. A engine foi preparada no branch ORCH `feat/send-with-sms-runtime`, criado do `origin/main` `09cf2d1`. Os testes focados passaram em `150 passed`; dois testes PostgreSQL fora da sandbox comprovaram os guards e o rollback transacional. A suíte completa ficou em `595 passed, 27 failed`, nas mesmas famílias da baseline documentada. A stack `f5_local` permaneceu com API, três workers e dois Beats ativos, e o smoke encadeado aceitou as sessões `7527`/`7528`.
+
+Os canários específicos permanecem pendentes: no momento da auditoria, o flow não tinha mailing vinculado e o workspace possuía zero `contact_list_members` com tipo `sms`. Canais `phone` ou `voice` não serão convertidos silenciosamente. O canário precisa nascer de um membro explicitamente tipado como SMS; para `person`, o mesmo flow deverá entrar na allowlist do Target Core e selecionar esse membro antes do handoff.
 
 Rollback da primeira entrega: interromper novos usos do card, resolver ou terminalizar de forma auditada as sessões ainda bloqueadas nele e reverter catálogo/engine. Não há envio externo nem efeito remoto para compensar nessa fase. Alterações de `linked_actuator` já consumidas por sistemas externos devem ser auditadas antes de qualquer restauração de dados.
 

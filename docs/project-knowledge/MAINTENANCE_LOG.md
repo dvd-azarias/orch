@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-09-07 — Engine marker-only do card `send_with_sms`
+
+### REQUEST / CLASSIFICATION
+
+Implementar no ORCH o card já integrado ao catálogo do Target Core, preservando a regra dos atuadores: o ORCH define o `linked_actuator`, mas nesta primeira entrega não envia SMS. `ALPHA_FIX_OPTIONAL`; risco médio por escrever em `contact_list_members` e bloquear sessões, sem migration, fila, endpoint ou efeito externo novo.
+
+### CHANGE
+
+- Registrar `send_with_sms` como componente bloqueante e manter a sessão em `state=1`.
+- Exigir sessão ativa e o membro contextual exato da mesma pessoa, lista, mailing, identificador e endereço, sempre com tipo literal `sms`.
+- Em `person`, reutilizar exclusivamente o membro SMS escolhido por `select_contact_channel`; sem seleção, terminalizar uma vez pelo guard existente.
+- Gravar `linked_actuator=sms` dentro da transação do workflow e persistir diagnóstico mínimo sem número, mensagem, token, callback ou segredo.
+- Terminalizar de forma determinística e alarmável quando o contexto deixa de ser elegível.
+- Não ler os parâmetros futuros do provedor e não executar cliente HTTP nesta fase.
+
+### VALIDATION
+
+- Auditoria do flow `f890dfa3-0657-4655-8a88-2ed7ae815e21`: revisão publicada v1 `fef62654-c99b-4a4e-a364-7f51537d1b65`, grafo `select_contact_channel(sms) -> send_with_sms`, sete parâmetros configurados e nenhuma saída do card bloqueante.
+- Testes focados de repositório, engine, dispatcher e seleção: `150 passed`.
+- PostgreSQL real fora da sandbox com tabelas temporárias: `2 passed`; o novo caso provou elegibilidade estrita, repetição `already_marked` e rollback do marcador quando a transação externa falha.
+- Suíte completa fora da sandbox: `595 passed, 27 failed`; os 27 node IDs pertencem às mesmas famílias da baseline documentada e não alcançam o código SMS.
+- `compileall` e `git diff --check` passaram; `ruff` não está instalado na `.venv` atual.
+- Stack completa executada em TTY persistente com filas `f5_local`: API, três workers e dois Beats ficaram `up`. O smoke canônico aceitou as sessões `7527`/`7528`, e não houve `ERROR` ou `Traceback` novo nos logs inspecionados.
+- O E2E do card permanece pendente: o flow não tinha mailing vinculado e o workspace tinha zero membros tipados como `sms`. A engine deliberadamente não usa `phone` ou `voice` como fallback.
+
+### RISK / ROLLBACK
+
+`linked_actuator=sms` continua sendo somente intenção de roteamento; R33 proíbe qualquer emissor de tratá-lo como envelope pronto. Antes do rollout, ainda são necessários PR/revisão e canários separados em `channel` e `person` com membro SMS real. Para rollback, interromper novos usos, auditar sessões bloqueadas e marcadores possivelmente consumidos, reverter a engine e reiniciar os workers. Não há migration nem POST externo a compensar.
+
 ## 2026-09-06 — Engine do card `split_random`
 
 ### REQUEST / CLASSIFICATION

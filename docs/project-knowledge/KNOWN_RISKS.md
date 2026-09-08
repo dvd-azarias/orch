@@ -648,6 +648,6 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 `DETECTION`: alertar qualquer tentativa de dispatch SMS sem envelope completo; consultas do Supplier/Target ao grafo do flow para montar SMS; SMS marcado sem payload materializado quando o modo de envio real estiver ativo; repetição da mesma chave de idempotência; callback sem correlação única; segredo ou mensagem expostos em log, alarme ou métrica.
 
-`EVIDENCE`: decisão arquitetural registrada antes da implementação do item 6. A primeira fase planejada grava somente `linked_actuator=sms`, bloqueia a sessão e deve provar por teste que não chama o provedor.
+`EVIDENCE`: decisão arquitetural registrada antes da implementação do item 6. A implementação local marker-only grava somente `linked_actuator=sms`, bloqueia a sessão e possui teste explícito que falharia se `_http_execute` fosse invocado. O teste PostgreSQL com tabelas temporárias também força uma exceção depois do marcador e confirma rollback para `NULL`; uma repetição válida retorna `already_marked`. Ativação real continua proibida e os canários `channel`/`person` ainda estão pendentes.
 
 `V2`: registry de conectores e credenciais, outbox transacional de comunicação, dispatch idempotente e inbox normalizado de callbacks como contratos nativos da plataforma.
