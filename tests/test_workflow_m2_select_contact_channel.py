@@ -188,6 +188,14 @@ def test_select_contact_channel_accepts_catalog_serialization() -> None:
     )
 
 
+def test_select_contact_channel_accepts_rcs_type() -> None:
+    assert workflow._select_contact_channel_config(_component(channel_type="rcs")) == (
+        "rcs",
+        None,
+        "selected_channel",
+    )
+
+
 @pytest.mark.parametrize(
     "channel_type", [None, "", "phone", "telegram", "{{custom.type}}"]
 )

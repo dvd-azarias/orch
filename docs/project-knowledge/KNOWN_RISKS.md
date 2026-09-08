@@ -651,3 +651,23 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `EVIDENCE`: decisão arquitetural registrada antes da implementação do item 6. A implementação marker-only grava somente `linked_actuator=sms`, bloqueia a sessão e possui teste explícito que falharia se `_http_execute` fosse invocado. O teste PostgreSQL com tabelas temporárias também força uma exceção depois do marcador e confirma rollback para `NULL`; uma repetição válida retorna `already_marked`. A correção de 2026-09-08 comprovou ainda que membros telefônicos `voice` podem receber o marcador sem reclassificar o canal, enquanto `email` permanece inelegível. Ativação real continua proibida e os canários `channel`/`person` após a correção ainda estão pendentes.
 
 `V2`: registry de conectores e credenciais, outbox transacional de comunicação, dispatch idempotente e inbox normalizado de callbacks como contratos nativos da plataforma.
+
+## R34 — `linked_actuator=rcs` pode ser confundido com capacidade ou envelope de envio
+
+`STATUS`: OPEN / FUTURE ACTIVATION GATE
+
+`IMPACT`: critical se o envio real for habilitado ou se telefones genéricos forem promovidos para RCS
+
+`PROBABILITY`: low enquanto a primeira entrega permanecer marker-only e exigir tipo `rcs`; high se um emissor selecionar apenas pelo marcador
+
+`AFFECTED AREA`: `select_contact_channel` / `send_with_rcs` / Contact Supplier / futuro dispatch e callbacks RCS
+
+`DESCRIPTION`: nem todo telefone suporta RCS, e `linked_actuator=rcs` registra somente a intenção já decidida pelo ORCH. O marcador não contém mensagem materializada, revisão, contrato do provedor, credencial, idempotência nem correlação de callback. Inferir capacidade a partir de `voice/phone/sms` pode encaminhar contatos inelegíveis; fazer Supplier/Target carregar o flow para completar dados viola a autoridade do ORCH e o pin de revisão.
+
+`MITIGATION`: selecionar e marcar somente membro explicitamente tipado como `rcs`; manter a primeira entrega sem HTTP. Antes de ativar envio real, materializar sob autoridade do ORCH um envelope completo ligado a sessão/card/membro/revisão, com credencial protegida, idempotência e estados de entrega. O emissor deve reivindicar somente envelopes prontos e nunca interpretar o grafo.
+
+`DETECTION`: alertar marcador RCS em membro não-RCS; tentativa de dispatch sem envelope completo; consulta do emissor à definição do flow; callback sem correlação única; mensagem, endereço ou segredo em logs, alarmes ou métricas.
+
+`EVIDENCE`: a engine possui guard SQL e guard de serviço por tipo exato, teste de reentrada `already_marked` e teste que falha se `_http_execute` for chamado. O teste PostgreSQL isolado foi preparado, mas a execução de 2026-09-08 não alcançou o banco por timeout de conectividade; não há ainda canário E2E.
+
+`V2`: registry de conectores/capacidades, outbox RCS transacional e inbox normalizado de callbacks.

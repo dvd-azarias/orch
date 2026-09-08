@@ -68,6 +68,7 @@ from app.repositories.select_contact_channel_repository import (
     fetch_select_contact_channel_candidate,
     rebind_person_session_to_contact_channel,
 )
+from app.repositories.send_with_rcs_repository import assign_rcs_routing_for_session
 from app.repositories.send_with_sms_repository import assign_sms_routing_for_session
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
@@ -109,6 +110,7 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "send_whatsapp_interactive": "blocked_send_whatsapp_interactive",
     "process_whatsapp_response": "blocked_process_whatsapp_response",
     "send_with_dialer": "blocked_send_with_dialer",
+    "send_with_rcs": "blocked_send_with_rcs",
     "send_with_sms": "blocked_send_with_sms",
     "process_dialer_response": "blocked_process_dialer_response",
     "run_flow": "blocked_run_flow",
@@ -121,7 +123,7 @@ WAIT_FOR_EVENT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
 SPLIT_RANDOM_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
-SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email"}
+SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email", "rcs"}
 SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
 
@@ -189,6 +191,7 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "select_contact_channel_missing_contact_context",
     "select_contact_channel_persistence_failed",
     "select_contact_channel_rebind_failed",
+    "send_with_rcs_contact_not_eligible",
     "send_with_sms_contact_not_eligible",
     "split_random_invalid_branches",
     "split_random_invalid_output_var",
@@ -216,6 +219,7 @@ WHATSAPP_HSM_COMPONENT_KINDS = {
 }
 PERSON_SCOPE_CHANNEL_COMPONENT_KINDS = {
     "send_with_dialer",
+    "send_with_rcs",
     "send_with_sms",
     "send_with_whatsapp",
     "send_whatsapp_interactive",
@@ -2197,6 +2201,79 @@ async def _prepare_send_with_sms_contact_member(
     return assignment
 
 
+async def _prepare_send_with_rcs_contact_member(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(contact_row, dict):
+        raise WorkflowExecutionError(
+            "send_with_rcs_contact_not_eligible",
+            "A sessão não possui contexto de contato válido para o handoff RCS.",
+        )
+
+    try:
+        contact_list_member_id = int(contact_row.get("contact_list_member_id"))
+        contact_list_id = str(UUID(str(contact_row.get("contact_list_id"))))
+        mailing_id = int(contact_row.get("mailing_id"))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowExecutionError(
+            "send_with_rcs_contact_not_eligible",
+            "A sessão não possui membro, lista e mailing válidos para o handoff RCS.",
+        ) from exc
+
+    channel_type = _normalize_channel_type(contact_row.get("contact_channel_type"))
+    channel_address = str(contact_row.get("contact_channel_address") or "").strip()
+    if (
+        contact_list_member_id <= 0
+        or mailing_id <= 0
+        or channel_type != "rcs"
+        or not channel_address
+    ):
+        raise WorkflowExecutionError(
+            "send_with_rcs_contact_not_eligible",
+            "O membro em foco não representa um canal RCS elegível.",
+        )
+
+    raw_person_uuid = contact_row.get("person_uuid")
+    person_uuid: str | None = None
+    if raw_person_uuid is not None:
+        try:
+            person_uuid = str(UUID(str(raw_person_uuid)))
+        except (TypeError, ValueError) as exc:
+            raise WorkflowExecutionError(
+                "send_with_rcs_contact_not_eligible",
+                "O membro RCS em foco possui uma referência de pessoa inválida.",
+            ) from exc
+
+    assignment = await assign_rcs_routing_for_session(
+        db_session,
+        flow_uuid=flow_uuid,
+        session_id=session_id,
+        contact_list_member_id=contact_list_member_id,
+        contact_list_id=contact_list_id,
+        mailing_id=mailing_id,
+        person_uuid=person_uuid,
+    )
+    if assignment is None:
+        raise WorkflowExecutionError(
+            "send_with_rcs_contact_not_eligible",
+            "O membro RCS deixou de estar elegível antes do handoff.",
+        )
+
+    runtime_variables["send_with_rcs_routing"] = {
+        "component_ref_id": component.get("ref_id"),
+        "assignment": assignment,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    runtime_variables.pop("send_with_rcs_last_error", None)
+    return assignment
+
+
 def _is_send_with_whatsapp_limit_exhausted(assignment: dict[str, Any] | None) -> bool:
     if not isinstance(assignment, dict):
         return False
@@ -3633,7 +3710,7 @@ def _select_contact_channel_config(
     if channel_type not in SELECT_CONTACT_CHANNEL_TYPES:
         raise WorkflowExecutionError(
             "select_contact_channel_invalid_channel_type",
-            "O campo channel_type deve ser voice, whatsapp, sms ou email.",
+            "O campo channel_type deve ser voice, whatsapp, sms, email ou rcs.",
         )
 
     raw_label = params.get("channel_label")
@@ -6497,6 +6574,7 @@ async def execute_workflow_m2_for_session(
             "blocked_send_whatsapp_interactive",
             "blocked_process_whatsapp_response",
             "blocked_send_with_dialer",
+            "blocked_send_with_rcs",
             "blocked_send_with_sms",
             "blocked_process_dialer_response",
             "blocked_switch_bot_flow",
@@ -7892,6 +7970,30 @@ async def execute_workflow_m2_for_session(
                             "workflow m2 send with sms prepared",
                             extra={
                                 "event": "orch.workflow.m2.send_with_sms.prepared",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "contact_list_member_id": assignment.get(
+                                    "contact_list_member_id"
+                                ),
+                                "mode": assignment.get("mode"),
+                            },
+                        )
+                    elif kind == "send_with_rcs":
+                        assignment = await _prepare_send_with_rcs_contact_member(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
+                        )
+                        logger.info(
+                            "workflow m2 send with rcs prepared",
+                            extra={
+                                "event": "orch.workflow.m2.send_with_rcs.prepared",
                                 "flow_uuid": flow_uuid,
                                 "session_id": session_id,
                                 "session_uuid": session_uuid_for_metrics,

@@ -26,12 +26,13 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 5 | `select_contact_channel` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 6 | `send_with_sms` | `ALPHA_FIX_OPTIONAL` | Em validação |
-| 7 | `send_with_email` | A classificar no desenho do envelope | Planejado |
-| 8 | `fail_flow` | A classificar no desenho do envelope | Planejado |
+| 7 | `send_with_rcs` | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
+| 8 | `send_with_email` | A classificar no desenho do envelope | Planejado |
+| 9 | `fail_flow` | A classificar no desenho do envelope | Planejado |
 
 ## Checklist padrao por card
 
-Aplicar este checklist separadamente a cada item de 1 a 8:
+Aplicar este checklist separadamente a cada item de 1 a 9:
 
 - [ ] Semantica, efeitos e branches definidos.
 - [ ] Envelope atual do card definido, sem versoes paralelas.
@@ -309,6 +310,38 @@ O primeiro vínculo posterior materializou membros telefônicos como `voice`, co
 Validação da correção: `48` testes focados e `2` testes PostgreSQL passaram; a suíte completa ficou em `599 passed, 28 failed`, com as 27 falhas da baseline e uma invalidação transitória de prepared statement que passou isoladamente. A stack `f5_local` encerrou os dois smokes nas sessões `7543`–`7552`, todas em `state=3`, cursor nulo e zero alarmes.
 
 Rollback da primeira entrega: interromper novos usos do card, resolver ou terminalizar de forma auditada as sessões ainda bloqueadas nele e reverter catálogo/engine. Não há envio externo nem efeito remoto para compensar nessa fase. Alterações de `linked_actuator` já consumidas por sistemas externos devem ser auditadas antes de qualquer restauração de dados.
+
+## Item 7 — `send_with_rcs`
+
+Objetivo: preparar um handoff RCS somente quando o mailing materializou capacidade explícita, mantendo a autoridade de execução no ORCH e sem realizar envio ao provedor nesta primeira entrega.
+
+Contrato em desenvolvimento:
+
+- catálogo provider-neutral com `message_template` obrigatório e sem destinatário, endpoint ou credencial inventada;
+- `select_contact_channel` aceita `rcs` por correspondência exata;
+- `voice`, `phone`, `sms`, `whatsapp` e `email` não são considerados capacidade RCS;
+- em `person`, seleção RCS anterior é obrigatória; em `channel`, o membro/endereço de origem é preservado;
+- o ORCH grava `linked_actuator=rcs` no membro exato e bloqueia a sessão em `state=1` na mesma transação;
+- nenhuma mensagem, endereço ou configuração do card é copiada para runtime, logs, alarmes ou métricas;
+- nenhum cliente HTTP é chamado.
+
+- [x] Semântica, efeitos e branches definidos.
+- [x] Envelope atual definido no catálogo, sem versões paralelas.
+- [x] Branches Target Core e ORCH criadas de `origin/main` atualizado.
+- [x] Catálogo e validação `422` implementados no Target Core.
+- [x] Testes focados do contrato Target Core aprovados.
+- [x] Engine ORCH marker-only implementada com guards de membro exato.
+- [x] Testes unitários provam bloqueio, idempotência, escopo `person`, rejeição de não-RCS, alarme e ausência de HTTP.
+- [x] Teste PostgreSQL real concluiu guards, rollback e idempotência, com SMS como controle de regressão (`2 passed`).
+- [x] Stack local completa reiniciada e smokes encadeados aprovados nas sessões `7557`–`7566`, todas encerradas sem cursor pendente nem alarmes.
+- [ ] Catálogo integrado e ambiente Target Core atualizado.
+- [ ] Flow canário publicado com `select_contact_channel(rcs) -> send_with_rcs`.
+- [ ] Canários `channel` e `person` concluídos sem envio externo.
+- [ ] PRs integradas e rollout validado.
+
+Ativação futura de RCS real permanece proibida por R34 até existir API confirmada, envelope materializado, credencial protegida, idempotência e callbacks normalizados.
+
+Rollback: impedir novos usos, auditar sessões bloqueadas e marcadores eventualmente consumidos, reverter catálogo/engine e reiniciar os serviços afetados. Não há migration nem POST externo para compensar.
 
 ## Backlog avancado
 

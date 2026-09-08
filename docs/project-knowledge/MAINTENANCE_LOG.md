@@ -1,5 +1,31 @@
 # Maintenance Log
 
+## 2026-09-08 — Engine marker-only do card `send_with_rcs`
+
+### REQUEST / CLASSIFICATION
+
+Implementar o próximo card do roadmap após a validação visual do blueprint Bradesco. `ALPHA_FIX_OPTIONAL`; risco médio por gravar `linked_actuator` em `contact_list_members` e bloquear sessões, sem migration, fila, endpoint ou envio externo.
+
+### CHANGE
+
+- Adicionar `rcs` ao seletor de canal, usando o tipo persistido exato e sem inferir capacidade a partir de telefone/voz/SMS.
+- Gravar `linked_actuator=rcs` somente no membro contextual que coincida com sessão, flow, identificador, endereço, lista, mailing, pessoa e estado ativo.
+- Exigir seleção explícita anterior em sessões `person`; preservar o membro de origem em `channel`.
+- Bloquear com `blocked_send_with_rcs`, manter a sessão em `state=1`, tratar reentrada idempotentemente e alarmar perda de elegibilidade.
+- Não ler a mensagem do card nem executar HTTP. O runtime persiste somente diagnóstico mínimo da marcação.
+
+### VALIDATION
+
+- Regressão focada de engine, repositórios, seletor, SMS e dispatcher: `68 passed`.
+- Os testes provam recusa de `voice/phone/sms/whatsapp/email`, uso do membro selecionado em `person`, bloqueio em `channel`, reentrada sem nova escrita, registro do alarme e ausência de `_http_execute`.
+- Após o retorno da VPN, `2 passed` nos testes PostgreSQL isolados de RCS e SMS: guard por sessão/membro/lista/mailing/pessoa, rollback, idempotência `already_marked` e rejeição de canal não-RCS foram comprovados em banco real.
+- A stack local completa subiu com as filas `f5_local`; o smoke encadeado criou as sessões `7557`–`7566`. Todas terminaram em `state=3`, `next_card_uuid=NULL`, ao menos um motivo terminal registrado e zero alarmes.
+- `git diff --check` passou após a consolidação documental.
+
+### RISK / ROLLBACK
+
+O maior risco é confundir telefone com capacidade RCS ou interpretar a marca como envelope pronto. R34 exige tipo explícito e proíbe envio real nesta entrega. Rollback sem migration: interromper novos usos, auditar sessões bloqueadas/marcadores, reverter a engine e reiniciar API/workers; não apagar dados automaticamente.
+
 ## 2026-09-08 — Compatibilidade de canal telefônico no handoff `send_with_sms`
 
 ### REQUEST / CLASSIFICATION

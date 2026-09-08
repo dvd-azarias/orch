@@ -53,7 +53,7 @@ async def fetch_select_contact_channel_candidate(
         """
 
     normalized_type_sql = _channel_type_sql("clm.contact_channel_type")
-    # SMS is the requested actuator capability; the persisted phone type remains voice.
+    # SMS is a phone capability; RCS remains explicit and is never inferred from voice.
     result = await db_session.execute(
         text(
             f"""
