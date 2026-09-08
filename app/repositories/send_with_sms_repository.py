@@ -38,7 +38,8 @@ async def assign_sms_routing_for_session(
                   AND clm.unassigned_at IS NULL
                   AND clm.contact_channel_address IS NOT NULL
                   AND BTRIM(clm.contact_channel_address) <> ''
-                  AND LOWER(BTRIM(COALESCE(clm.contact_channel_type, ''))) = 'sms'
+                  AND LOWER(BTRIM(COALESCE(clm.contact_channel_type, '')))
+                      IN ('sms', 'phone', 'voice')
                   AND (
                         CAST(:person_uuid AS uuid) IS NULL
                         OR clm.person_uuid = CAST(:person_uuid AS uuid)

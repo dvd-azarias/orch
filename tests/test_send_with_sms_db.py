@@ -92,6 +92,11 @@ async def test_send_with_sms_isolated_marker_guards_and_rollback() -> None:
                             88, '12345678901', 'voice', '5511999990001',
                             CAST(:contact_list_uuid AS uuid), 1140,
                             CAST(:person_uuid AS uuid), NULL, NOW()
+                        ),
+                        (
+                            99, '12345678901', 'email', '5511999990001',
+                            CAST(:contact_list_uuid AS uuid), 1140,
+                            CAST(:person_uuid AS uuid), NULL, NOW()
                         )
                     """
                 ),
@@ -153,6 +158,10 @@ async def test_send_with_sms_isolated_marker_guards_and_rollback() -> None:
                 db_session,
                 **{**common, "contact_list_member_id": 88},
             )
+            email_member = await assign_sms_routing_for_session(
+                db_session,
+                **{**common, "contact_list_member_id": 99},
+            )
             wrong_person = await assign_sms_routing_for_session(
                 db_session,
                 **{**common, "person_uuid": str(uuid4())},
@@ -161,7 +170,12 @@ async def test_send_with_sms_isolated_marker_guards_and_rollback() -> None:
                 db_session,
                 **{**common, "mailing_id": 1141},
             )
-            assert voice_member is None
+            assert voice_member == {
+                "contact_list_member_id": 88,
+                "linked_actuator": "sms",
+                "mode": "marked",
+            }
+            assert email_member is None
             assert wrong_person is None
             assert wrong_mailing is None
 
@@ -178,5 +192,6 @@ async def test_send_with_sms_isolated_marker_guards_and_rollback() -> None:
             ).mappings().all()
             assert [dict(row) for row in rows] == [
                 {"id": 77, "linked_actuator": "sms"},
-                {"id": 88, "linked_actuator": None},
+                {"id": 88, "linked_actuator": "sms"},
+                {"id": 99, "linked_actuator": None},
             ]

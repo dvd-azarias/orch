@@ -2154,12 +2154,12 @@ async def _prepare_send_with_sms_contact_member(
     if (
         contact_list_member_id <= 0
         or mailing_id <= 0
-        or channel_type != "sms"
+        or channel_type not in {"sms", "voice"}
         or not channel_address
     ):
         raise WorkflowExecutionError(
             "send_with_sms_contact_not_eligible",
-            "O membro em foco não representa um canal SMS válido.",
+            "O membro em foco não representa um canal telefônico válido para SMS.",
         )
 
     raw_person_uuid = contact_row.get("person_uuid")
@@ -2170,7 +2170,7 @@ async def _prepare_send_with_sms_contact_member(
         except (TypeError, ValueError) as exc:
             raise WorkflowExecutionError(
                 "send_with_sms_contact_not_eligible",
-                "O membro SMS em foco possui uma referência de pessoa inválida.",
+                "O membro telefônico em foco possui uma referência de pessoa inválida.",
             ) from exc
 
     assignment = await assign_sms_routing_for_session(
@@ -2185,7 +2185,7 @@ async def _prepare_send_with_sms_contact_member(
     if assignment is None:
         raise WorkflowExecutionError(
             "send_with_sms_contact_not_eligible",
-            "O membro SMS deixou de estar elegível antes do handoff.",
+            "O membro telefônico deixou de estar elegível antes do handoff SMS.",
         )
 
     runtime_variables["send_with_sms_routing"] = {

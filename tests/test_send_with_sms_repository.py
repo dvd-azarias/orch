@@ -39,7 +39,7 @@ BASE = {
 
 
 @pytest.mark.asyncio
-async def test_assign_sms_is_guarded_by_exact_active_session_and_sms_member() -> None:
+async def test_assign_sms_is_guarded_by_exact_active_session_and_telephone_member() -> None:
     session = _RecordingSession(
         {
             "id": 77,
@@ -69,7 +69,7 @@ async def test_assign_sms_is_guarded_by_exact_active_session_and_sms_member() ->
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" in session.statement
     assert "clm.person_uuid = CAST(:person_uuid AS uuid)" in session.statement
-    assert "LOWER(BTRIM(COALESCE(clm.contact_channel_type, ''))) = 'sms'" in session.statement
+    assert "IN ('sms', 'phone', 'voice')" in session.statement
     assert "FOR UPDATE OF clm, os" in session.statement
     assert "linked_actuator = 'sms'" in session.statement
     assert session.parameters == BASE

@@ -267,9 +267,9 @@ Objetivo: preparar o handoff de uma sessão para o canal SMS usando o membro sel
 ### Primeira entrega — handoff sem envio real
 
 - o card aceita a configuração necessária ao futuro SMS, mas o ORCH não executa chamada HTTP ao provedor;
-- número e membro são derivados do canal SMS já selecionado para a sessão; o card não escolhe fallback silencioso;
-- em escopo `person`, exige seleção SMS válida produzida por `select_contact_channel` dentro da mesma pessoa, lista e mailing;
-- em escopo `channel`, preserva o membro e o endereço que originaram a sessão e valida que o canal é SMS;
+- número e membro são derivados de um canal telefônico elegível (`sms`, `phone` ou `voice`); essa compatibilidade expressa capacidade de SMS e não altera o tipo de origem;
+- em escopo `person`, exige seleção compatível com SMS produzida por `select_contact_channel` dentro da mesma pessoa, lista e mailing;
+- em escopo `channel`, preserva o membro e o endereço que originaram a sessão e valida que o canal é telefônico;
 - o próprio ORCH grava `linked_actuator=sms` no `contact_list_member` exato e mantém a sessão bloqueada aguardando a integração externa e seus callbacks;
 - nenhuma credencial, token, mensagem renderizada ou dado pessoal deve aparecer em log, alarme ou métrica;
 - testes da primeira entrega devem provar que nenhum POST de SMS ocorre.
@@ -296,7 +296,7 @@ Antes de habilitar o POST real, uma mudança separada deve obrigatoriamente:
 - [x] Confirmar os campos e branches do envelope no Target Core.
 - [x] Garantir `422` para combinações estruturalmente inconsistentes.
 - [x] Implementar o handoff marker-only no ORCH, sem chamada HTTP.
-- [x] Validar o membro exato em `channel` e a seleção explícita SMS em `person`.
+- [x] Validar o membro telefônico exato em `channel` e a seleção explícita compatível com SMS em `person`.
 - [x] Provar por teste que `linked_actuator=sms` e o bloqueio são atômicos e idempotentes.
 - [x] Provar por teste que nenhum cliente HTTP de SMS é invocado nesta fase.
 - [ ] Validar canários separados nos escopos `channel` e `person`.
@@ -304,7 +304,9 @@ Antes de habilitar o POST real, uma mudança separada deve obrigatoriamente:
 
 Evidência local em 2026-09-07: o catálogo e o `422` já estavam integrados no Target Core, e o flow `f890dfa3-0657-4655-8a88-2ed7ae815e21` publicou `select_contact_channel(sms) -> send_with_sms` na revisão v1 `fef62654-c99b-4a4e-a364-7f51537d1b65`. A engine foi preparada no branch ORCH `feat/send-with-sms-runtime`, criado do `origin/main` `09cf2d1`. Os testes focados passaram em `150 passed`; dois testes PostgreSQL fora da sandbox comprovaram os guards e o rollback transacional. A suíte completa ficou em `595 passed, 27 failed`, nas mesmas famílias da baseline documentada. A stack `f5_local` permaneceu com API, três workers e dois Beats ativos, e o smoke encadeado aceitou as sessões `7527`/`7528`.
 
-Os canários específicos permanecem pendentes: no momento da auditoria, o flow não tinha mailing vinculado e o workspace possuía zero `contact_list_members` com tipo `sms`. Canais `phone` ou `voice` não serão convertidos silenciosamente. O canário precisa nascer de um membro explicitamente tipado como SMS; para `person`, o mesmo flow deverá entrar na allowlist do Target Core e selecionar esse membro antes do handoff.
+O primeiro vínculo posterior materializou membros telefônicos como `voice`, conforme o contrato real do domínio. As sessões `7529`/`7530` não alcançaram o card porque a seleção inicial exigia `sms` literal; isso confirmou que tipo de origem e decisão de atuação não podem ser confundidos. A correção de 2026-09-08 faz `select_contact_channel(sms)` aceitar `sms|phone|voice`, preserva o tipo real no contexto e deixa somente o ORCH gravar `linked_actuator=sms`. Os canários específicos após integração permanecem pendentes; em `person`, o flow ainda deverá entrar na allowlist do Target Core e selecionar explicitamente o membro antes do handoff.
+
+Validação da correção: `48` testes focados e `2` testes PostgreSQL passaram; a suíte completa ficou em `599 passed, 28 failed`, com as 27 falhas da baseline e uma invalidação transitória de prepared statement que passou isoladamente. A stack `f5_local` encerrou os dois smokes nas sessões `7543`–`7552`, todas em `state=3`, cursor nulo e zero alarmes.
 
 Rollback da primeira entrega: interromper novos usos do card, resolver ou terminalizar de forma auditada as sessões ainda bloqueadas nele e reverter catálogo/engine. Não há envio externo nem efeito remoto para compensar nessa fase. Alterações de `linked_actuator` já consumidas por sistemas externos devem ser auditadas antes de qualquer restauração de dados.
 

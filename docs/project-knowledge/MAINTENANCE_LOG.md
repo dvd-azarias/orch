@@ -1,5 +1,39 @@
 # Maintenance Log
 
+## 2026-09-08 — Compatibilidade de canal telefônico no handoff `send_with_sms`
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a interpretação de `contact_channel_type` descoberta no primeiro canário do `send_with_sms`. O tipo do canal é um dado de origem; a decisão de usar SMS pertence ao card e se materializa em `linked_actuator=sms`. `ALPHA_FIX_OPTIONAL`, mas obrigatório antes de liberar o card novo para uso: mudança pequena, sem migration, endpoint, fila ou envio externo.
+
+### CAUSE / EVIDENCE
+
+- O mailing vinculado ao flow `f890dfa3-0657-4655-8a88-2ed7ae815e21` materializou os membros `10772`/`10773` como `voice`, que é o tipo telefônico canônico já usado pelo ORCH.
+- As sessões `7529`/`7530`, criadas antes da publicação da revisão v3, ficaram fixadas na revisão v1 e seguiram `select_contact_channel(sms) -> not_found -> finish_flow` sem alcançar `send_with_sms`.
+- O `linked_actuator` permaneceu nulo corretamente: não houve tentativa de handoff. A causa foi exigir tipo literal `sms` tanto na seleção quanto no marcador, confundindo capacidade de transporte com decisão de atuação.
+
+### CHANGE
+
+- Fazer uma solicitação `select_contact_channel(sms)` aceitar tipos de origem `sms`, `phone` e `voice`; a compatibilidade é unidirecional e não torna e-mail ou WhatsApp elegíveis.
+- Preservar no resultado o tipo real normalizado do membro (`voice` para `phone/voice`), sem reclassificar o dado como `sms`.
+- Permitir que `send_with_sms` marque o membro telefônico exato, ainda protegido por sessão, flow, identificador, endereço, lista, mailing, pessoa e estado ativo.
+- Manter exclusivamente no ORCH a escrita de `linked_actuator=sms`; nenhum parâmetro do provedor é materializado e nenhum POST é feito.
+
+### VALIDATION
+
+- Testes focados de engine e repositórios: `48 passed`.
+- PostgreSQL real fora da sandbox: `2 passed`; os casos provam que `voice` pode receber `linked_actuator=sms`, que `email` continua recusado e que os guards/rollback permanecem ativos.
+- `compileall` e `git diff --check` passaram.
+- Suíte completa fora da sandbox: `599 passed, 28 failed`. Vinte e sete falhas são a baseline já documentada; a única adicional foi `InvalidCachedStatementError` do asyncpg depois de DDL temporário e passou isoladamente logo depois (`1 passed`).
+- Stack completa reiniciada com perfil e filas `f5_local`: API, três workers e dois Beats ficaram `up`. Os smokes encadeados geraram as sessões `7543`–`7552`; todas terminaram em `state=3`, cursor nulo e zero alarmes. O stop encerrou os seis processos e a verificação por caminho não encontrou órfãos.
+- O worker FileApp processou backlog de outro workspace durante a subida e registrou timeouts transitórios contra o Target Core, seguidos de retries bem-sucedidos; esse tráfego não alcançou o flow SMS nem o código alterado.
+- A auditoria tardia confirmou que o flow SMS continuava somente com `7529`/`7530`, sem atualização desde a execução original, sem marcador e sem loop.
+- Novo canário SMS após integração ainda está pendente.
+
+### RISK / ROLLBACK
+
+O blast radius fica restrito à seleção e ao marcador SMS. A regra não escolhe outro endereço em sessões `channel`; em `person`, continua exigindo `select_contact_channel` e preservando pessoa/lista/mailing. O envio real permanece proibido pelo risco R33. Rollback: interromper novos usos do card, auditar sessões bloqueadas e marcadores ainda não consumidos, reverter esta mudança e reiniciar os workers; não há efeito HTTP externo a compensar.
+
 ## 2026-09-07 — Engine marker-only do card `send_with_sms`
 
 ### REQUEST / CLASSIFICATION
@@ -9,8 +43,8 @@ Implementar no ORCH o card já integrado ao catálogo do Target Core, preservand
 ### CHANGE
 
 - Registrar `send_with_sms` como componente bloqueante e manter a sessão em `state=1`.
-- Exigir sessão ativa e o membro contextual exato da mesma pessoa, lista, mailing, identificador e endereço, sempre com tipo literal `sms`.
-- Em `person`, reutilizar exclusivamente o membro SMS escolhido por `select_contact_channel`; sem seleção, terminalizar uma vez pelo guard existente.
+- Exigir sessão ativa e o membro contextual exato da mesma pessoa, lista, mailing, identificador e endereço. A implementação inicial também exigia tipo literal `sms`; essa hipótese foi corrigida na entrada de 2026-09-08.
+- Em `person`, reutilizar exclusivamente o membro escolhido por `select_contact_channel`; sem seleção, terminalizar uma vez pelo guard existente.
 - Gravar `linked_actuator=sms` dentro da transação do workflow e persistir diagnóstico mínimo sem número, mensagem, token, callback ou segredo.
 - Terminalizar de forma determinística e alarmável quando o contexto deixa de ser elegível.
 - Não ler os parâmetros futuros do provedor e não executar cliente HTTP nesta fase.
@@ -23,7 +57,7 @@ Implementar no ORCH o card já integrado ao catálogo do Target Core, preservand
 - Suíte completa fora da sandbox: `595 passed, 27 failed`; os 27 node IDs pertencem às mesmas famílias da baseline documentada e não alcançam o código SMS.
 - `compileall` e `git diff --check` passaram; `ruff` não está instalado na `.venv` atual.
 - Stack completa executada em TTY persistente com filas `f5_local`: API, três workers e dois Beats ficaram `up`. O smoke canônico aceitou as sessões `7527`/`7528`, e não houve `ERROR` ou `Traceback` novo nos logs inspecionados.
-- O E2E do card permanece pendente: o flow não tinha mailing vinculado e o workspace tinha zero membros tipados como `sms`. A engine deliberadamente não usa `phone` ou `voice` como fallback.
+- O E2E do card permanecia pendente nesta validação inicial: o flow não tinha mailing vinculado e o workspace tinha zero membros tipados como `sms`. O primeiro canário posterior demonstrou que exigir esse tipo literal era incorreto; consulte a correção de 2026-09-08.
 
 ### RISK / ROLLBACK
 
