@@ -693,3 +693,23 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `ROLLBACK`: interromper novos vínculos `channel`, reverter o commit e reiniciar API/workers ORCH. Não apagar nem fundir sessões existentes automaticamente; marcadores de atuador já produzidos precisam ser auditados antes de qualquer compensação.
 
 `V2`: coluna/chave de correlação imutável e indexada para a origem da sessão, com idempotency key explícita do produtor e callbacks endereçados por sessão/canal.
+
+## R36 — `linked_actuator=email` pode ser confundido com mensagem pronta ou branches já ativos
+
+`STATUS`: OPEN / FUTURE ACTIVATION GATE
+
+`IMPACT`: critical se o envio real ou a retomada por eventos forem habilitados sem envelope e correlação
+
+`PROBABILITY`: low enquanto a primeira entrega permanecer marker-only; high se um emissor selecionar apenas pelo marcador
+
+`AFFECTED AREA`: `select_contact_channel` / `send_with_email` / futuro emissor e callbacks de e-mail
+
+`DESCRIPTION`: o marcador identifica somente o membro que o ORCH escolheu. Ele não contém remetente e conteúdo renderizados, revisão, credencial, idempotência nem identidade de mensagem do provedor. As branches `sent`, `delivered`, `opened`, `clicked`, `deferred`, `bounced`, `complained`, `unsubscribed`, `failed`, `timeout` e `exception` existem para desenho visual, mas não processam eventos nesta entrega. Tratar o marcador ou as branches como integração pronta pode duplicar envios, usar conteúdo de outra revisão ou liberar a saída errada.
+
+`MITIGATION`: manter o card sem HTTP/SMTP e sem callback. Antes da ativação real, materializar no ORCH um envelope ligado a sessão/card/membro/revisão, com destinatário e conteúdo finais, credencial protegida, idempotência e estados de claim/ACK/retry. Normalizar e deduplicar eventos do provedor antes de liberar uma única branch; abertura e clique dependem de tracking e não devem ser inferidos.
+
+`DETECTION`: alertar dispatch sem envelope completo, consulta do emissor à definição corrente do flow, evento sem correlação única, marcador em membro não-email e qualquer remetente, assunto, corpo ou endereço exposto em log, alarme ou métrica.
+
+`EVIDENCE`: a primeira engine possui guard SQL por membro `email`, reentrada `already_marked`, teste que falha se `_http_execute` for chamado e teste PostgreSQL com rollback transacional. Não há envio nem callback E2E nesta entrega.
+
+`V2`: registry de remetentes/conectores, outbox transacional de e-mail e inbox normalizado de eventos de entrega e engajamento.

@@ -290,6 +290,12 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
             f"workflow_m2_{stopped_reason}",
             "Sessão encerrada porque o canal RCS selecionado não permaneceu elegível para o handoff.",
         )
+    if stopped_reason.startswith("send_with_email_"):
+        return (
+            "error",
+            f"workflow_m2_{stopped_reason}",
+            "Sessão encerrada porque o canal de e-mail selecionado não permaneceu elegível para o handoff.",
+        )
     if stopped_reason == "condition_branch_not_mapped":
         return (
             "error",

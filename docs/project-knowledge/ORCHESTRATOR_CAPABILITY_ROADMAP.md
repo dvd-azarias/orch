@@ -13,6 +13,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
   - ORCH: `feat/<card>-engine`.
 - Marcar um item como concluido somente depois de teste automatizado, validacao local e canario/E2E aplicavel.
 - Preservar contratos existentes e usar feature flag ou flow canario quando o rollout exigir contencao adicional.
+- Usar flows reais somente como cenários E2E de composição. Nenhum cliente, campanha ou desenho específico deve virar regra de produção dentro de um card genérico.
 - Reavaliar os componentes avancados somente depois da lista comum.
 
 ## Estado geral
@@ -25,9 +26,9 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 3 | `wait_for_event` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 4 | `split_random` | `ALPHA_FIX_OPTIONAL` | Concluído |
 | 5 | `select_contact_channel` | `ALPHA_FIX_OPTIONAL` | Concluído |
-| 6 | `send_with_sms` | `ALPHA_FIX_OPTIONAL` | Em validação |
-| 7 | `send_with_rcs` | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
-| 8 | `send_with_email` | A classificar no desenho do envelope | Planejado |
+| 6 | `send_with_sms` | `ALPHA_FIX_OPTIONAL` | Concluído (marker-only) |
+| 7 | `send_with_rcs` | `ALPHA_FIX_OPTIONAL` | Concluído (marker-only) |
+| 8 | `send_with_email` | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
 | 9 | `fail_flow` | A classificar no desenho do envelope | Planejado |
 
 ## Checklist padrao por card
@@ -300,7 +301,7 @@ Antes de habilitar o POST real, uma mudança separada deve obrigatoriamente:
 - [x] Validar o membro telefônico exato em `channel` e a seleção explícita compatível com SMS em `person`.
 - [x] Provar por teste que `linked_actuator=sms` e o bloqueio são atômicos e idempotentes.
 - [x] Provar por teste que nenhum cliente HTTP de SMS é invocado nesta fase.
-- [ ] Validar canários separados nos escopos `channel` e `person`.
+- [x] Validar canários separados nos escopos `channel` e `person`.
 - [x] Manter o envio real desabilitado até todas as pré-condições da seção anterior estarem implementadas em mudança própria.
 
 Evidência local em 2026-09-07: o catálogo e o `422` já estavam integrados no Target Core, e o flow `f890dfa3-0657-4655-8a88-2ed7ae815e21` publicou `select_contact_channel(sms) -> send_with_sms` na revisão v1 `fef62654-c99b-4a4e-a364-7f51537d1b65`. A engine foi preparada no branch ORCH `feat/send-with-sms-runtime`, criado do `origin/main` `09cf2d1`. Os testes focados passaram em `150 passed`; dois testes PostgreSQL fora da sandbox comprovaram os guards e o rollback transacional. A suíte completa ficou em `595 passed, 27 failed`, nas mesmas famílias da baseline documentada. A stack `f5_local` permaneceu com API, três workers e dois Beats ativos, e o smoke encadeado aceitou as sessões `7527`/`7528`.
@@ -315,7 +316,7 @@ Rollback da primeira entrega: interromper novos usos do card, resolver ou termin
 
 Objetivo: preparar um handoff RCS somente quando o mailing materializou capacidade explícita, mantendo a autoridade de execução no ORCH e sem realizar envio ao provedor nesta primeira entrega.
 
-Contrato em desenvolvimento:
+Contrato concluído na primeira entrega marker-only:
 
 - catálogo provider-neutral com `message_template` obrigatório e sem destinatário, endpoint ou credencial inventada;
 - `select_contact_channel` aceita `rcs` por correspondência exata;
@@ -334,14 +335,50 @@ Contrato em desenvolvimento:
 - [x] Testes unitários provam bloqueio, idempotência, escopo `person`, rejeição de não-RCS, alarme e ausência de HTTP.
 - [x] Teste PostgreSQL real concluiu guards, rollback e idempotência, com SMS como controle de regressão (`2 passed`).
 - [x] Stack local completa reiniciada e smokes encadeados aprovados nas sessões `7557`–`7566`, todas encerradas sem cursor pendente nem alarmes.
-- [ ] Catálogo integrado e ambiente Target Core atualizado.
-- [ ] Flow canário publicado com `select_contact_channel(rcs) -> send_with_rcs`.
-- [ ] Canários `channel` e `person` concluídos sem envio externo.
-- [ ] PRs integradas e rollout validado.
+- [x] Catálogo integrado e ambiente Target Core atualizado.
+- [x] Flow canário publicado com `select_contact_channel(rcs) -> send_with_rcs`.
+- [x] Canários `channel` e `person` concluídos sem envio externo.
+- [x] PRs integradas e rollout validado.
 
 Ativação futura de RCS real permanece proibida por R34 até existir API confirmada, envelope materializado, credencial protegida, idempotência e callbacks normalizados.
 
 Rollback: impedir novos usos, auditar sessões bloqueadas e marcadores eventualmente consumidos, reverter catálogo/engine e reiniciar os serviços afetados. Não há migration nem POST externo para compensar.
+
+## Item 8 — `send_with_email`
+
+Objetivo: preparar o handoff de um membro explicitamente tipado como e-mail, com envelope visual alinhado ao núcleo comum de ferramentas de mercado e sem realizar envio nesta primeira entrega.
+
+Contrato em desenvolvimento:
+
+- envelope provider-neutral inspirado nos campos comuns de n8n, Amazon SES e SendGrid;
+- remetente obrigatório; nome e reply-to opcionais; assunto obrigatório;
+- corpo em `text`, `html` ou `both`, com validação condicional das versões;
+- destinatário nunca configurado no card: vem do membro selecionado pelo ORCH;
+- eventos positivos configuráveis `sent|delivered|opened|clicked` e timeout finito;
+- branches provider-neutral `sent`, `delivered`, `opened`, `clicked`, `deferred`, `bounced`, `complained`, `unsubscribed`, `failed`, `timeout` e `exception`;
+- em `person`, exige `select_contact_channel(email)` anterior; em `channel`, preserva o membro/endereço de origem;
+- o ORCH grava somente `linked_actuator=email`, mantém a sessão em `state=1` e não chama HTTP/SMTP;
+- configurações e conteúdo não são copiados para runtime, logs, alarmes ou métricas;
+- branches são contrato visual futuro e não processam callbacks nesta entrega.
+
+- [x] Semântica, configurações e branches definidos a partir de referências de mercado.
+- [x] Branch Target Core criada do `origin/main` atualizado.
+- [x] Catálogo e validação `422` implementados no Target Core.
+- [x] Testes de catálogo, validação e create/update/publish aprovados.
+- [ ] PR Target Core integrada e ambiente alvo atualizado.
+- [x] Branch ORCH criada do `origin/main` atualizado.
+- [x] Engine marker-only implementada com guard do membro `email` exato.
+- [x] Testes unitários provam bloqueio, idempotência, `person|channel`, falha determinística e ausência de HTTP.
+- [x] Teste PostgreSQL real comprova rollback transacional e isolamento por pessoa/lista/mailing/tipo.
+- [x] Stack local completa reiniciada e smokes encadeados aprovados nas sessões `7677`–`7686`,
+  todas em `state=3`, cursor final e zero alarmes.
+- [ ] Flow canário publicado e validado primeiro em `channel`, depois em `person` quando aplicável.
+- [ ] PR ORCH integrada e rollout validado.
+- [ ] Documentação e evidências finais consolidadas.
+
+Ativação futura do envio e das branches permanece proibida por R36 até existir envelope materializado ligado à revisão, credencial protegida, idempotência, claim/ACK/retry e normalização inequívoca dos eventos do provedor.
+
+Rollback: impedir novos usos, auditar sessões bloqueadas e marcadores eventualmente consumidos, reverter catálogo/engine e reiniciar os serviços afetados. Não há migration nem envio externo para compensar.
 
 ## Backlog avancado
 

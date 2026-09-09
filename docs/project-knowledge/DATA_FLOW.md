@@ -240,6 +240,20 @@ RCS não é inferido de um número telefônico genérico. A Identidade materiali
 
 O runtime armazena apenas o card, o membro e o resultado `marked|already_marked`; a mensagem configurada não é materializada nem copiada. Antes do envio real, uma entrega separada deverá definir a API do provedor, credenciais protegidas, payload final ligado à revisão fixada, idempotência, claim/ACK/retry e callbacks inequívocos. `linked_actuator=rcs` isolado nunca autoriza dispatch.
 
+## Handoff de e-mail marker-only e fronteira do envio real
+
+```text
+select_contact_channel(email) seleciona somente um membro explicitamente e-mail
+  -> send_with_email valida membro, endereço, lista, mailing e pessoa
+  -> ORCH grava linked_actuator=email
+  -> ORCH bloqueia a sessão em state=1
+  -> nenhum POST ou envio SMTP é executado
+```
+
+Em `person`, o card exige seleção explícita anterior; em `channel`, preserva o membro e o endereço de origem. O update protegido exige a mesma sessão ativa, flow, identificador, endereço, lista, mailing, pessoa quando disponível e tipo `email`. Marcador, cursor bloqueado e `state=1` pertencem à mesma transação; a reentrada em `blocked_send_with_email` não repete o handoff.
+
+O runtime guarda somente o card, o membro e o resultado `marked|already_marked`. Remetente, reply-to, assunto e corpos configurados não são copiados. As saídas `sent`, `delivered`, `opened`, `clicked`, `deferred`, `bounced`, `complained`, `unsubscribed`, `failed`, `timeout` e `exception` são contrato visual futuro. Antes do envio real, uma entrega separada deverá materializar envelope ligado à sessão, card, membro e revisão, com conteúdo final, credencial protegida, idempotência, claim/ACK/retry e callbacks normalizados.
+
 ## `switch_bot_flow` — hub WhatsApp para BOT
 
 ```text
@@ -277,7 +291,7 @@ ORCH recebe a sessão
   -> define linked_actuator apenas quando um card autorizado o exige
 ```
 
-`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Antes de uma seleção explícita, alcançar `send_with_dialer`, `send_with_sms`, `send_with_rcs`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template` terminaliza com `person_scope_channel_component_not_supported`; não há escolha implícita. Após `select_contact_channel` retornar `selected`, o M2 hidrata e reutiliza o membro escolhido nas retomadas, e o card de comunicação permanece responsável por definir seu `linked_actuator`. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
+`session_scope=person` ativa obrigatoriamente o roteamento contextual daquela sessão e exige ao menos um seletor de membro, lista ou mailing. Antes de uma seleção explícita, alcançar `send_with_dialer`, `send_with_sms`, `send_with_rcs`, `send_with_email`, `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp_template` terminaliza com `person_scope_channel_component_not_supported`; não há escolha implícita. Após `select_contact_channel` retornar `selected`, o M2 hidrata e reutiliza o membro escolhido nas retomadas, e o card de comunicação permanece responsável por definir seu `linked_actuator`. Ausência de `session_scope` equivale a `channel` e preserva compatibilidade.
 
 Na criação explícita pelo endpoint `/sessions`, um payload com `session_scope=channel` e `contact_list_member_id` válido acrescenta o membro à identidade de reuso. O advisory lock histórico e o `entity_session_id=entity_address:::flow_uuid` permanecem inalterados: o mesmo membro reutiliza sua sessão ativa, mas dois membros diferentes podem gerar duas sessões mesmo quando compartilham pessoa, tipo e endereço. A identidade fica imutável em `runtime_variables.session_identity`; `input_payload`/`last_payload` são fallback para sessões anteriores ao patch. Chamadas `person`, sem escopo explícito ou sem membro válido continuam sob a correlação legada. Isso não resolve a ambiguidade de callbacks que chegam sem uma chave de sessão; consulte R32 e R35.
 
