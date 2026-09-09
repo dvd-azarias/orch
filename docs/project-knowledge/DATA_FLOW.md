@@ -104,14 +104,13 @@ A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint n
 
 ## Card `source_list_membership`
 
-1. Renderiza `person_uuid` no runtime; aceita a pessoa contextual ou a saída de um card anterior, como `{{contact_action.person_uuid}}`.
-2. Resolve a pessoa não mesclada por UUID e a lista pelo UUID público do mailing, ambos sob lock transacional. Template de pessoa não resolvido, pessoa ausente ou lista ausente seguem por `not_found` sem escrita parcial.
-3. Aceita somente listas em `READY_TO_INGEST` ou `PROCESSED`. Estado incompatível, UUID inválido ou pessoa sem identificador seguem por `exception` quando a branch estiver conectada.
-4. Cria um `contact_draft` com os dados atuais da pessoa ou reutiliza o draft de mesmo identificador já ligado à lista. Canais válidos são copiados/upsertados e os contadores da lista crescem apenas na criação.
-5. O lock da linha de `source_lists` serializa inserções concorrentes na mesma lista; repetição retorna `already_linked` e não duplica o vínculo.
-6. Atualiza em `persons` somente as referências `last_contact_draft_id`, `last_source_list_id`, `last_mailing_id` e `last_seen_at` relacionadas à associação.
-7. A saída é gravada em `variables.customs[output_var]` e em `source_list_membership_last_result`; branches normais são `linked`, `already_linked` e `not_found`.
-8. O card não chama o Target Core, não associa a lista ao flow, não materializa `contact_list_members` e não inicia sessões. Esses efeitos exigem comandos separados para evitar recursão/fan-out.
+1. Exige `membership_state=active|inactive`, renderiza `person_uuid` no runtime e resolve a lista pelo UUID público do mailing. UUID/estado inválido segue por `exception`; pessoa ou lista ausente segue por `not_found`.
+2. Em `active`, a lista precisa estar `READY_TO_INGEST` ou `PROCESSED`. O card cria ou reutiliza o draft da pessoa na `source_list` e, quando existe vínculo ativo da lista com o flow atual, reativa os `contact_list_members` já materializados para essa pessoa.
+3. Em `inactive`, a situação da `source_list` não impede a retirada. O card exige vínculo ativo mailing→flow e membros materializados da pessoa nesse par exato de `mailing_id + contact_list_id`; ausência segue por `not_found` sem atingir outro flow.
+4. Inativar grava `status=0`, preenche `unassigned_at`, limpa roteamento/tentativas e encerra somente sessões irmãs ainda ativas com o mesmo flow, lista, mailing e pessoa. A sessão que executa o card é excluída dessa parada para concluir a branch configurada.
+5. Repetir o mesmo estado é idempotente e segue por `unchanged`; qualquer vínculo-fonte criado, membro alterado ou sessão irmã parada segue por `changed`.
+6. A saída em `variables.customs[output_var]` e `source_list_membership_last_result` informa estado anterior/desejado, escopo, contagens de membros alterados e sessões paradas. `sessions_created` é sempre zero.
+7. `active` não materializa membro ausente, não recria sessão anteriormente encerrada e não associa mailing ao flow. `inactive` não apaga `source_list_contact_drafts`, `contact_drafts`, membros ou histórico.
 
 ## Card `wait_for_event`
 

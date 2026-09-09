@@ -24,6 +24,7 @@ def _component(**parameters: object) -> dict:
     defaults = {
         "person_uuid": "{{contact.person_uuid}}",
         "mailing_id": MAILING_UUID,
+        "membership_state": "active",
         "output_var": "source_list_membership",
     }
     defaults.update(parameters)
@@ -65,6 +66,20 @@ def _person() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _flow_scope_dependencies(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        workflow,
+        "fetch_active_flow_mailing_link",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "set_person_materialized_membership_state",
+        AsyncMock(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_membership_links_person_from_prior_card_output(monkeypatch) -> None:
     fetch_person = AsyncMock(return_value=_person())
@@ -88,6 +103,7 @@ async def test_membership_links_person_from_prior_card_output(monkeypatch) -> No
     branch = await workflow._run_source_list_membership(
         db_session=_NestedSession(),  # type: ignore[arg-type]
         flow_uuid=FLOW_UUID,
+        session_id=123,
         component=_component(
             person_uuid="{{contact_action.person_uuid}}",
             mailing_id={"mailing_id": MAILING_UUID, "name": "Lista Teste"},
@@ -96,7 +112,7 @@ async def test_membership_links_person_from_prior_card_output(monkeypatch) -> No
         runtime_variables=runtime,
     )
 
-    assert branch == "linked"
+    assert branch == "changed"
     fetch_person.assert_awaited_once_with(ANY, person_uuid=PERSON_UUID)
     resolve_list.assert_awaited_once_with(ANY, public_id=MAILING_UUID)
     ensure_membership.assert_awaited_once_with(
@@ -105,15 +121,27 @@ async def test_membership_links_person_from_prior_card_output(monkeypatch) -> No
         person=_person(),
     )
     assert runtime["variables"]["customs"]["membership_result"] == {
-        "action": "linked",
+        "action": "changed",
+        "desired_state": "active",
+        "previous_state": "absent",
+        "current_state": "active",
+        "changed": True,
+        "scope": "current_flow",
         "person_uuid": PERSON_UUID,
         "mailing_id": MAILING_UUID,
         "source_list_id": 1139,
         "contact_draft_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
         "channels": 1,
+        "contact_list_id": None,
+        "flow_link_found": False,
+        "source_membership_created": True,
+        "materialized_members": 0,
+        "members_changed": 0,
+        "sessions_stopped": 0,
+        "sessions_created": 0,
         "missing": None,
     }
-    assert runtime["source_list_membership_last_result"]["result"]["action"] == "linked"
+    assert runtime["source_list_membership_last_result"]["result"]["action"] == "changed"
 
 
 @pytest.mark.asyncio
@@ -140,6 +168,7 @@ async def test_membership_is_idempotent_and_accepts_serialized_parameters(monkey
     component["parameters"] = [
         {"id": "person_uuid", "value": "{{contact.person_uuid}}"},
         {"id": "mailing_id", "value": [{"mailing_id": MAILING_UUID, "name": "Lista"}]},
+        {"id": "membership_state", "value": [{"id": "active", "name": "Ativo"}]},
         {"id": "output_var", "value": "source_list_membership"},
     ]
     runtime = _runtime()
@@ -147,14 +176,241 @@ async def test_membership_is_idempotent_and_accepts_serialized_parameters(monkey
     branch = await workflow._run_source_list_membership(
         db_session=_NestedSession(),  # type: ignore[arg-type]
         flow_uuid=FLOW_UUID,
+        session_id=123,
         component=component,
         runtime_variables=runtime,
     )
 
-    assert branch == "already_linked"
+    assert branch == "unchanged"
     ensure_membership.assert_awaited_once()
     assert runtime["variables"]["customs"]["source_list_membership"]["action"] == (
-        "already_linked"
+        "unchanged"
+    )
+
+
+@pytest.mark.asyncio
+async def test_membership_active_reactivates_existing_materialized_members(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        AsyncMock(return_value={"id": 1139, "status": "PROCESSED"}),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "ensure_person_in_source_list",
+        AsyncMock(
+            return_value={
+                "created": False,
+                "contact_draft_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "channels": 2,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_active_flow_mailing_link",
+        AsyncMock(return_value={"contact_list_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}),
+    )
+    set_state = AsyncMock(
+        return_value={
+            "contact_list_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            "previous_state": "inactive",
+            "matched_members": 2,
+            "members_changed": 2,
+            "sessions_stopped": 0,
+        }
+    )
+    monkeypatch.setattr(workflow, "set_person_materialized_membership_state", set_state)
+    runtime = _runtime()
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(membership_state="active"),
+        runtime_variables=runtime,
+    )
+
+    assert branch == "changed"
+    set_state.assert_awaited_once_with(
+        ANY,
+        flow_uuid=FLOW_UUID,
+        current_session_id=123,
+        source_list_id=1139,
+        contact_list_id="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        person_uuid=PERSON_UUID,
+        contact_draft_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+        identifier="12345678901",
+        desired_state="active",
+    )
+    result = runtime["variables"]["customs"]["source_list_membership"]
+    assert result["previous_state"] == "inactive"
+    assert result["current_state"] == "active"
+    assert result["members_changed"] == 2
+    assert result["sessions_created"] == 0
+
+
+@pytest.mark.asyncio
+async def test_membership_inactive_changes_only_materialized_scope(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        AsyncMock(return_value={"id": 1139, "status": "UPLOADED"}),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_active_flow_mailing_link",
+        AsyncMock(
+            return_value={
+                "mailing_id": 1139,
+                "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            }
+        ),
+    )
+    set_state = AsyncMock(
+        return_value={
+            "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "previous_state": "active",
+            "matched_members": 3,
+            "members_changed": 3,
+            "sessions_stopped": 2,
+        }
+    )
+    monkeypatch.setattr(workflow, "set_person_materialized_membership_state", set_state)
+    ensure_membership = AsyncMock()
+    monkeypatch.setattr(workflow, "ensure_person_in_source_list", ensure_membership)
+    runtime = _runtime()
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(membership_state={"id": "inactive", "name": "Inativo"}),
+        runtime_variables=runtime,
+    )
+
+    assert branch == "changed"
+    ensure_membership.assert_not_awaited()
+    set_state.assert_awaited_once_with(
+        ANY,
+        flow_uuid=FLOW_UUID,
+        current_session_id=123,
+        source_list_id=1139,
+        contact_list_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+        person_uuid=PERSON_UUID,
+        contact_draft_id=None,
+        identifier="12345678901",
+        desired_state="inactive",
+    )
+    assert runtime["variables"]["customs"]["source_list_membership"] == {
+        "action": "changed",
+        "desired_state": "inactive",
+        "previous_state": "active",
+        "current_state": "inactive",
+        "changed": True,
+        "scope": "current_flow",
+        "person_uuid": PERSON_UUID,
+        "mailing_id": MAILING_UUID,
+        "source_list_id": 1139,
+        "contact_draft_id": None,
+        "channels": None,
+        "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "flow_link_found": True,
+        "source_membership_created": False,
+        "materialized_members": 3,
+        "members_changed": 3,
+        "sessions_stopped": 2,
+        "sessions_created": 0,
+        "missing": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_membership_inactive_without_flow_link_follows_not_found(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        AsyncMock(return_value={"id": 1139, "status": "PROCESSED"}),
+    )
+    set_state = AsyncMock()
+    monkeypatch.setattr(workflow, "set_person_materialized_membership_state", set_state)
+    runtime = _runtime()
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(membership_state="inactive"),
+        runtime_variables=runtime,
+    )
+
+    assert branch == "not_found"
+    set_state.assert_not_awaited()
+    result = runtime["variables"]["customs"]["source_list_membership"]
+    assert result["missing"] == "flow_mailing_link"
+    assert result["current_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_membership_inactive_without_materialized_member_follows_not_found(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        AsyncMock(return_value={"id": 1139, "status": "PROCESSED"}),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_active_flow_mailing_link",
+        AsyncMock(return_value={"contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd"}),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "set_person_materialized_membership_state",
+        AsyncMock(
+            return_value={
+                "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "previous_state": "absent",
+                "matched_members": 0,
+                "members_changed": 0,
+                "sessions_stopped": 0,
+            }
+        ),
+    )
+    runtime = _runtime()
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(membership_state="inactive"),
+        runtime_variables=runtime,
+    )
+
+    assert branch == "not_found"
+    assert runtime["variables"]["customs"]["source_list_membership"]["missing"] == (
+        "materialized_member"
     )
 
 
@@ -173,6 +429,7 @@ async def test_membership_unresolved_person_template_follows_not_found_without_w
     branch = await workflow._run_source_list_membership(
         db_session=_NestedSession(),  # type: ignore[arg-type]
         flow_uuid=FLOW_UUID,
+        session_id=123,
         component=_component(person_uuid="{{contact_action.person_uuid}}"),
         runtime_variables=runtime,
     )
@@ -200,6 +457,7 @@ async def test_membership_missing_person_follows_not_found(monkeypatch) -> None:
     branch = await workflow._run_source_list_membership(
         db_session=_NestedSession(),  # type: ignore[arg-type]
         flow_uuid=FLOW_UUID,
+        session_id=123,
         component=_component(),
         runtime_variables=runtime,
     )
@@ -229,6 +487,7 @@ async def test_membership_missing_list_follows_not_found(monkeypatch) -> None:
     branch = await workflow._run_source_list_membership(
         db_session=_NestedSession(),  # type: ignore[arg-type]
         flow_uuid=FLOW_UUID,
+        session_id=123,
         component=_component(),
         runtime_variables=runtime,
     )
@@ -257,6 +516,7 @@ async def test_membership_rejects_list_not_ready_without_writing(monkeypatch) ->
         await workflow._run_source_list_membership(
             db_session=_NestedSession(),  # type: ignore[arg-type]
             flow_uuid=FLOW_UUID,
+            session_id=123,
             component=_component(),
             runtime_variables=_runtime(),
         )
@@ -286,6 +546,7 @@ async def test_membership_rejects_person_without_identifier(monkeypatch) -> None
         await workflow._run_source_list_membership(
             db_session=_NestedSession(),  # type: ignore[arg-type]
             flow_uuid=FLOW_UUID,
+            session_id=123,
             component=_component(),
             runtime_variables=_runtime(),
         )
@@ -300,6 +561,8 @@ async def test_membership_rejects_person_without_identifier(monkeypatch) -> None
         ({"person_uuid": "person-invalid"}, "source_list_membership_invalid_person_uuid"),
         ({"mailing_id": "mailing-invalid"}, "source_list_membership_invalid_mailing_id"),
         ({"mailing_id": None}, "source_list_membership_missing_mailing_id"),
+        ({"membership_state": None}, "source_list_membership_missing_state"),
+        ({"membership_state": "disabled"}, "source_list_membership_invalid_state"),
         ({"output_var": "membership-result"}, "source_list_membership_invalid_output_var"),
     ],
 )
@@ -312,6 +575,7 @@ async def test_membership_rejects_invalid_runtime_contract(
         await workflow._run_source_list_membership(
             db_session=_NestedSession(),  # type: ignore[arg-type]
             flow_uuid=FLOW_UUID,
+            session_id=123,
             component=_component(**parameters),
             runtime_variables=_runtime(),
         )
@@ -331,6 +595,7 @@ async def test_membership_wraps_unexpected_persistence_failure(monkeypatch) -> N
         await workflow._run_source_list_membership(
             db_session=_NestedSession(),  # type: ignore[arg-type]
             flow_uuid=FLOW_UUID,
+            session_id=123,
             component=_component(),
             runtime_variables=_runtime(),
         )
@@ -417,7 +682,7 @@ def _configure_workflow_dependencies(
 
 
 @pytest.mark.asyncio
-async def test_execute_workflow_routes_membership_by_linked_branch(monkeypatch) -> None:
+async def test_execute_workflow_routes_membership_by_changed_branch(monkeypatch) -> None:
     membership_ref = "11111111-1111-1111-1111-111111111111"
     finish_ref = "22222222-2222-2222-2222-222222222222"
     definition = {
@@ -425,7 +690,7 @@ async def test_execute_workflow_routes_membership_by_linked_branch(monkeypatch) 
             {**_component(), "ref_id": membership_ref},
             {"ref_id": finish_ref, "component_id": "finish_flow", "parameters": {}},
         ],
-        "branches": [{"from": membership_ref, "to": finish_ref, "branch": "linked"}],
+        "branches": [{"from": membership_ref, "to": finish_ref, "branch": "changed"}],
     }
     runtime = _runtime()
     persisted: list[dict] = []
@@ -459,7 +724,7 @@ async def test_execute_workflow_routes_membership_by_linked_branch(monkeypatch) 
 
     assert result.stopped_reason == "finished_by_component"
     assert result.last_card_uuid == finish_ref
-    assert runtime["variables"]["customs"]["source_list_membership"]["action"] == "linked"
+    assert runtime["variables"]["customs"]["source_list_membership"]["action"] == "changed"
     assert any(item.get("next_card_uuid") == finish_ref for item in persisted)
 
 

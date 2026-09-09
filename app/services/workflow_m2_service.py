@@ -44,6 +44,7 @@ from app.repositories.identidade_person_repository import (
     fetch_person_by_uuid_for_update,
     insert_person_if_missing,
     resolve_source_list_by_public_id,
+    set_person_materialized_membership_state,
     update_person_from_payload,
 )
 from app.repositories.orch_channel_events_repository import (
@@ -5224,6 +5225,23 @@ def _source_list_membership_output_var(value: Any) -> str:
     return normalized
 
 
+def _source_list_membership_state(value: Any) -> str:
+    normalized = str(
+        _catalog_parameter_scalar(value, preferred_keys=("membership_state", "state")) or ""
+    ).strip().lower()
+    if not normalized:
+        raise WorkflowExecutionError(
+            "source_list_membership_missing_state",
+            "O campo membership_state deve selecionar Ativo ou Inativo.",
+        )
+    if normalized not in {"active", "inactive"}:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_state",
+            "O campo membership_state deve selecionar Ativo ou Inativo.",
+        )
+    return normalized
+
+
 def _store_source_list_membership_output(
     *,
     runtime_variables: dict[str, Any],
@@ -5249,12 +5267,14 @@ async def _run_source_list_membership(
     *,
     db_session: AsyncSession,
     flow_uuid: str,
+    session_id: int,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
 ) -> str:
     params = _source_list_membership_parameters(component)
     output_var = _source_list_membership_output_var(params.get("output_var"))
     mailing_public_id = _source_list_membership_mailing_public_id(params.get("mailing_id"))
+    desired_state = _source_list_membership_state(params.get("membership_state"))
     variables = _ensure_variables(runtime_variables)
     resolution_scope = _build_runtime_resolution_scope(
         runtime_variables=runtime_variables,
@@ -5269,6 +5289,14 @@ async def _run_source_list_membership(
     missing: str | None = None
     source_list: dict[str, Any] | None = None
     membership: dict[str, Any] | None = None
+    active_link: dict[str, Any] | None = None
+    materialized = {
+        "contact_list_id": None,
+        "previous_state": "absent",
+        "matched_members": 0,
+        "members_changed": 0,
+        "sessions_stopped": 0,
+    }
 
     logger.info(
         "workflow m2 source list membership started",
@@ -5278,6 +5306,7 @@ async def _run_source_list_membership(
             "component_ref_id": component_ref_id,
             "person_uuid": person_uuid,
             "mailing_id": mailing_public_id,
+            "desired_state": desired_state,
         },
     )
 
@@ -5301,37 +5330,103 @@ async def _run_source_list_membership(
                         missing = "mailing"
                     else:
                         source_status = str(source_list.get("status") or "").strip().upper()
-                        if source_status not in {"READY_TO_INGEST", "PROCESSED"}:
+                        if (
+                            desired_state == "active"
+                            and source_status not in {"READY_TO_INGEST", "PROCESSED"}
+                        ):
                             raise WorkflowExecutionError(
                                 "source_list_membership_mailing_not_ready",
                                 "A lista selecionada precisa estar pronta ou processada.",
                             )
-                        if not str(person.get("identifier") or "").strip():
+                        identifier = str(person.get("identifier") or "").strip() or None
+                        if desired_state == "active" and identifier is None:
                             raise WorkflowExecutionError(
                                 "source_list_membership_person_without_identifier",
                                 "A pessoa selecionada não possui identificador para entrar na lista.",
                             )
-                        membership = await ensure_person_in_source_list(
+
+                        if desired_state == "active":
+                            membership = await ensure_person_in_source_list(
+                                db_session,
+                                source_list_id=int(source_list["id"]),
+                                person=person,
+                            )
+
+                        active_link = await fetch_active_flow_mailing_link(
                             db_session,
+                            flow_uuid=flow_uuid,
                             source_list_id=int(source_list["id"]),
-                            person=person,
                         )
-                        branch = "linked" if membership.get("created") else "already_linked"
+                        if active_link is None or not active_link.get("contact_list_id"):
+                            if desired_state == "inactive":
+                                missing = "flow_mailing_link"
+                            else:
+                                branch = (
+                                    "changed"
+                                    if membership and membership.get("created")
+                                    else "unchanged"
+                                )
+                        else:
+                            materialized = await set_person_materialized_membership_state(
+                                db_session,
+                                flow_uuid=flow_uuid,
+                                current_session_id=session_id,
+                                source_list_id=int(source_list["id"]),
+                                contact_list_id=str(active_link["contact_list_id"]),
+                                person_uuid=person_uuid,
+                                contact_draft_id=(
+                                    str(membership.get("contact_draft_id"))
+                                    if membership and membership.get("contact_draft_id")
+                                    else None
+                                ),
+                                identifier=identifier,
+                                desired_state=desired_state,
+                            )
+                            if desired_state == "inactive" and not materialized["matched_members"]:
+                                missing = "materialized_member"
+                            else:
+                                changed = bool(
+                                    (membership and membership.get("created"))
+                                    or materialized["members_changed"]
+                                    or materialized["sessions_stopped"]
+                                )
+                                branch = "changed" if changed else "unchanged"
     except WorkflowExecutionError:
         raise
     except Exception as exc:
         raise WorkflowExecutionError(
             "source_list_membership_persistence_failed",
-            "Falha ao vincular a pessoa à lista.",
+            "Falha ao alterar o estado da pessoa na lista.",
         ) from exc
+
+    previous_state = materialized["previous_state"]
+    if (
+        desired_state == "active"
+        and previous_state == "absent"
+        and membership is not None
+        and not membership.get("created")
+    ):
+        previous_state = "active"
 
     output = {
         "action": branch,
+        "desired_state": desired_state,
+        "previous_state": previous_state,
+        "current_state": desired_state if branch != "not_found" else None,
+        "changed": branch == "changed",
+        "scope": "current_flow",
         "person_uuid": person_uuid,
         "mailing_id": mailing_public_id,
         "source_list_id": source_list.get("id") if source_list is not None else None,
         "contact_draft_id": membership.get("contact_draft_id") if membership is not None else None,
         "channels": membership.get("channels") if membership is not None else None,
+        "contact_list_id": materialized["contact_list_id"],
+        "flow_link_found": bool(active_link and active_link.get("contact_list_id")),
+        "source_membership_created": bool(membership and membership.get("created")),
+        "materialized_members": materialized["matched_members"],
+        "members_changed": materialized["members_changed"],
+        "sessions_stopped": materialized["sessions_stopped"],
+        "sessions_created": 0,
         "missing": missing,
     }
     _store_source_list_membership_output(
@@ -5349,7 +5444,10 @@ async def _run_source_list_membership(
             "component_ref_id": component_ref_id,
             "person_uuid": person_uuid,
             "mailing_id": mailing_public_id,
+            "desired_state": desired_state,
             "result_action": branch,
+            "members_changed": materialized["members_changed"],
+            "sessions_stopped": materialized["sessions_stopped"],
             "missing": missing,
         },
     )
@@ -7148,6 +7246,7 @@ async def execute_workflow_m2_for_session(
                         branch_label = await _run_source_list_membership(
                             db_session=db_session,
                             flow_uuid=flow_uuid,
+                            session_id=session_id,
                             component=component,
                             runtime_variables=runtime_variables,
                         )

@@ -126,6 +126,20 @@ async def test_membership_is_idempotent_in_real_postgres_without_shared_residue(
             await db_session.execute(
                 text(
                     """
+                    CREATE TEMP TABLE flow_mailing_links (
+                        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                        flow_id uuid NOT NULL,
+                        mailing_id bigint NOT NULL,
+                        contact_list_id uuid,
+                        linked_at timestamptz DEFAULT NOW(),
+                        unlinked_at timestamptz
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    """
                     INSERT INTO persons (
                         id,
                         uuid,
@@ -161,6 +175,7 @@ async def test_membership_is_idempotent_in_real_postgres_without_shared_residue(
                 "parameters": {
                     "person_uuid": "{{contact.person_uuid}}",
                     "mailing_id": mailing_uuid,
+                    "membership_state": "active",
                     "output_var": "membership_result",
                 },
             }
@@ -175,12 +190,14 @@ async def test_membership_is_idempotent_in_real_postgres_without_shared_residue(
             first_branch = await _run_source_list_membership(
                 db_session=db_session,
                 flow_uuid=str(uuid4()),
+                session_id=123,
                 component=component,
                 runtime_variables=runtime,
             )
             second_branch = await _run_source_list_membership(
                 db_session=db_session,
                 flow_uuid=str(uuid4()),
+                session_id=123,
                 component=component,
                 runtime_variables=runtime,
             )
@@ -218,12 +235,12 @@ async def test_membership_is_idempotent_in_real_postgres_without_shared_residue(
                 )
             ).one()
 
-            assert first_branch == "linked"
-            assert second_branch == "already_linked"
+            assert first_branch == "changed"
+            assert second_branch == "unchanged"
             assert membership_count == 1
             assert draft_count == 1
             assert channel_count == 1
             assert tuple(source_stats) == (1, 1, 0)
             assert runtime["variables"]["customs"]["membership_result"]["action"] == (
-                "already_linked"
+                "unchanged"
             )

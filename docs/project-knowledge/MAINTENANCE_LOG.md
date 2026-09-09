@@ -1017,3 +1017,43 @@ Implementar no ORCH o card já publicado no catálogo do Target Core e validá-l
 - O vínculo gerou exatamente as sessões `7513` e `7514`: duas entidades e dois `person_uuid` distintos; ambas gravaram `session_scope=person`, escolheram o membro `voice` primário, seguiram `selected`, executaram o `api_call` em uma tentativa com HTTP `200`, terminaram em `state=3` e não registraram erro de workflow. A auditoria tardia continuou com somente essas duas sessões, sem fan-out ou duplicação.
 - O stream read-only do destino `api-bin` confirmou os POSTs `b2f49ab9-c580-40a4-8a53-5fedd2b64705` e `82a039f0-c9d1-46ee-9e4e-0a39439d9e95`, `stream_id` consecutivos `1351296`/`1351297`, nos mesmos instantes UTC de término das sessões. Nenhum corpo ou header sensível foi usado como evidência.
 - Rollback sem migration: remover primeiro o flow da allowlist nos quatro Target Core, reiniciar de forma rolling os produtores `full`/`crud`, impedir novas execuções e só então reverter o commit funcional `a27e110` no ORCH e reiniciar a topologia afetada. Sessões e efeitos externos já concluídos não devem ser apagados automaticamente.
+
+## 2026-09-09 — Estado operacional no card `source_list_membership`
+
+### REQUEST / CLASSIFICATION
+
+Evoluir o card existente para **Gerenciar Contato na Lista**, com seleção explícita
+de estado e sem preocupação de retrocompatibilidade. `ALPHA_FIX_OPTIONAL`, sem
+migration, API externa ou nova fila.
+
+### DESIGN / SAFETY
+
+- `active` mantém a associação idempotente à `source_list` e reativa somente
+  membros já materializados no flow atual.
+- `inactive` usa o sinal canônico `unassigned_at`, preserva registros e limita o
+  update ao `contact_list_id` do vínculo ativo do flow com a lista escolhida.
+- Apenas sessões irmãs ainda ativas do mesmo flow/lista/mailing/pessoa recebem
+  `state=5`; a sessão corrente é excluída para concluir sua branch.
+- Nenhum caminho associa mailing ao flow, cria `contact_list_members`, inicia ou
+  reativa sessões. As branches são `changed`, `unchanged`, `not_found` e
+  `exception`.
+
+### VALIDATION
+
+- Suíte funcional do card: `20 passed`.
+- Provas PostgreSQL fora da sandbox: `2 passed`, incluindo repetição idempotente,
+  isolamento contra outra lista/flow/pessoa, preservação da sessão corrente e
+  não reativação de sessão irmã pelo estado `active`.
+- Regressão ampliada do workflow e cards vizinhos: `230 passed`; `py_compile` e
+  `git diff --check` passaram. Nenhum dado compartilhado ou de produção foi
+  alterado; os testes SQL usaram tabelas temporárias.
+- Auditoria somente leitura encontrou apenas o flow
+  `67c00879-f9e3-4ed3-82c0-a695970acc2b`, no workspace de homologação, com
+  revisão atual e draft ainda no envelope antigo. O rollout deve publicar o
+  catálogo, ajustar esse flow para `active` e somente depois implantar a engine.
+- A stack local completa do branch foi mantida em terminal dedicado com as filas
+  isoladas `*_f5_local`. Os dois smokes canônicos retornaram `202` para dez
+  execuções (`7630`–`7639`); todas terminaram em `state=3`, cursor final,
+  `next_card_uuid=NULL`, sem falha terminal e com zero alarmes.
+- A stack foi encerrada ao final; API, workers e beats ficaram `down`, sem listener
+  na porta 7777 nem consumidores locais remanescentes.

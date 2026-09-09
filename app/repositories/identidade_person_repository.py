@@ -539,3 +539,189 @@ async def fetch_active_flow_mailing_link(
     )
     row = result.mappings().first()
     return dict(row) if row is not None else None
+
+
+async def set_person_materialized_membership_state(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    current_session_id: int,
+    source_list_id: int,
+    contact_list_id: str,
+    person_uuid: str,
+    contact_draft_id: str | None,
+    identifier: str | None,
+    desired_state: str,
+) -> dict[str, Any]:
+    matched_result = await db_session.execute(
+        text(
+            """
+            SELECT id, unassigned_at
+            FROM contact_list_members
+            WHERE contact_list_id = CAST(:contact_list_id AS uuid)
+              AND mailing_id = :source_list_id
+              AND deleted_at IS NULL
+              AND (
+                    person_uuid = CAST(:person_uuid AS uuid)
+                    OR (
+                        CAST(:contact_draft_id AS uuid) IS NOT NULL
+                        AND contact_draft_id = CAST(:contact_draft_id AS uuid)
+                    )
+                    OR (
+                        CAST(:identifier AS text) IS NOT NULL
+                        AND contact_identifier = CAST(:identifier AS text)
+                    )
+                  )
+            ORDER BY id
+            FOR UPDATE
+            """
+        ),
+        {
+            "contact_list_id": contact_list_id,
+            "source_list_id": source_list_id,
+            "person_uuid": person_uuid,
+            "contact_draft_id": contact_draft_id,
+            "identifier": identifier,
+        },
+    )
+    matched = [dict(row) for row in matched_result.mappings().all()]
+    member_ids = [int(row["id"]) for row in matched]
+    active_before = sum(1 for row in matched if row.get("unassigned_at") is None)
+    inactive_before = len(matched) - active_before
+
+    if active_before and inactive_before:
+        previous_state = "mixed"
+    elif active_before:
+        previous_state = "active"
+    elif inactive_before:
+        previous_state = "inactive"
+    else:
+        previous_state = "absent"
+
+    changed_member_ids: list[int] = []
+    if member_ids:
+        if desired_state == "active":
+            update_result = await db_session.execute(
+                text(
+                    """
+                    UPDATE contact_list_members
+                    SET
+                        status = 0,
+                        last_ref_id = NULL,
+                        linked_actuator = NULL,
+                        ani = NULL,
+                        next_candidate = 0,
+                        failure_attempts = 0,
+                        busy_attempts = 0,
+                        noanswer_attempts = 0,
+                        machine_attempts = 0,
+                        rejected_attempts = 0,
+                        invalidnumber_attempts = 0,
+                        external_identifier = NULL,
+                        scheduling_moment = NULL,
+                        segment = NULL,
+                        unassigned_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = ANY(CAST(:member_ids AS bigint[]))
+                      AND unassigned_at IS NOT NULL
+                    RETURNING id
+                    """
+                ),
+                {"member_ids": member_ids},
+            )
+        else:
+            update_result = await db_session.execute(
+                text(
+                    """
+                    UPDATE contact_list_members
+                    SET
+                        status = 0,
+                        last_ref_id = NULL,
+                        linked_actuator = NULL,
+                        ani = NULL,
+                        next_candidate = 0,
+                        failure_attempts = 0,
+                        busy_attempts = 0,
+                        noanswer_attempts = 0,
+                        machine_attempts = 0,
+                        rejected_attempts = 0,
+                        invalidnumber_attempts = 0,
+                        external_identifier = NULL,
+                        scheduling_moment = NULL,
+                        segment = NULL,
+                        unassigned_at = COALESCE(unassigned_at, NOW()),
+                        updated_at = NOW()
+                    WHERE id = ANY(CAST(:member_ids AS bigint[]))
+                      AND (
+                            unassigned_at IS NULL
+                            OR status IS DISTINCT FROM 0
+                            OR last_ref_id IS NOT NULL
+                            OR linked_actuator IS NOT NULL
+                            OR ani IS NOT NULL
+                            OR next_candidate IS DISTINCT FROM 0
+                            OR failure_attempts IS DISTINCT FROM 0
+                            OR busy_attempts IS DISTINCT FROM 0
+                            OR noanswer_attempts IS DISTINCT FROM 0
+                            OR machine_attempts IS DISTINCT FROM 0
+                            OR rejected_attempts IS DISTINCT FROM 0
+                            OR invalidnumber_attempts IS DISTINCT FROM 0
+                            OR external_identifier IS NOT NULL
+                            OR scheduling_moment IS NOT NULL
+                            OR segment IS NOT NULL
+                          )
+                    RETURNING id
+                    """
+                ),
+                {"member_ids": member_ids},
+            )
+        changed_member_ids = [int(row["id"]) for row in update_result.mappings().all()]
+
+    stopped_session_ids: list[int] = []
+    if desired_state == "inactive" and member_ids:
+        stopped_result = await db_session.execute(
+            text(
+                """
+                UPDATE orch_sessions
+                SET
+                    state = 5,
+                    unassigned_at = NOW(),
+                    ended_at = COALESCE(ended_at, NOW()),
+                    updated_at = NOW()
+                WHERE flow_uuid = CAST(:flow_uuid AS uuid)
+                  AND id <> :current_session_id
+                  AND unassigned_at IS NULL
+                  AND ended_at IS NULL
+                  AND state NOT IN (3, 5)
+                  AND runtime_variables #>> '{input_payload,contact_list_id}' = :contact_list_id
+                  AND runtime_variables #>> '{input_payload,mailing_id}' = :source_list_id_text
+                  AND (
+                        COALESCE(
+                            runtime_variables #>> '{session_identity,contact_list_member_id}',
+                            runtime_variables #>> '{input_payload,contact_list_member_id}'
+                        ) = ANY(CAST(:member_ids AS text[]))
+                        OR (
+                            CAST(:identifier AS text) IS NOT NULL
+                            AND entity = CAST(:identifier AS text)
+                        )
+                      )
+                RETURNING id
+                """
+            ),
+            {
+                "flow_uuid": flow_uuid,
+                "current_session_id": current_session_id,
+                "contact_list_id": contact_list_id,
+                "source_list_id_text": str(source_list_id),
+                "member_ids": [str(member_id) for member_id in member_ids],
+                "identifier": identifier,
+            },
+        )
+        stopped_session_ids = [int(row["id"]) for row in stopped_result.mappings().all()]
+
+    return {
+        "contact_list_id": contact_list_id,
+        "previous_state": previous_state,
+        "matched_members": len(member_ids),
+        "members_changed": len(changed_member_ids),
+        "sessions_stopped": len(stopped_session_ids),
+    }
