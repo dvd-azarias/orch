@@ -1057,3 +1057,40 @@ migration, API externa ou nova fila.
   `next_card_uuid=NULL`, sem falha terminal e com zero alarmes.
 - A stack foi encerrada ao final; API, workers e beats ficaram `down`, sem listener
   na porta 7777 nem consumidores locais remanescentes.
+
+## 2026-09-09 — Engine marker-only `send_with_email`
+
+### REQUEST / CLASSIFICATION
+
+Implementar o próximo componente básico de comunicação mantendo a máxima já adotada para
+SMS/RCS: o ORCH escolhe o membro e marca o atuador, mas não envia. `ALPHA_FIX_OPTIONAL`, sem
+migration, fila, endpoint ou chamada externa.
+
+### DESIGN / SAFETY
+
+- O catálogo separado segue o núcleo comum de n8n, Amazon SES e SendGrid: remetente, reply-to
+  opcional, assunto, conteúdo `text|html|both`, evento positivo e timeout.
+- Em `channel`, o membro e o endereço de origem devem ser `email`; em `person`, é obrigatória uma
+  seleção `email` anterior pelo `select_contact_channel`.
+- O repositório exige coincidência de sessão ativa, flow, membro, endereço, lista, mailing e pessoa
+  quando disponível, e grava somente `linked_actuator=email`.
+- O runtime diagnóstico não recebe remetente, assunto, corpo nem endereço. O card bloqueia em
+  `state=1`; reentrada não repete o handoff.
+- As branches de entrega e engajamento são contrato visual futuro. Não há processamento de callback.
+
+### VALIDATION
+
+- Testes unitários de engine, repositório, dispatcher, alarme, `person|channel`, rejeição de outros
+  canais e ausência de HTTP: `19 passed`.
+- Teste PostgreSQL com tabelas temporárias, fora da sandbox: `1 passed`, cobrindo rollback,
+  idempotência e guards de pessoa/lista/mailing/tipo.
+- Regressão ampliada de `select_contact_channel` e dos cards marker-only SMS/RCS/e-mail:
+  `82 passed`; os quatro testes PostgreSQL equivalentes passaram fora da sandbox.
+- `compileall` e `git diff --check` passaram.
+- Stack local completa reiniciada em terminal persistente com o perfil isolado `f5_local`: API, três
+  workers e dois Beats permaneceram `up`. Os smokes encadeados criaram as sessões `7677`–`7686`;
+  todas terminaram em `state=3`, `ended_at` preenchido, cursor final, `next_card_uuid=NULL` e zero
+  alarmes. O canário específico do card permanece pendente até catálogo e engine serem integrados e
+  o `send_with_email` ser publicado em um flow controlado.
+- Após a coleta das evidências, a stack isolada foi encerrada pelo script canônico; API, workers e
+  Beats terminaram reportados como `down`.

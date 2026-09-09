@@ -178,6 +178,58 @@ async def test_rcs_block_sets_session_running(
 
 
 @pytest.mark.asyncio
+async def test_email_block_sets_session_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _DummySession()
+    state_changes: list[dict] = []
+
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "get_current_workspace_schema",
+        lambda: "ws_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "bootstrap_workflow_for_session",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "execute_workflow_m2_for_session",
+        AsyncMock(return_value=SimpleNamespace(stopped_reason="blocked_send_with_email")),
+    )
+
+    async def _set_state(*_args, **kwargs) -> None:
+        state_changes.append(kwargs)
+
+    async def _unexpected_finish(*_args, **_kwargs) -> None:
+        pytest.fail("send_with_email marker-only must leave the session running")
+
+    monkeypatch.setattr(workflow_dispatcher_service, "set_session_state", _set_state)
+    monkeypatch.setattr(
+        workflow_dispatcher_service,
+        "mark_session_finished",
+        _unexpected_finish,
+    )
+
+    stopped_reason = await workflow_dispatcher_service.advance_session_once(
+        session,
+        flow_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        session_id=128,
+    )
+
+    assert stopped_reason == "blocked_send_with_email"
+    assert state_changes == [
+        {
+            "session_id": 128,
+            "state": 1,
+            "only_if_not_finished": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_wait_for_event_block_remains_pending_for_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
