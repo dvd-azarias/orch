@@ -54,9 +54,9 @@ Smoke confirma aceite HTTP; health Celery aceita qualquer worker. Nenhum deles, 
 
 `orch_sessions_repository.py` ainda contém helpers sem callers para o contrato embrionário que criava lista padrão, membro e sessão filha. Eles foram desconectados do motor e não fazem parte do contrato atual. Não os reutilizar; a persistência válida do card fica em `create_contact_repository.py` e alcança somente `persons`.
 
-## Vínculo em `source_list` não é materialização no flow
+## Estado ativo não cria nova materialização ou sessão
 
-O card `source_list_membership` garante somente o draft da pessoa em `source_list_contact_drafts`. Mesmo quando a lista já está associada a um flow, o card não cria ou atualiza `contact_list_members` e não inicia sessões. Reprocessar o vínculo mailing→flow dentro do card poderia redisparar o próprio fluxo; por isso a materialização precisa de contrato explícito e protegido separado. Pela mesma razão, a primeira versão não oferece retirada: um draft pode já ter membros e sessões derivados em múltiplos flows.
+O card `source_list_membership` pode reativar `contact_list_members` existentes, mas não materializa canais adicionados depois do vínculo mailing→flow e não recria sessões encerradas. Isso evita que a execução do próprio card cause fan-out ou redispare o fluxo. `inactive` afeta somente a materialização da lista no flow corrente e preserva a relação-fonte em `source_list_contact_drafts`; portanto, a mesma pessoa pode continuar ativa quando a lista estiver ligada a outro flow.
 
 ## Percentual do `split_random` não é cota de lote
 

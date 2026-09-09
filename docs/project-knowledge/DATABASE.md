@@ -35,7 +35,7 @@
 - Ownership confirmado do Target Core: `contact_list_members` e `linked_actuator_enum`.
 - Ownership formal de `source_lists`, `persons` e drafts: `UNKNOWN`, apesar de haver escrita ORCH no FileApp, `create_contact` e `identidade_person`.
 - O novo contrato de `create_contact` escreve somente campos cadastrais e `extras` de `persons`. Não altera `identifier`, campos de canal, referências de lista/mailing, membros ou `orch_sessions`.
-- `source_list_membership` cria ou atualiza o snapshot da pessoa em `contact_drafts`, seus `contact_draft_channels`, o vínculo em `source_list_contact_drafts`, contadores de `source_lists` somente na primeira inserção e referências `last_*` de `persons`. Não escreve em `flow_mailing_links`, `contact_list_members` ou `orch_sessions` além do avanço normal da própria sessão pelo M2.
+- Em `active`, `source_list_membership` mantém o snapshot e o vínculo-fonte da pessoa e pode reativar membros já materializados no flow atual. Em `inactive`, atualiza somente os membros e as sessões irmãs do mesmo flow, lista, mailing e pessoa. O card não altera `flow_mailing_links`, não exclui registros e não cria sessões.
 - `source_list_members`: nao referenciada pelo codigo FileApp.
 
 ## Migrations
