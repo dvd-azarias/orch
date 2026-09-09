@@ -78,6 +78,7 @@ def _build_runtime_patch(
     app_name: str,
     payload: dict[str, Any],
     extracted: dict[str, Any],
+    channel_scope_contact_list_member_id: int | None = None,
 ) -> str:
     runtime_patch = {
         "source_app": app_name,
@@ -85,6 +86,11 @@ def _build_runtime_patch(
         "last_payload": payload,
         "last_extracted": extracted,
     }
+    if channel_scope_contact_list_member_id is not None:
+        runtime_patch["session_identity"] = {
+            "scope": "channel",
+            "contact_list_member_id": channel_scope_contact_list_member_id,
+        }
     return json.dumps(runtime_patch, ensure_ascii=False)
 
 
@@ -438,12 +444,14 @@ async def upsert_active_session(
     entity_session_id: str,
     payload: dict[str, Any],
     extracted: dict[str, Any],
+    channel_scope_contact_list_member_id: int | None = None,
 ) -> PersistResult:
     lock_key = f"{flow_uuid}|{entity}|{entity_type}|{entity_address}"
     runtime_patch_json = _build_runtime_patch(
         app_name=app_name,
         payload=payload,
         extracted=extracted,
+        channel_scope_contact_list_member_id=channel_scope_contact_list_member_id,
     )
     whatsapp_timestamps = _extract_whatsapp_status_timestamps(payload)
     dialer_timestamps = _extract_dialer_status_timestamps(payload)
@@ -504,6 +512,14 @@ async def upsert_active_session(
                     AND entity_type = :entity_type
                     AND entity_address = :entity_address
                     AND (
+                        CAST(:channel_scope_contact_list_member_id AS bigint) IS NULL
+                        OR COALESCE(
+                            runtime_variables #>> '{session_identity,contact_list_member_id}',
+                            runtime_variables #>> '{input_payload,contact_list_member_id}',
+                            runtime_variables #>> '{last_payload,contact_list_member_id}'
+                        ) = CAST(CAST(:channel_scope_contact_list_member_id AS bigint) AS text)
+                    )
+                    AND (
                         :allow_address_reuse_without_entity_match
                         OR entity = :entity
                     )
@@ -520,6 +536,7 @@ async def upsert_active_session(
             "entity": entity,
             "entity_type": entity_type,
             "entity_address": entity_address,
+            "channel_scope_contact_list_member_id": channel_scope_contact_list_member_id,
             "entity_session_id": entity_session_id,
             "entity_origin_app": app_name,
             "state": state_update.state,
@@ -584,6 +601,14 @@ async def upsert_active_session(
                     AND entity_type = :entity_type
                     AND entity_address = :entity_address
                     AND (
+                        CAST(:channel_scope_contact_list_member_id AS bigint) IS NULL
+                        OR COALESCE(
+                            runtime_variables #>> '{session_identity,contact_list_member_id}',
+                            runtime_variables #>> '{input_payload,contact_list_member_id}',
+                            runtime_variables #>> '{last_payload,contact_list_member_id}'
+                        ) = CAST(CAST(:channel_scope_contact_list_member_id AS bigint) AS text)
+                    )
+                    AND (
                         :allow_address_reuse_without_entity_match
                         OR entity = :entity
                     )
@@ -604,6 +629,7 @@ async def upsert_active_session(
             "entity": entity,
             "entity_type": entity_type,
             "entity_address": entity_address,
+            "channel_scope_contact_list_member_id": channel_scope_contact_list_member_id,
             "entity_session_id": entity_session_id,
             "allow_finished_reuse_by_session_id": allow_finished_reuse_by_session_id,
             "allow_address_reuse_without_entity_match": allow_address_reuse_without_entity_match,
@@ -670,6 +696,14 @@ async def upsert_active_session(
                         flow_uuid = CAST(:flow_uuid AS uuid)
                         AND entity_type = :entity_type
                         AND entity_address = :entity_address
+                        AND (
+                            CAST(:channel_scope_contact_list_member_id AS bigint) IS NULL
+                            OR COALESCE(
+                                runtime_variables #>> '{{session_identity,contact_list_member_id}}',
+                                runtime_variables #>> '{{input_payload,contact_list_member_id}}',
+                                runtime_variables #>> '{{last_payload,contact_list_member_id}}'
+                            ) = CAST(CAST(:channel_scope_contact_list_member_id AS bigint) AS text)
+                        )
                         AND unassigned_at IS NULL
                         AND {whatsapp_status_column} IS NULL
                     ORDER BY created_at DESC
@@ -682,6 +716,7 @@ async def upsert_active_session(
                 "flow_uuid": flow_uuid,
                 "entity_type": entity_type,
                 "entity_address": entity_address,
+                "channel_scope_contact_list_member_id": channel_scope_contact_list_member_id,
                 "entity_session_id": entity_session_id,
                 "entity_origin_app": app_name,
                 "state": state_update.state,
@@ -738,6 +773,14 @@ async def upsert_active_session(
                         flow_uuid = CAST(:flow_uuid AS uuid)
                         AND entity_type = :entity_type
                         AND entity_address = :entity_address
+                        AND (
+                            CAST(:channel_scope_contact_list_member_id AS bigint) IS NULL
+                            OR COALESCE(
+                                runtime_variables #>> '{session_identity,contact_list_member_id}',
+                                runtime_variables #>> '{input_payload,contact_list_member_id}',
+                                runtime_variables #>> '{last_payload,contact_list_member_id}'
+                            ) = CAST(CAST(:channel_scope_contact_list_member_id AS bigint) AS text)
+                        )
                         AND unassigned_at IS NULL
                     ORDER BY created_at DESC
                     LIMIT 1
@@ -749,6 +792,7 @@ async def upsert_active_session(
                 "flow_uuid": flow_uuid,
                 "entity_type": entity_type,
                 "entity_address": entity_address,
+                "channel_scope_contact_list_member_id": channel_scope_contact_list_member_id,
                 "entity_session_id": entity_session_id,
                 "entity_origin_app": app_name,
                 "runtime_patch": runtime_patch_json,

@@ -35,11 +35,20 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
     async def _fake_ensure_active_workspace(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
-    async def _fake_persist_session(db_session, *, flow_uuid, app_name, extracted, payload):  # type: ignore[no-untyped-def]
+    async def _fake_persist_session(  # type: ignore[no-untyped-def]
+        db_session,
+        *,
+        flow_uuid,
+        app_name,
+        extracted,
+        payload,
+        channel_scope_contact_list_member_id,
+    ):
         captured["flow_uuid"] = flow_uuid
         captured["app_name"] = app_name
         captured["extracted"] = extracted
         captured["payload"] = payload
+        captured["channel_scope_contact_list_member_id"] = channel_scope_contact_list_member_id
         return SessionPersistResponse(
             session_id=999,
             session_uuid="11111111-1111-1111-1111-111111111111",
@@ -102,7 +111,11 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
             entity="30392287843",
             entity_type="person",
             entity_address="5511975620806",
-            payload={"origin": "third_party_app"},
+            payload={
+                "origin": "third_party_app",
+                "session_scope": "channel",
+                "contact_list_member_id": 10792,
+            },
         ),
         db_session=_DummySession(),  # type: ignore[arg-type]
     )
@@ -115,8 +128,31 @@ async def test_create_orch_session_by_workspace_uses_explicit_fields(monkeypatch
     assert response.extracted.entity_session_id == f"5511975620806:::{str(flow_uuid)}"
     assert captured["app_name"] == "GenericApp"
     assert captured["extracted"]["entity_address"] == "5511975620806"
-    assert captured["payload"] == {"origin": "third_party_app"}
+    assert captured["payload"] == {
+        "origin": "third_party_app",
+        "session_scope": "channel",
+        "contact_list_member_id": 10792,
+    }
+    assert captured["channel_scope_contact_list_member_id"] == 10792
     assert captured["assigned_session_id"] == 999
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"session_scope": "channel", "contact_list_member_id": 10792}, 10792),
+        ({"session_scope": " CHANNEL ", "contact_list_member_id": "10793"}, 10793),
+        ({"session_scope": "person", "contact_list_member_id": 10792}, None),
+        ({"session_scope": "channel", "contact_list_member_id": True}, None),
+        ({"session_scope": "channel", "contact_list_member_id": "invalid"}, None),
+        ({"contact_list_member_id": 10792}, None),
+    ],
+)
+def test_extract_channel_scope_contact_list_member_id(
+    payload: dict,
+    expected: int | None,
+) -> None:
+    assert orch_api._extract_channel_scope_contact_list_member_id(payload) == expected
 
 
 @pytest.mark.asyncio

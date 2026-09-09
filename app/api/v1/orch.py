@@ -98,6 +98,7 @@ from app.tasks.workflow_tasks import advance_session_task
 router = APIRouter(prefix="/v1/orch", tags=["orch"])
 logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
+_POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 _SUPPORTED_MANUAL_APPS = {"ArquivosApp", "WhatsApp", "DialerApp", "GenericApp"}
 _FLOW_ALIAS_PATTERN = re.compile(r"^[0-9a-f]{14}$")
 _SWITCH_BOT_FLOW_SUCCESS_STATUSES = {"success", "completed", "finished"}
@@ -125,6 +126,22 @@ def _read_required_text(value: str, *, field_name: str) -> str:
 
 def _build_entity_session_id(*, entity_address: str, flow_uuid: UUID) -> str:
     return f"{entity_address}:::{str(flow_uuid)}"
+
+
+def _extract_channel_scope_contact_list_member_id(payload: dict[str, Any]) -> int | None:
+    if str(payload.get("session_scope") or "").strip().lower() != "channel":
+        return None
+
+    raw_member_id = payload.get("contact_list_member_id")
+    if isinstance(raw_member_id, bool):
+        return None
+    try:
+        member_id = int(str(raw_member_id).strip())
+    except (TypeError, ValueError):
+        return None
+    if member_id <= 0 or member_id > _POSTGRES_BIGINT_MAX:
+        return None
+    return member_id
 
 
 def _is_short_flow_alias(value: str) -> bool:
@@ -840,6 +857,9 @@ async def create_orch_session_by_workspace(
         app_name=app_name,
         extracted=extracted.model_dump(),
         payload=payload,
+        channel_scope_contact_list_member_id=(
+            _extract_channel_scope_contact_list_member_id(payload)
+        ),
     )
     tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
     async with tx_context:

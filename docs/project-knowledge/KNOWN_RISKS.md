@@ -671,3 +671,25 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `EVIDENCE`: a engine possui guard SQL e guard de serviço por tipo exato, teste de reentrada `already_marked` e teste que falha se `_http_execute` for chamado. O teste PostgreSQL isolado foi preparado, mas a execução de 2026-09-08 não alcançou o banco por timeout de conectividade; não há ainda canário E2E.
 
 `V2`: registry de conectores/capacidades, outbox RCS transacional e inbox normalizado de callbacks.
+
+## R35 — Sessões `channel` de membros distintos colapsam pelo mesmo endereço
+
+`STATUS`: FIX IMPLEMENTED / DEPLOY AND RUNTIME VALIDATION PENDING
+
+`IMPACT`: high
+
+`PROBABILITY`: high quando a mesma pessoa possui mais de um canal materializado com endereço igual
+
+`AFFECTED AREA`: Target Core → ORCH `/sessions` / cardinalidade / SMS, RCS, WhatsApp e Dialer
+
+`DESCRIPTION`: o Target Core envia uma requisição por `contact_list_member` em `channel`, mas o upsert do ORCH reutilizava a sessão ativa apenas por `flow_uuid + entity + entity_type + entity_address`. Como `entity_session_id` também era `entity_address:::flow_uuid`, membros Voice, WhatsApp e RCS do mesmo telefone podiam atualizar a mesma linha. A cardinalidade final dependia da ordem e do instante em que cada sessão avançava ou terminava.
+
+`RUNTIME EVIDENCE`: no flow `db24e05d-a36f-49bd-a010-78d457d91cec`, o mailing `1139` possuía 11 membros ativos para duas pessoas e o Target Core recebeu `202` nos 11 POSTs. O ORCH criou somente 10 sessões. O membro RCS `10794` originou a sessão `7573`, marcou `linked_actuator=rcs` e bloqueou corretamente; o membro RCS `10792`, que compartilhava endereço com os membros Voice `10791` e WhatsApp `10793`, não recebeu sessão. Outro endereço com a mesma combinação chegou a criar as três sessões, confirmando a dependência de timing.
+
+`MITIGATION`: somente a rota manual, quando recebe `session_scope=channel` e `contact_list_member_id` BIGINT válido, passa essa identidade ao upsert. O ORCH preserva lock, `entity_session_id`, unassign e callbacks históricos, mas exige o mesmo membro para reutilizar uma linha. A identidade fica em `runtime_variables.session_identity`; `input_payload` e `last_payload` permitem reconhecer sessões criadas antes do patch. Payloads `person` e integrações sem escopo explícito preservam o comportamento legado.
+
+`DETECTION`: comparar POSTs `202` do Target com sessões por `input_payload.contact_list_member_id`; alertar membro materializado sem sessão e mais de um membro declarado na mesma sessão. Após rollout, repetir o vínculo do canário e exigir 11 identidades distintas, com um retry do mesmo membro sem sessão adicional.
+
+`ROLLBACK`: interromper novos vínculos `channel`, reverter o commit e reiniciar API/workers ORCH. Não apagar nem fundir sessões existentes automaticamente; marcadores de atuador já produzidos precisam ser auditados antes de qualquer compensação.
+
+`V2`: coluna/chave de correlação imutável e indexada para a origem da sessão, com idempotency key explícita do produtor e callbacks endereçados por sessão/canal.
