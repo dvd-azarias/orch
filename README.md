@@ -93,6 +93,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload
   - `GET /v1/orch/alarms?level=warning|error&code=...&flow_uuid=...&session_uuid=...&app_name=...&limit=50&cursor=...`
   - `POST /v1/orch/{workspace_uuid}/{flow_uuid}/sessions` (criação explícita de sessão por app integradora)
     - `entity_session_id` é gerado internamente pelo ORCH no formato `entity_address:::flow_uuid`.
+    - quando o payload declara `session_scope=channel` e um `contact_list_member_id` BIGINT válido, o membro também participa da idempotência: retries do mesmo membro reutilizam a sessão, enquanto membros distintos podem coexistir no mesmo endereço;
+    - payloads sem esse escopo explícito preservam a correlação legada por flow/entidade/tipo/endereço.
     - `assigned_at` é preenchido automaticamente com `NOW()` quando ausente.
   - `POST /v1/orch/{workspace_uuid}/{flow_uuid}/sessions/unassign`
     - recebe `entity_address` e marca `unassigned_at = NOW()` nas sessões correspondentes (quando `unassigned_at` ainda é `NULL`);

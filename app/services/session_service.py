@@ -28,6 +28,7 @@ async def persist_session(
     app_name: str,
     extracted: dict[str, Any],
     payload: dict[str, Any],
+    channel_scope_contact_list_member_id: int | None = None,
 ) -> SessionPersistResponse:
     safe_schema = get_current_workspace_schema().replace('"', '""')
 
@@ -44,6 +45,7 @@ async def persist_session(
             entity_session_id=str(extracted["entity_session_id"]),
             payload=payload,
             extracted=extracted,
+            channel_scope_contact_list_member_id=channel_scope_contact_list_member_id,
         )
         if persisted.created:
             settings = get_settings()

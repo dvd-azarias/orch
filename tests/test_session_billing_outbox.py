@@ -117,3 +117,38 @@ async def test_new_batch_billing_replaces_legacy_producer_without_dual_write(mon
 
     legacy_outbox.assert_not_awaited()
     batch_event.assert_awaited_once_with(ANY, workspace_uuid="workspace-1", session_id=42)
+
+
+@pytest.mark.asyncio
+async def test_persist_session_forwards_channel_scope_member_identity(monkeypatch) -> None:
+    upsert = AsyncMock(
+        return_value=PersistResult(
+            id=42,
+            uuid="1fe19d40-2330-4263-9781-1805ece1d816",
+            state=0,
+            created=False,
+        )
+    )
+    monkeypatch.setattr(session_service, "upsert_active_session", upsert)
+    monkeypatch.setattr(
+        session_service,
+        "get_settings",
+        lambda: SimpleNamespace(orch_billing_snapshot_enabled=False, orch_billing_enabled=False),
+    )
+    monkeypatch.setattr(session_service, "get_current_workspace_schema", lambda: "ws_workspace")
+
+    await session_service.persist_session(
+        _DbSession(),
+        flow_uuid="flow-1",
+        app_name="GenericApp",
+        extracted={
+            "entity": "entity",
+            "entity_type": "type",
+            "entity_address": "address",
+            "entity_session_id": "sid",
+        },
+        payload={"session_scope": "channel", "contact_list_member_id": 10792},
+        channel_scope_contact_list_member_id=10792,
+    )
+
+    assert upsert.await_args.kwargs["channel_scope_contact_list_member_id"] == 10792

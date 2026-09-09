@@ -1,5 +1,40 @@
 # Maintenance Log
 
+## 2026-09-09 — Idempotência de sessão por membro em `channel`
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a perda de uma sessão observada no primeiro canário RCS sem alterar a cardinalidade `person` nem os contratos históricos de callback/unassign. `ALPHA_FIX_REQUIRED`; risco alto por identidade e cardinalidade de sessões, tratado sem migration e restrito ao endpoint manual usado pelo Target Core.
+
+### CAUSE / EVIDENCE
+
+- O mailing `1139` do flow `db24e05d-a36f-49bd-a010-78d457d91cec` materializou 11 membros ativos para duas pessoas; o Target recebeu `202` em todos os 11 POSTs, mas o ORCH criou 10 sessões.
+- O membro RCS `10792` compartilhava pessoa, tipo de entidade e endereço com Voice `10791` e WhatsApp `10793`. O upsert considerava somente `flow + entity + entity_type + entity_address` e reutilizou outra sessão ativa.
+- O membro RCS `10794` criou a sessão `7573`, recebeu `linked_actuator=rcs`, permaneceu bloqueado corretamente e sem alarme. O card RCS não causou a perda; ela ocorreu antes, na persistência da sessão.
+
+### CHANGE
+
+- A rota `/v1/orch/{workspace_uuid}/{flow_uuid}/sessions` extrai um `contact_list_member_id` positivo somente quando o payload declara explicitamente `session_scope=channel`.
+- O serviço repassa essa identidade opt-in ao upsert; chamadas canônicas, `person` e integrações legadas continuam com `None` e preservam a correlação anterior.
+- O upsert mantém o advisory lock e `entity_session_id` históricos, mas filtra qualquer reuso pelo mesmo membro quando o escopo foi ativado.
+- A chave fica preservada em `runtime_variables.session_identity`, com fallback para `input_payload`/`last_payload` das sessões pré-patch. Nenhuma coluna, índice, migration, callback ou contrato de unassign foi alterado.
+
+### VALIDATION
+
+- Unidade de rota/serviço: `17 passed`.
+- PostgreSQL real, sempre em transação revertida: `4 passed`; dois membros no mesmo endereço criam duas sessões, retry do primeiro reutiliza somente a primeira, chamadas sem identidade continuam reutilizando por endereço e os dois caminhos de sessão finalizada do WhatsApp permanecem válidos.
+- Regressão direcionada de repositório/cards: `76 passed`; as 12 falhas adicionais executadas pertencem integralmente à baseline stale de `trigger_orch(flow_uuid=...)` e ocorrem antes do código alterado.
+- Suíte completa fora da sandbox: `628 passed, 27 failed`; os 27 node IDs permanecem nas famílias de baseline já documentadas (assinatura legada do trigger, consultas antigas e um caso WhatsApp sujeito ao estado compartilhado), sem falha nos testes novos.
+- Stack local completa iniciada com filas `f5_local` e escopo explícito do dispatcher e dos três reconciliadores no workspace de teste. A primeira subida detach confirmou R21 ao desaparecer após o wrapper; a repetição em TTY permaneceu ativa, com porta 7777 pertencente a esta worktree, três workers prontos e dois Beats. Readiness confirmou banco/schema/tabela, e o health Celery incluiu os três nodes locais; seu inventário global continua sujeito a R22.
+- Smoke encadeado: sessões `7611`/`7612` terminaram em `state=3`, `ended_at` preenchido, cursor nulo, zero alarmes e `api_call` HTTP 200 em uma tentativa. O destino respondeu `received` com `stream_id` `1413329`/`1413330`.
+- Canário concorrente do endpoint manual: membro `9400021` criou `7617`, membro `9400022` criou `7618` no mesmo flow/pessoa/tipo/endereço, e o retry de `9400021` retornou `7617` com `session_created=false`. Ambas terminaram com identidade e `input_payload` coerentes, cursor nulo e zero alarmes.
+- No shutdown, os pidfiles voltaram a declarar `down` enquanto seis processos-mestre desta worktree estavam órfãos com PPID 1. Todos foram confirmados por `cwd`, encerrados de forma graciosa e a verificação final deixou porta 7777, filas `f5_local` e processos da worktree vazios; nenhuma stack alheia foi tocada.
+- O E2E pós-deploy pelo vínculo real do mailing `1139` permanece pendente; ele deve produzir as 11 identidades de membro sem repetir a sessão do mesmo membro.
+
+### RISK / ROLLBACK
+
+O patch muda somente a escolha da linha que pode ser reutilizada pelo produtor Target em `channel`. Callbacks sem identidade continuam ambíguos diante de sessões paralelas, limitação já registrada em R32; este trabalho não amplia seu contrato. Rollback sem migration: pausar novos vínculos, reverter a mudança e reiniciar API/workers. Sessões e marcadores existentes não devem ser apagados automaticamente.
+
 ## 2026-09-08 — Engine marker-only do card `send_with_rcs`
 
 ### REQUEST / CLASSIFICATION
