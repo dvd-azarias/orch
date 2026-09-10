@@ -550,6 +550,70 @@ async def test_person_selection_unlocks_dialer_with_selected_member(
 
 
 @pytest.mark.asyncio
+async def test_person_selection_unlocks_new_dialer_with_selected_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(session_scope="person")
+    definition = _definition()
+    definition["components"][1] = {
+        "ref_id": SELECTED_REF,
+        "component_id": "send_with_dialer_handoff",
+        "parameters": {
+            "answer_action": "bot",
+            "flow": {"id": "ffffffff-ffff-ffff-ffff-ffffffffffff", "name": "BOT"},
+        },
+    }
+    _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        definition=definition,
+        contact_row=_contact_row(),
+    )
+    selected = _contact_row(
+        member_id=88,
+        channel_type="voice",
+        channel_label="telefone_2",
+        address="5511988880002",
+        is_primary=False,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_select_contact_channel_candidate",
+        AsyncMock(return_value=selected),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "rebind_person_session_to_contact_channel",
+        AsyncMock(return_value=True),
+    )
+    prepare_dialer = AsyncMock(
+        return_value={
+            "contact_list_member_id": 88,
+            "ani": "1147371485",
+            "linked_actuator": "dialer",
+        }
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_prepare_send_with_dialer_handoff_contact_member",
+        prepare_dialer,
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_send_with_dialer_handoff"
+    assert result.last_card_uuid == SELECTED_REF
+    assert prepare_dialer.await_args.kwargs["contact_list_member_id"] == 88
+    assert prepare_dialer.await_args.kwargs["component"]["component_id"] == (
+        "send_with_dialer_handoff"
+    )
+
+
+@pytest.mark.asyncio
 async def test_not_found_revokes_previous_selection_before_communication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

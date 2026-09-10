@@ -153,7 +153,10 @@ async def _resolve_single_send_with_dialer_ref(
     for component in components:
         if not isinstance(component, dict):
             continue
-        if component_kind(component) != "send_with_dialer":
+        if component_kind(component) not in {
+            "send_with_dialer",
+            "send_with_dialer_handoff",
+        }:
             continue
         ref_id = str(component.get("ref_id") or component.get("uuid") or component.get("id") or "").strip()
         if ref_id and ref_id not in send_card_refs:

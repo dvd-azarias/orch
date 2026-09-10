@@ -124,6 +124,32 @@ A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint n
 
 A correlação continua sendo o contrato Alpha preexistente `flow_uuid + entity`, que seleciona uma sessão ativa. Ela não distingue duas sessões simultâneas do mesmo flow e entidade; consulte R32.
 
+### Composição com `send_with_dialer_handoff`
+
+O novo card de discador usa a espera genérica sem transformar a tabulação em responsabilidade do card:
+
+```text
+send_with_dialer_handoff marca linked_actuator=dialer e bloqueia
+  -> Dialer informa answered
+  -> ORCH segue pela saída answered
+  -> wait_for_event(event_name=callback, event_result=tabulation)
+  -> callback grava data.outcome=positive|neutral|negative
+  -> condition escolhe o braço da jornada
+```
+
+O valor público desta composição é `tabulation`, em inglês. `tabulacao` continua reservado ao caminho legado de callback de `run_flow` e não deve ser reutilizado aqui. Para cobrir a corrida em que a tabulação chega depois do início do acionamento, mas antes de o `wait_for_event` ser armado, o novo Dialer fornece ao card um `not_before` igual ao instante de preparação. O card pode então considerar somente callbacks recebidos a partir daquele instante, sem consumir eventos anteriores da sessão. O guard é exclusivo dessa transição; as demais esperas preservam o índice-base histórico.
+
+## Card `send_with_dialer_handoff`
+
+1. É um componente novo e aditivo. `send_with_dialer` continua com o mesmo identificador, configuração, marcador, bloqueio e callbacks.
+2. `answer_action=bot` exige o flow BOT próprio do card. `answer_action=human` exige equipe e canal de atendimento, com `queue_voice_uuid` resolvido pelo Target Core no save.
+3. O ORCH valida novamente a configuração no runtime, grava em `send_with_dialer_handoff_routing` apenas o destino normalizado, assignment e instantes, marca o membro exato com `linked_actuator=dialer` e bloqueia em `state=1`.
+4. Em `session_mode=person`, o card exige `select_contact_channel(voice)` anterior. Em `channel`, preserva o membro/endereço que originou a sessão.
+5. O retorno Dialer usa as mesmas branches normalizadas do componente legado (`answered`, `busy`, `rejected`, `invalid_number`, `no_answer` e `failed`). O destino pós-atendimento não cria uma segunda engine de tabulação.
+6. O Target Core entrega ao consumidor de voz a configuração BOT ou humana. A engine ORCH não chama Runner, Live ou PBX a partir deste card; ela continua sendo a autoridade do marcador e da jornada.
+
+O modo BOT pode reutilizar o consumo já existente de `flow_uuid`, campanha e `runner_token`. O modo humano exige que o consumidor externo reconheça `answer_action.type=human`, use `queue_voice_uuid` e não exija token Runner. Enquanto essa adaptação e um canário PBX não existirem, o envelope humano é contrato preparado, não entrega homologada.
+
 ## Card `split_random`
 
 1. Normaliza os percentuais inteiros de `variant_a` e `variant_b`, aceita os extremos `0/100` e `100/0` e exige soma exatamente igual a 100.

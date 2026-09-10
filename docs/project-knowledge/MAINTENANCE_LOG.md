@@ -1,5 +1,32 @@
 # Maintenance Log
 
+## 2026-09-10 — Engine aditiva `send_with_dialer_handoff`
+
+### REQUEST / CLASSIFICATION
+
+Acrescentar ao blueprint integrado um discador que declare o destino da chamada atendida como BOT ou atendimento humano, preservando integralmente o card de produção `send_with_dialer`. `ALPHA_FIX_OPTIONAL`; risco médio por tocar seleção de membro, bloqueio e retomada Dialer, sem migration nem chamada nova a Runner, Live ou PBX.
+
+### CHANGE
+
+- Novo `component_id=send_with_dialer_handoff`; o legado continua no mesmo caminho e com o mesmo runtime.
+- A engine valida `answer_action=bot|human`, exige flow BOT ou time/canal humano, marca o membro exato com `linked_actuator=dialer` e bloqueia em `blocked_send_with_dialer_handoff`.
+- `session_mode=person` exige seleção `voice` anterior; `channel` preserva o membro de origem.
+- As branches de resultado do Dialer reutilizam o normalizador existente. A saída `answered` pode armar `wait_for_event(callback/tabulation)` e depois avaliar `wait_event.data.outcome`.
+- Um `not_before` restrito à transição novo Dialer→espera cobre callback que chegue entre o início do acionamento e o armamento, sem alterar a baseline das outras esperas.
+- O modo humano permanece bloqueado para homologação até o consumidor externo do envelope de voz reconhecer o descritor e encaminhar por `queue_voice_uuid`; consulte R37.
+
+### VALIDATION
+
+- Testes direcionados ORCH: `185 passed`, cobrindo legado/novo, fail-closed, `person|channel`, marcador, CDR, retomada, callback inglês e a corrida de armamento.
+- Suíte completa ORCH: `664 passed, 28 failed`. As falhas ficaram em testes antigos que chamam `trigger_orch(flow_uuid=...)`, casos dependentes de estado compartilhado do PostgreSQL e famílias já documentadas; nenhum teste afetado pelo novo card falhou.
+- `compileall` e `git diff --check` passaram.
+- A stack local completa foi executada na porta `7788`, com três hostnames e nove filas exclusivas `*_dialer_handoff_local`; o health confirmou API, broker, Beats e os três workers próprios. O smoke canônico criou as sessões `7739` e `7740`; ambas terminaram em `state=3` e permaneceram com zero alarmes. Todos os processos dessa stack foram encerrados depois da coleta.
+- Não houve migration, alteração de flow real, deploy ou chamada do novo card a Runner/Live/PBX. O canário específico depende primeiro da integração coordenada do catálogo e permanece pendente.
+
+### ROLLBACK
+
+Retirar o novo card de flows, reverter somente seu catálogo/engine e reiniciar os serviços afetados. Não modificar nem remover `send_with_dialer`; sessões e marcadores existentes devem ser auditados antes de qualquer compensação de dados.
+
 ## 2026-09-09 — Idempotência de sessão por membro em `channel`
 
 ### REQUEST / CLASSIFICATION
