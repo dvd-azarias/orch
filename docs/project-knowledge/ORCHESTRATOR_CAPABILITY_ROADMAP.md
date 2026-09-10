@@ -30,6 +30,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 7 | `send_with_rcs` | `ALPHA_FIX_OPTIONAL` | Concluído (marker-only) |
 | 8 | `send_with_email` | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
 | 9 | `fail_flow` | A classificar no desenho do envelope | Planejado |
+| F1 | `send_with_dialer_handoff` para o fluxo integrado | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
 
 ## Checklist padrao por card
 
@@ -379,6 +380,26 @@ Contrato em desenvolvimento:
 Ativação futura do envio e das branches permanece proibida por R36 até existir envelope materializado ligado à revisão, credencial protegida, idempotência, claim/ACK/retry e normalização inequívoca dos eventos do provedor.
 
 Rollback: impedir novos usos, auditar sessões bloqueadas e marcadores eventualmente consumidos, reverter catálogo/engine e reiniciar os serviços afetados. Não há migration nem envio externo para compensar.
+
+## Objetivo integrador — fluxo `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`
+
+Objetivo: usar um blueprint real para comprovar a composição dos componentes básicos, corrigindo ou acrescentando somente capacidades genéricas que faltarem. O flow é cenário de aceitação; nenhuma regra específica do cliente deve entrar na engine.
+
+### Adaptação atual: `send_with_dialer_handoff`
+
+- [x] Comparar o requisito com `send_with_dialer`, `run_flow`, `live` e `wait_for_event` existentes.
+- [x] Preservar integralmente o `send_with_dialer` de produção.
+- [x] Definir um novo card com destino pós-atendimento `bot|human` e configuração condicional equivalente aos cards já consolidados.
+- [x] Preparar catálogo, `422` e envelope de voz no Target Core em branch isolada.
+- [x] Preparar engine marker-only, seleção `person|channel`, retomada Dialer e composição com `wait_for_event` no ORCH em branch isolada.
+- [x] Cobrir a corrida `answered`/tabulação sem mudar o comportamento genérico das demais esperas.
+- [ ] Integrar e implantar os patches Target Core e ORCH.
+- [ ] Adaptar o consumidor externo do envelope de voz para o destino humano, preservando o caminho BOT e o Dialer legado.
+- [ ] Inserir o card no flow integrado e configurar os dois destinos em cenários controlados.
+- [ ] Validar E2E: marcador, chamada atendida, BOT ou fila humana, callback `tabulation`, condição `positive|neutral|negative` e continuação até estado terminal.
+- [ ] Retomar a montagem do restante do blueprint a partir do ponto comprovado.
+
+Limite atual: o Target Core e o ORCH podem produzir e executar seus lados do contrato, mas o modo humano não deve ser declarado pronto antes da mudança no consumidor de voz e de um canário PBX. Consulte R37.
 
 ## Backlog avancado
 

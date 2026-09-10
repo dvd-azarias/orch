@@ -62,6 +62,27 @@ def test_finish_flow_does_not_require_cdr_only_because_flow_is_mixed() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "routing_key",
+    ["send_with_dialer_routing", "send_with_dialer_handoff_routing"],
+)
+def test_finish_flow_requires_cdr_for_legacy_and_new_dialer_routing(
+    routing_key: str,
+) -> None:
+    assert (
+        _finish_flow_requires_dialer_cdr(
+            runtime_variables={
+                "source_app": "GenericApp",
+                routing_key: {
+                    "assignment": {"linked_actuator": "dialer", "mode": "dialer"}
+                },
+            },
+            cdr_event=None,
+        )
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_finish_flow_posts_single_cdr_and_clears_it_after_2xx(monkeypatch) -> None:
     cdr = {"hangup": {"Disposition": "ANSWERED", "BillableSeconds": 18}}

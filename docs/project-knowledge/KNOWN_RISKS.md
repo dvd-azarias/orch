@@ -713,3 +713,23 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `EVIDENCE`: a primeira engine possui guard SQL por membro `email`, reentrada `already_marked`, teste que falha se `_http_execute` for chamado e teste PostgreSQL com rollback transacional. Não há envio nem callback E2E nesta entrega.
 
 `V2`: registry de remetentes/conectores, outbox transacional de e-mail e inbox normalizado de eventos de entrega e engajamento.
+
+## R37 — Destino humano do novo Dialer depende do consumidor externo de voz
+
+`STATUS`: OPEN / INTEGRATION GATE
+
+`IMPACT`: high para chamadas configuradas com `answer_action=human`; nenhum impacto esperado no Dialer legado
+
+`PROBABILITY`: certain enquanto o consumidor exigir `runner_token` e sempre iniciar um flow BOT
+
+`AFFECTED AREA`: Target Core `/v1/workspaces/orch-flows` / consumidor externo do envelope de voz / PBX / Live
+
+`DESCRIPTION`: o Target Core já consegue persistir time/canal, resolver `queue_voice_uuid` e publicar um descritor humano sem token Runner. O consumidor externo atualmente conhecido foi construído para o contrato BOT: exige campanha, flow e `runner_token` e inicia o Runner. Se receber o novo envelope sem reconhecer `answer_action.type=human`, pode ignorar o item ou tentar o caminho errado. O ORCH marker-only não transfere áudio e não deve assumir essa responsabilidade.
+
+`MITIGATION`: manter o novo card como desenvolvimento até adaptar o consumidor em mudança isolada. O modo humano deve exigir `queue_voice_uuid`, encaminhar a chamada diretamente à fila PBX/Live e dispensar Runner; o modo BOT e os envelopes sem `answer_action` devem preservar exatamente o caminho existente. Homologar os dois modos antes de introduzir o card no fluxo integrado.
+
+`DETECTION`: contrato automatizado para envelopes legado, BOT e humano; log estruturado da decisão no consumidor; canário que confirme a chamada na fila esperada e a retomada posterior da mesma sessão ORCH; alarme para envelope humano sem `queue_voice_uuid` ou indevidamente enviado ao Runner.
+
+`ROLLBACK`: retirar o novo card dos flows, reverter catálogo/engine/consumidor e reiniciar apenas os serviços afetados. Não alterar nem remover `send_with_dialer`.
+
+`V2`: contrato tipado de handoff de voz com destino discriminado e correlação explícita de sessão/chamada/tabulação.

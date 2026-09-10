@@ -31,6 +31,55 @@ class _DummySession:
         return None
 
 
+def test_english_tabulation_result_remains_a_generic_callback() -> None:
+    assert (
+        orch_trigger_service._is_run_flow_tabulacao_event(
+            {"event_name": "callback", "result": "tabulation"}
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_single_dialer_ref_accepts_new_handoff_card(monkeypatch) -> None:
+    async def _fake_fetch_flow_row(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {"id": "16ce4b08-b756-425a-a56d-a5c861580714"}
+
+    async def _fake_resolve_revision(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={
+                "definition": {
+                    "components": [
+                        {
+                            "ref_id": "dialer-handoff-card-1",
+                            "component": "send_with_dialer_handoff",
+                        }
+                    ]
+                }
+            },
+            source="pinned",
+            requested_revision_id="3cc52a68-47f8-4142-9104-69388c0f274f",
+            failure_reason=None,
+        )
+
+    monkeypatch.setattr(orch_trigger_service, "fetch_flow_row", _fake_fetch_flow_row)
+    monkeypatch.setattr(
+        orch_trigger_service,
+        "resolve_workflow_revision_for_session",
+        _fake_resolve_revision,
+    )
+
+    resolved = await orch_trigger_service._resolve_single_send_with_dialer_ref(
+        _DummySession(),  # type: ignore[arg-type]
+        flow_uuid="0300054c-5f39-4cda-ae88-fe993fd9044b",
+        runtime_variables={
+            "workflow_v2": {"revision_id": "3cc52a68-47f8-4142-9104-69388c0f274f"}
+        },
+    )
+
+    assert resolved == "dialer-handoff-card-1"
+
+
 @pytest.mark.asyncio
 async def test_process_single_payload_discards_whatsapp_status_already_processed(monkeypatch) -> None:
     captured: dict = {}

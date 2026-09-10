@@ -112,6 +112,7 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "send_whatsapp_interactive": "blocked_send_whatsapp_interactive",
     "process_whatsapp_response": "blocked_process_whatsapp_response",
     "send_with_dialer": "blocked_send_with_dialer",
+    "send_with_dialer_handoff": "blocked_send_with_dialer_handoff",
     "send_with_email": "blocked_send_with_email",
     "send_with_rcs": "blocked_send_with_rcs",
     "send_with_sms": "blocked_send_with_sms",
@@ -149,6 +150,7 @@ WHATSAPP_BLOCKING_STOP_REASONS = {
 }
 DIALER_BLOCKING_STOP_REASONS = {
     "blocked_send_with_dialer",
+    "blocked_send_with_dialer_handoff",
     "blocked_process_dialer_response",
 }
 RUN_FLOW_BLOCKING_STOP_REASONS = {
@@ -197,6 +199,10 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "send_with_rcs_contact_not_eligible",
     "send_with_sms_contact_not_eligible",
     "send_with_email_contact_not_eligible",
+    "send_with_dialer_handoff_invalid_answer_action",
+    "send_with_dialer_handoff_missing_flow",
+    "send_with_dialer_handoff_missing_live_channel",
+    "send_with_dialer_handoff_missing_target_queue",
     "split_random_invalid_branches",
     "split_random_invalid_output_var",
     "split_random_invalid_percentage",
@@ -223,6 +229,7 @@ WHATSAPP_HSM_COMPONENT_KINDS = {
 }
 PERSON_SCOPE_CHANNEL_COMPONENT_KINDS = {
     "send_with_dialer",
+    "send_with_dialer_handoff",
     "send_with_email",
     "send_with_rcs",
     "send_with_sms",
@@ -2124,6 +2131,122 @@ async def _prepare_send_with_dialer_contact_member(
     runtime_variables["send_with_dialer_routing"] = {
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if contact_list_member_id is not None and assignment is None:
+        raise WorkflowExecutionError(
+            "contact_member_routing_update_failed",
+            "O membro contextual deixou de estar ativo antes do roteamento Dialer.",
+        )
+    return assignment
+
+
+def _send_with_dialer_handoff_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _catalog_parameter_name(value: Any) -> str | None:
+    if isinstance(value, list):
+        if len(value) != 1:
+            return None
+        return _catalog_parameter_name(value[0])
+    if not isinstance(value, dict):
+        return None
+    raw_name = value.get("name") or value.get("label")
+    name = str(raw_name or "").strip()
+    return name or None
+
+
+def _send_with_dialer_handoff_config(component: dict[str, Any]) -> dict[str, Any]:
+    params = _send_with_dialer_handoff_parameters(component)
+    raw_action = params.get("answer_action")
+    if isinstance(raw_action, list) and len(raw_action) != 1:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_answer_action",
+            "O campo answer_action deve conter uma única opção.",
+        )
+    action = str(_catalog_parameter_scalar(raw_action) or "").strip().lower()
+    if action not in {"bot", "human"}:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_answer_action",
+            "O campo answer_action deve ser bot ou human.",
+        )
+
+    if action == "bot":
+        raw_flow = params.get("flow")
+        if isinstance(raw_flow, list) and len(raw_flow) != 1:
+            raise WorkflowExecutionError(
+                "send_with_dialer_handoff_missing_flow",
+                "Selecione um único fluxo de BOT para a chamada atendida.",
+            )
+        flow_uuid = str(_catalog_parameter_scalar(raw_flow) or "").strip()
+        if not flow_uuid:
+            raise WorkflowExecutionError(
+                "send_with_dialer_handoff_missing_flow",
+                "Selecione o fluxo de BOT para a chamada atendida.",
+            )
+        return {
+            "type": "bot",
+            "flow_uuid": flow_uuid,
+            "flow_name": _catalog_parameter_name(raw_flow),
+        }
+
+    raw_target_queue = params.get("target_queue_id")
+    target_queue_id = str(_catalog_parameter_scalar(raw_target_queue) or "").strip()
+    if not target_queue_id:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_missing_target_queue",
+            "Selecione a equipe que receberá a chamada atendida.",
+        )
+    raw_live_channel = params.get("live_channel_id")
+    live_channel_id = str(_catalog_parameter_scalar(raw_live_channel) or "").strip()
+    if not live_channel_id:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_missing_live_channel",
+            "Selecione o canal do atendimento humano.",
+        )
+    return {
+        "type": "human",
+        "target_queue_id": target_queue_id,
+        "target_queue_name": _catalog_parameter_name(raw_target_queue),
+        "live_channel_id": live_channel_id,
+        "live_channel_name": _catalog_parameter_name(raw_live_channel),
+    }
+
+
+async def _prepare_send_with_dialer_handoff_contact_member(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    session_id: int,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_list_member_id: int | None = None,
+) -> dict[str, Any] | None:
+    answer_action = _send_with_dialer_handoff_config(component)
+    assignment = await assign_dialer_routing_for_session(
+        db_session,
+        flow_uuid=flow_uuid,
+        session_id=session_id,
+        contact_list_member_id=contact_list_member_id,
+    )
+    prepared_at = datetime.now(timezone.utc)
+    runtime_variables["send_with_dialer_handoff_routing"] = {
+        "answer_action": answer_action,
+        "assignment": assignment,
+        "prepared_at": prepared_at.isoformat(),
+        "updated_at": prepared_at.isoformat(),
     }
     if contact_list_member_id is not None and assignment is None:
         raise WorkflowExecutionError(
@@ -4093,6 +4216,12 @@ def _wait_for_event_matching_callback_index(
     timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
     expected_source = str(state.get("event_source") or "").strip().lower()
     expected_result = str(state.get("event_result") or "").strip().lower()
+    not_before = _parse_iso_datetime(state.get("not_before"))
+    not_before_utc = (
+        not_before
+        if not_before is None or not_before.tzinfo is not None
+        else not_before.replace(tzinfo=timezone.utc)
+    )
 
     for index, callback in enumerate(callbacks_pending):
         if index < pending_start_index or not isinstance(callback, dict):
@@ -4105,6 +4234,8 @@ def _wait_for_event_matching_callback_index(
         if received_at is None:
             continue
         received_at_utc = received_at if received_at.tzinfo is not None else received_at.replace(tzinfo=timezone.utc)
+        if not_before_utc is not None and received_at_utc < not_before_utc:
+            continue
         if received_at_utc <= timeout_at_utc:
             return index
     return None
@@ -4168,8 +4299,23 @@ def _run_wait_for_event(
     if raw_state is None:
         callbacks_pending = runtime_variables.get("callbacks_pending")
         pending_start_index = len(callbacks_pending) if isinstance(callbacks_pending, list) else 0
+        activation_override = workflow_meta.pop(
+            "wait_for_event_activation_override",
+            None,
+        )
+        not_before: str | None = None
+        if (
+            isinstance(activation_override, dict)
+            and str(activation_override.get("card_cursor") or "") == current_card_uuid
+        ):
+            override_not_before = _parse_iso_datetime(
+                activation_override.get("not_before")
+            )
+            if override_not_before is not None:
+                pending_start_index = 0
+                not_before = override_not_before.isoformat()
         timeout_at = current_time_utc + timedelta(seconds=timeout_seconds)
-        workflow_meta["wait_for_event"] = {
+        raw_state = {
             "component_ref_id": component.get("ref_id"),
             "card_cursor": current_card_uuid,
             "event_source": event_source,
@@ -4177,12 +4323,13 @@ def _run_wait_for_event(
             "timeout_seconds": timeout_seconds,
             "output_var": output_var,
             "pending_start_index": pending_start_index,
+            "not_before": not_before,
             "blocked_at": current_time_utc.isoformat(),
             "timeout_at": timeout_at.isoformat(),
             "status": "waiting",
         }
+        workflow_meta["wait_for_event"] = raw_state
         runtime_variables.pop("wait_for_event_last_error", None)
-        return _WaitForEventExecution(branch_label=None, timeout_at=timeout_at)
 
     if not isinstance(raw_state, dict):
         raise WorkflowExecutionError(
@@ -6329,6 +6476,8 @@ def _finish_flow_requires_dialer_cdr(
     if str(runtime_variables.get("source_app") or "").strip() == "DialerApp":
         return True
     routing = runtime_variables.get("send_with_dialer_routing")
+    if not isinstance(routing, dict):
+        routing = runtime_variables.get("send_with_dialer_handoff_routing")
     assignment = routing.get("assignment") if isinstance(routing, dict) else None
     if not isinstance(assignment, dict):
         return False
@@ -6749,6 +6898,7 @@ async def execute_workflow_m2_for_session(
             "blocked_send_whatsapp_interactive",
             "blocked_process_whatsapp_response",
             "blocked_send_with_dialer",
+            "blocked_send_with_dialer_handoff",
             "blocked_send_with_rcs",
             "blocked_send_with_sms",
             "blocked_process_dialer_response",
@@ -7182,7 +7332,10 @@ async def execute_workflow_m2_for_session(
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
             elif _should_resume_dialer_blocking_execution(runtime_variables):
-                if blocking_stop_reason == "blocked_send_with_dialer":
+                if blocking_stop_reason in {
+                    "blocked_send_with_dialer",
+                    "blocked_send_with_dialer_handoff",
+                }:
                     resumed_from_card = str(session_state.get("last_card_uuid") or "").strip()
                     if resumed_from_card:
                         current_card_uuid = resumed_from_card
@@ -8133,6 +8286,22 @@ async def execute_workflow_m2_for_session(
                             )
                         else:
                             should_block_execution = False
+                    elif kind == "send_with_dialer_handoff":
+                        branch_label = _resolve_send_with_dialer_branch_label(
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
+                        if branch_label is None:
+                            await _prepare_send_with_dialer_handoff_contact_member(
+                                db_session=db_session,
+                                flow_uuid=flow_uuid,
+                                session_id=session_id,
+                                component=component,
+                                runtime_variables=runtime_variables,
+                                contact_list_member_id=routing_contact_list_member_id,
+                            )
+                        else:
+                            should_block_execution = False
                     elif kind == "send_with_sms":
                         assignment = await _prepare_send_with_sms_contact_member(
                             db_session=db_session,
@@ -8723,6 +8892,24 @@ async def execute_workflow_m2_for_session(
                 )
             else:
                 resolved_next = resolve_next_card_uuid(definition, current)
+
+            if kind == "send_with_dialer_handoff" and branch_label == "answered":
+                next_component = components.get(resolved_next) if resolved_next else None
+                routing = runtime_variables.get("send_with_dialer_handoff_routing")
+                prepared_at = (
+                    routing.get("prepared_at") if isinstance(routing, dict) else None
+                )
+                if (
+                    isinstance(next_component, dict)
+                    and component_kind(next_component) == "wait_for_event"
+                    and _parse_iso_datetime(prepared_at) is not None
+                ):
+                    workflow_meta = _ensure_workflow_meta(runtime_variables)
+                    workflow_meta["wait_for_event_activation_override"] = {
+                        "card_cursor": resolved_next,
+                        "not_before": prepared_at,
+                        "source_component_ref_id": component.get("ref_id"),
+                    }
 
             last_card_uuid = current
             next_card_uuid = resolved_next

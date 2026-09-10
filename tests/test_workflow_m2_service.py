@@ -37,6 +37,7 @@ from app.services.workflow_m2_service import (
     _prepare_send_with_whatsapp_contact_member,
     _prepare_send_whatsapp_template_contact_member,
     _prepare_send_with_dialer_contact_member,
+    _prepare_send_with_dialer_handoff_contact_member,
     _read_blocking_stop_reason,
     _read_whatsapp_last_preempt_signature,
     _read_whatsapp_resume_cursor,
@@ -52,6 +53,7 @@ from app.services.workflow_m2_service import (
     _read_loop_guard_repeat_threshold,
     _read_session_scope,
     _resolve_send_with_dialer_branch_label,
+    _send_with_dialer_handoff_config,
     _resolved_contact_member_id_for_routing,
     _run_process_dialer_response,
     _run_run_flow,
@@ -85,6 +87,10 @@ def test_blocking_stop_reason_for_whatsapp_components() -> None:
     assert _blocking_stop_reason_for_component("send_whatsapp_interactive") == "blocked_send_whatsapp_interactive"
     assert _blocking_stop_reason_for_component("process_whatsapp_response") == "blocked_process_whatsapp_response"
     assert _blocking_stop_reason_for_component("send_with_dialer") == "blocked_send_with_dialer"
+    assert (
+        _blocking_stop_reason_for_component("send_with_dialer_handoff")
+        == "blocked_send_with_dialer_handoff"
+    )
     assert _blocking_stop_reason_for_component("process_dialer_response") == "blocked_process_dialer_response"
     assert _blocking_stop_reason_for_component("run_flow") == "blocked_run_flow"
     assert _blocking_stop_reason_for_component("switch_bot_flow") == "blocked_switch_bot_flow"
@@ -1732,6 +1738,133 @@ async def test_prepare_send_with_dialer_fails_when_resolved_member_becomes_inact
     assert exc.value.code == "contact_member_routing_update_failed"
 
 
+@pytest.mark.parametrize(
+    ("parameters", "expected"),
+    [
+        (
+            {
+                "answer_action": {"id": "bot", "name": "Entregar para BOT"},
+                "flow": {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "name": "BOT Cobrança",
+                },
+            },
+            {
+                "type": "bot",
+                "flow_uuid": "11111111-1111-1111-1111-111111111111",
+                "flow_name": "BOT Cobrança",
+            },
+        ),
+        (
+            [
+                {"id": "answer_action", "value": "human"},
+                {
+                    "id": "target_queue_id",
+                    "value": {"id": "team-1", "name": "Cobrança"},
+                },
+                {
+                    "id": "live_channel_id",
+                    "value": {"id": "channel-voice", "name": "Voz"},
+                },
+            ],
+            {
+                "type": "human",
+                "target_queue_id": "team-1",
+                "target_queue_name": "Cobrança",
+                "live_channel_id": "channel-voice",
+                "live_channel_name": "Voz",
+            },
+        ),
+    ],
+)
+def test_send_with_dialer_handoff_config_normalizes_catalog_shapes(
+    parameters: object,
+    expected: dict[str, object],
+) -> None:
+    component = {
+        "ref_id": "dialer-handoff-1",
+        "component_id": "send_with_dialer_handoff",
+        "parameters": parameters,
+    }
+
+    assert _send_with_dialer_handoff_config(component) == expected
+
+
+@pytest.mark.parametrize(
+    ("parameters", "expected_code"),
+    [
+        ({}, "send_with_dialer_handoff_invalid_answer_action"),
+        ({"answer_action": "bot"}, "send_with_dialer_handoff_missing_flow"),
+        (
+            {"answer_action": "human", "live_channel_id": "voice"},
+            "send_with_dialer_handoff_missing_target_queue",
+        ),
+        (
+            {"answer_action": "human", "target_queue_id": "team-1"},
+            "send_with_dialer_handoff_missing_live_channel",
+        ),
+    ],
+)
+def test_send_with_dialer_handoff_config_fails_closed(
+    parameters: dict[str, object],
+    expected_code: str,
+) -> None:
+    with pytest.raises(WorkflowExecutionError) as exc:
+        _send_with_dialer_handoff_config(
+            {
+                "ref_id": "dialer-handoff-1",
+                "component_id": "send_with_dialer_handoff",
+                "parameters": parameters,
+            }
+        )
+
+    assert exc.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action(
+    monkeypatch,
+) -> None:
+    runtime_variables: dict[str, object] = {}
+
+    async def fake_assign(*_args, **kwargs):
+        assert kwargs["contact_list_member_id"] == 10655
+        return {
+            "contact_list_member_id": 10655,
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_routing_for_session",
+        fake_assign,
+    )
+    component = {
+        "ref_id": "dialer-handoff-1",
+        "component_id": "send_with_dialer_handoff",
+        "parameters": {
+            "answer_action": "human",
+            "target_queue_id": {"id": "team-1", "name": "Cobrança"},
+            "live_channel_id": {"id": "channel-voice", "name": "Voz"},
+        },
+    }
+
+    assignment = await _prepare_send_with_dialer_handoff_contact_member(
+        db_session=None,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        session_id=6937,
+        component=component,
+        runtime_variables=runtime_variables,
+        contact_list_member_id=10655,
+    )
+
+    assert assignment is not None
+    routing = runtime_variables["send_with_dialer_handoff_routing"]
+    assert routing["assignment"]["linked_actuator"] == "dialer"
+    assert routing["answer_action"]["type"] == "human"
+
+
 def test_should_resume_whatsapp_blocking_execution_when_status_or_message_or_pending() -> None:
     runtime_variables = {
         "workflow_v2": {
@@ -1782,11 +1915,17 @@ def test_should_resume_whatsapp_blocking_execution_when_status_or_message_or_pen
     assert _should_resume_whatsapp_blocking_execution(runtime_variables) is False
 
 
-def test_should_resume_dialer_blocking_execution_only_when_status_available() -> None:
+@pytest.mark.parametrize(
+    "blocking_stop_reason",
+    ["blocked_send_with_dialer", "blocked_send_with_dialer_handoff"],
+)
+def test_should_resume_dialer_blocking_execution_only_when_status_available(
+    blocking_stop_reason: str,
+) -> None:
     runtime_variables = {
         "workflow_v2": {
             "blocking_execution": True,
-            "blocking_stop_reason": "blocked_send_with_dialer",
+            "blocking_stop_reason": blocking_stop_reason,
         },
         "last_payload": {
             "hangup": {

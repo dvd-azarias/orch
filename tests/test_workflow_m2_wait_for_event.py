@@ -14,6 +14,7 @@ REVISION_UUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 SESSION_UUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 WAIT_REF = "11111111-1111-1111-1111-111111111111"
 FINISH_REF = "22222222-2222-2222-2222-222222222222"
+DIALER_REF = "33333333-3333-3333-3333-333333333333"
 
 
 class _Transaction:
@@ -101,6 +102,7 @@ def _configure_execution(
     runtime: dict,
     frozen_until: datetime | None,
     last_card_uuid: str | None = None,
+    next_card_uuid: str = WAIT_REF,
 ) -> tuple[list[dict], AsyncMock]:
     persisted: list[dict] = []
     clear_frozen = AsyncMock()
@@ -128,7 +130,7 @@ def _configure_execution(
                 "state": 0,
                 "runtime_variables": runtime,
                 "last_card_uuid": last_card_uuid,
-                "next_card_uuid": WAIT_REF,
+                "next_card_uuid": next_card_uuid,
                 "frozen_until": frozen_until,
             }
         ),
@@ -181,6 +183,121 @@ def test_wait_for_event_rejects_invalid_runtime_configuration(parameters: dict, 
         workflow._wait_for_event_config(component)
 
     assert exc_info.value.code == error_code
+
+
+def test_wait_for_event_consumes_callback_that_raced_after_new_dialer_started() -> None:
+    prepared_at = datetime(2026, 9, 10, 15, 0, tzinfo=timezone.utc)
+    now = prepared_at + timedelta(seconds=5)
+    runtime = _runtime()
+    runtime["workflow_v2"]["wait_for_event_activation_override"] = {
+        "card_cursor": WAIT_REF,
+        "not_before": prepared_at.isoformat(),
+        "source_component_ref_id": "dialer-handoff-1",
+    }
+    stale_callback = {
+        "event_name": "callback",
+        "entity": "person-1",
+        "result": "approved",
+        "received_at": (prepared_at - timedelta(seconds=1)).isoformat(),
+        "data": {"stale": True},
+    }
+    raced_callback = {
+        "event_name": "callback",
+        "entity": "person-1",
+        "result": "approved",
+        "received_at": (prepared_at + timedelta(seconds=1)).isoformat(),
+        "data": {"outcome": "positive"},
+    }
+    runtime["callbacks_pending"] = [stale_callback, raced_callback]
+
+    result = workflow._run_wait_for_event(
+        component=_component(),
+        current_card_uuid=WAIT_REF,
+        runtime_variables=runtime,
+        now=now,
+    )
+
+    assert result.branch_label == "received"
+    assert runtime["callbacks_pending"] == [stale_callback]
+    assert runtime["variables"]["customs"]["wait_event"]["data"] == {
+        "outcome": "positive"
+    }
+    assert "wait_for_event" not in runtime["workflow_v2"]
+    assert "wait_for_event_activation_override" not in runtime["workflow_v2"]
+
+
+@pytest.mark.asyncio
+async def test_answered_new_dialer_composes_with_wait_and_raced_tabulation(
+    monkeypatch,
+) -> None:
+    prepared_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    runtime = _runtime()
+    runtime["workflow_v2"].update(
+        {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+            "next_card_cursor": WAIT_REF,
+        }
+    )
+    runtime["send_with_dialer_handoff_routing"] = {
+        "prepared_at": prepared_at.isoformat(),
+        "answer_action": {
+            "type": "bot",
+            "flow_uuid": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        },
+        "assignment": {"linked_actuator": "dialer"},
+    }
+    runtime["last_payload"] = {
+        "hangup": {"Disposition": "ANSWERED", "Cause": "16"}
+    }
+    runtime["callbacks_pending"] = [
+        {
+            "event_name": "callback",
+            "entity": "person-1",
+            "result": "tabulation",
+            "received_at": (prepared_at + timedelta(seconds=2)).isoformat(),
+            "data": {"outcome": "positive"},
+        }
+    ]
+    definition = {
+        "components": [
+            {
+                "ref_id": DIALER_REF,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                },
+            },
+            _component(event_result="tabulation"),
+            {"ref_id": FINISH_REF, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": DIALER_REF, "to": WAIT_REF, "branch": "answered"},
+            {"from": WAIT_REF, "to": FINISH_REF, "branch": "received"},
+        ],
+    }
+    _configure_execution(
+        monkeypatch,
+        definition=definition,
+        runtime=runtime,
+        frozen_until=None,
+        last_card_uuid=DIALER_REF,
+        next_card_uuid=WAIT_REF,
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    assert runtime["variables"]["customs"]["wait_event"]["data"] == {
+        "outcome": "positive"
+    }
+    assert runtime["callbacks_pending"] == []
+    assert "wait_for_event_activation_override" not in runtime["workflow_v2"]
 
 
 @pytest.mark.asyncio
