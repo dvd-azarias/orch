@@ -2,7 +2,7 @@
 
 ## 2026-09-11 — Planos preparados invalidados apos migration do Target Core
 
-`STATUS`: FIX VALIDATED LOCALLY / PRODUCTION ROLLOUT PENDING
+`STATUS`: FOLLOW-UP FIX VALIDATED / PRODUCTION ROLLOUT PENDING
 
 `SEVERITY`: high
 
@@ -14,16 +14,17 @@
 - A auditoria encontrou 209 ocorrencias anteriores ao deploy do novo card e novas ocorrencias depois dele; portanto, a falha foi causada pela alteracao de schema, nao pelo `send_with_dialer_handoff`.
 - O ORCH ja usava `NullPool` e `statement_cache_size=0`, mas esse parametro desativava somente o cache interno do `asyncpg`. O dialeto asyncpg do SQLAlchemy mantinha seu cache separado de prepared statements no default 100 e podia reutilizar um plano anterior ao DDL.
 - Health de API/Celery permaneceu verde porque nao executa uma query representativa do workflow.
+- O primeiro hotfix desativou o cache do dialeto e foi implantado no `main` `695f941`, mas processos novos ainda falharam: houve 88 linhas de traceback depois do corte dos cinco workers, com erro ate 09:34:13, apesar de 2.898 tasks `advance_session` terem concluido no mesmo intervalo.
+- A consulta representativa isolada passou, mas uma matriz pelo PgBouncer real, com cinco rodadas nos 59 workspaces concluidos, reproduziu `237` invalidacoes em `295` operacoes com nomes padrão. A mesma matriz completou `295/295` usando prepared statement anonimo.
 
 ### Correcao
 
 - A conexao passa a declarar tambem `prepared_statement_cache_size=0`, mantendo inalterados DSN, `NullPool`, `search_path`, transacoes e queries.
-- Nomes UUID/aleatorios de prepared statements nao foram introduzidos: alem de desnecessarios para a excecao observada, poderiam acumular statements no PgBouncer se o ambiente nao executar `DISCARD` ao devolver conexoes.
+- O follow-up define `prepared_statement_name_func=lambda: ""`. O statement anonimo elimina a identidade persistente que permitia ao backend compartilhado reutilizar um plano de outro cliente/workspace, sem introduzir o acúmulo potencial de nomes UUID.
 
 ### Validacao e pendencias
 
-- Em PostgreSQL 16 isolado, a configuracao anterior falhou depois de `ALTER TABLE` no mesmo `SELECT *`; com o cache do dialeto desativado, a consulta e mais 20 reconexoes passaram. A variante adicional com prepared statement sem nome nao trouxe beneficio e foi descartada.
-- Repetir uma consulta representativa pelo PgBouncer real quando a VPN estiver disponivel.
+- Em PostgreSQL 16 isolado, desativar o cache do dialeto eliminou a invalidação por DDL no mesmo cliente. No PgBouncer real e multi-workspace, somente o statement anonimo eliminou todas as invalidacoes da matriz controlada.
 - Depois do merge, reiniciar os processos ORCH que usam banco e auditar recorrencia, sessoes pendentes, alarmes e metricas; o health isolado nao encerra a verificacao.
 
 ## 2026-09-06 — `api_call_missing_url` amplificado pelo reconciliador de eventos
