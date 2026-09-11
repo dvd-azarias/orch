@@ -17,6 +17,10 @@ def get_engine() -> AsyncEngine:
         "echo": settings.database_echo,
         "pool_pre_ping": False,
         "connect_args": {
+            # SQLAlchemy's asyncpg dialect keeps its own prepared-statement cache,
+            # separate from asyncpg's statement cache. Both must remain disabled
+            # behind PgBouncer because Target Core applies DDL out of process.
+            "prepared_statement_cache_size": 0,
             "statement_cache_size": 0,
             "server_settings": {
                 "application_name": "orch",

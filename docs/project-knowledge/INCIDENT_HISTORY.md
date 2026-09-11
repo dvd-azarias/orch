@@ -1,5 +1,31 @@
 # Historico de Incidentes
 
+## 2026-09-11 — Planos preparados invalidados apos migration do Target Core
+
+`STATUS`: FIX VALIDATED LOCALLY / PRODUCTION ROLLOUT PENDING
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+### Evidencia e causa
+
+- Depois da migration que acrescentou `contact_list_members.list_validity`, tasks `advance_session` continuaram falhando com `asyncpg.exceptions.InvalidCachedStatementError` mesmo apos restart dos workers.
+- A auditoria encontrou 209 ocorrencias anteriores ao deploy do novo card e novas ocorrencias depois dele; portanto, a falha foi causada pela alteracao de schema, nao pelo `send_with_dialer_handoff`.
+- O ORCH ja usava `NullPool` e `statement_cache_size=0`, mas esse parametro desativava somente o cache interno do `asyncpg`. O dialeto asyncpg do SQLAlchemy mantinha seu cache separado de prepared statements no default 100 e podia reutilizar um plano anterior ao DDL.
+- Health de API/Celery permaneceu verde porque nao executa uma query representativa do workflow.
+
+### Correcao
+
+- A conexao passa a declarar tambem `prepared_statement_cache_size=0`, mantendo inalterados DSN, `NullPool`, `search_path`, transacoes e queries.
+- Nomes UUID/aleatorios de prepared statements nao foram introduzidos: alem de desnecessarios para a excecao observada, poderiam acumular statements no PgBouncer se o ambiente nao executar `DISCARD` ao devolver conexoes.
+
+### Validacao e pendencias
+
+- Em PostgreSQL 16 isolado, a configuracao anterior falhou depois de `ALTER TABLE` no mesmo `SELECT *`; com o cache do dialeto desativado, a consulta e mais 20 reconexoes passaram. A variante adicional com prepared statement sem nome nao trouxe beneficio e foi descartada.
+- Repetir uma consulta representativa pelo PgBouncer real quando a VPN estiver disponivel.
+- Depois do merge, reiniciar os processos ORCH que usam banco e auditar recorrencia, sessoes pendentes, alarmes e metricas; o health isolado nao encerra a verificacao.
+
 ## 2026-09-06 — `api_call_missing_url` amplificado pelo reconciliador de eventos
 
 `STATUS`: ACTIVE WHEN OBSERVED / FIX VALIDATED LOCALLY

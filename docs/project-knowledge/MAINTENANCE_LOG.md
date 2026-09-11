@@ -1,5 +1,24 @@
 # Maintenance Log
 
+## 2026-09-11 — Cache de prepared statements asyncpg/PgBouncer
+
+### REQUEST / CLASSIFICATION
+
+Eliminar `InvalidCachedStatementError` observado no workflow depois de DDL do Target Core. `ALPHA_FIX_REQUIRED`; mudanca global de conexao, porem cirurgica, sem migration e sem alteracao de regra funcional.
+
+### CAUSE / CHANGE
+
+- `statement_cache_size=0` cobria o cache do driver, mas nao o cache separado do dialeto SQLAlchemy, cujo default instalado era 100.
+- Adicionado somente `prepared_statement_cache_size=0` aos `connect_args`; `NullPool`, DSN, transacoes, filas e queries permanecem iguais.
+- Teste unitario fixa o contrato dos dois caches e do `NullPool`.
+
+### VALIDATION / ROLLOUT
+
+- Regressao dirigida do contrato de conexao, tasks, dispatcher e engine: `142 passed`; `compileall` e `git diff --check` passaram.
+- Prova controlada em PostgreSQL 16 descartavel: a configuracao anterior falhou depois de DDL; somente `prepared_statement_cache_size=0` eliminou a falha e passou outras 20 reconexoes. A tabela efemera e o container foram removidos ao final.
+- Prova pelo PgBouncer real, PR e rollout permanecem pendentes porque a VPN ficou indisponivel durante esta etapa.
+- Rollback: reverter apenas este commit e reiniciar os processos ORCH; nao ha dado nem schema a compensar.
+
 ## 2026-09-11 — Vigência da lista no `send_with_dialer_handoff`
 
 ### REQUEST / CLASSIFICATION
