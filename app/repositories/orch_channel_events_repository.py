@@ -398,6 +398,16 @@ async def list_stale_pending_channel_event_sessions(
                   AND candidate_session.state IN (0, 1, 2)
                   AND candidate_session.ended_at IS NULL
                   AND candidate_session.unassigned_at IS NULL
+                  -- The dialer CDR remains pending while the generic wait owns
+                  -- resumption; finish_flow consumes it after that wait resolves.
+                  AND NOT (
+                      e.channel = 'dialer'
+                      AND COALESCE(
+                          candidate_session.runtime_variables
+                              #>> '{workflow_v2,blocking_stop_reason}',
+                          ''
+                      ) = 'blocked_wait_for_event'
+                  )
                 GROUP BY e.session_id
                 ORDER BY oldest_pending_at ASC
                 LIMIT :limit

@@ -199,3 +199,20 @@ async def test_stale_pending_event_candidates_filter_terminal_sessions_before_li
         "LIMIT :limit"
     )
     assert session.parameters == {"stale_seconds": 30, "limit": 200}
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_dialer_event_does_not_wake_generic_wait() -> None:
+    session = _Session(rows=[])
+
+    rows = await list_stale_pending_channel_event_sessions(
+        session,  # type: ignore[arg-type]
+        stale_seconds=30,
+        limit=200,
+    )
+
+    assert rows == []
+    assert "e.channel = 'dialer'" in session.statement
+    assert "{workflow_v2,blocking_stop_reason}" in session.statement
+    assert "= 'blocked_wait_for_event'" in session.statement
+    assert "AND NOT (" in session.statement
