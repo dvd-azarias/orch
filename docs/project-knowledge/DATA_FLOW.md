@@ -143,10 +143,11 @@ O valor público desta composição é `tabulation`, em inglês. `tabulacao` con
 
 1. É um componente novo e aditivo. `send_with_dialer` continua com o mesmo identificador, configuração, marcador, bloqueio e callbacks.
 2. `answer_action=bot` exige o flow BOT próprio do card. `answer_action=human` exige equipe e canal de atendimento, com `queue_voice_uuid` resolvido pelo Target Core no save.
-3. O ORCH valida novamente a configuração no runtime, grava em `send_with_dialer_handoff_routing` apenas o destino normalizado, assignment e instantes, marca o membro exato com `linked_actuator=dialer` e bloqueia em `state=1`.
+3. O ORCH valida novamente a configuração no runtime e, em uma única escrita sobre o membro exato, marca `linked_actuator=dialer` e materializa `list_validity`. `indefinite` grava `NULL`; `link_date` grava D0; `days_after_link` grava D+N, sempre a partir do `flow_mailing_links.linked_at` ativo convertido para `America/Sao_Paulo`.
 4. Em `session_mode=person`, o card exige `select_contact_channel(voice)` anterior. Em `channel`, preserva o membro/endereço que originou a sessão.
-5. O retorno Dialer usa as mesmas branches normalizadas do componente legado (`answered`, `busy`, `rejected`, `invalid_number`, `no_answer` e `failed`). O destino pós-atendimento não cria uma segunda engine de tabulação.
-6. O Target Core entrega ao consumidor de voz a configuração BOT ou humana. A engine ORCH não chama Runner, Live ou PBX a partir deste card; ela continua sendo a autoridade do marcador e da jornada.
+5. Configuração ausente preserva a vigência indefinida para definitions anteriores. Modalidade limitada sem vínculo ativo falha de forma terminal antes de deixar atuador ou data parcialmente gravados. Datas PostgreSQL retornadas ao runtime são serializadas em ISO.
+6. `send_with_dialer_handoff_routing` registra destino, política normalizada, assignment e instantes. O retorno Dialer usa as mesmas branches normalizadas (`answered`, `busy`, `rejected`, `invalid_number`, `no_answer` e `failed`); o destino pós-atendimento não cria uma segunda engine de tabulação.
+7. O Target Core entrega ao consumidor de voz a configuração BOT ou humana. A engine ORCH não chama Runner, Live ou PBX a partir deste card; ela continua sendo a autoridade do marcador e da jornada.
 
 O modo BOT pode reutilizar o consumo já existente de `flow_uuid`, campanha e `runner_token`. O modo humano exige que o consumidor externo reconheça `answer_action.type=human`, use `queue_voice_uuid` e não exija token Runner. Enquanto essa adaptação e um canário PBX não existirem, o envelope humano é contrato preparado, não entrega homologada.
 
