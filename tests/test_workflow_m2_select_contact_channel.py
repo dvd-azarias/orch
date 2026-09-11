@@ -614,6 +614,66 @@ async def test_person_selection_unlocks_new_dialer_with_selected_member(
 
 
 @pytest.mark.asyncio
+async def test_channel_scope_new_dialer_routes_non_voice_member_to_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(session_scope="channel")
+    runtime["input_payload"]["channel_type"] = "whatsapp"
+    definition = {
+        "components": [
+            {
+                "ref_id": SELECT_REF,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": {
+                        "id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                        "name": "BOT",
+                    },
+                },
+            },
+            {
+                "ref_id": SELECTED_REF,
+                "component_id": "finish_flow",
+                "parameters": {},
+            },
+        ],
+        "branches": [
+            {"from": SELECT_REF, "to": SELECTED_REF, "branch": "failed"},
+        ],
+    }
+    _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        definition=definition,
+        contact_row=_contact_row(
+            channel_type="whatsapp",
+            channel_label="celular",
+        ),
+    )
+    prepare_dialer = AsyncMock()
+    monkeypatch.setattr(
+        workflow,
+        "_prepare_send_with_dialer_handoff_contact_member",
+        prepare_dialer,
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    prepare_dialer.assert_not_awaited()
+    assert runtime["dialer_last_response"]["branch"] == "failed"
+    assert (
+        runtime["send_with_dialer_handoff_last_error"]["code"]
+        == "send_with_dialer_handoff_unsupported_channel_type"
+    )
+
+
+@pytest.mark.asyncio
 async def test_not_found_revokes_previous_selection_before_communication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

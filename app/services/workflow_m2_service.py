@@ -2253,7 +2253,47 @@ async def _prepare_send_with_dialer_handoff_contact_member(
             "contact_member_routing_update_failed",
             "O membro contextual deixou de estar ativo antes do roteamento Dialer.",
         )
+    runtime_variables.pop("send_with_dialer_handoff_last_error", None)
     return assignment
+
+
+def _route_send_with_dialer_handoff_ineligible_channel(
+    *,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+) -> str | None:
+    channel_type = _normalize_channel_type(
+        contact_row.get("contact_channel_type")
+        if isinstance(contact_row, dict)
+        else None
+    )
+    if channel_type == "voice":
+        return None
+
+    updated_at = datetime.now(timezone.utc)
+    reason = "unsupported_channel_type"
+    runtime_variables["send_with_dialer_handoff_routing"] = {
+        "answer_action": _send_with_dialer_handoff_config(component),
+        "assignment": None,
+        "skipped_reason": reason,
+        "channel_type": channel_type,
+        "updated_at": updated_at.isoformat(),
+    }
+    runtime_variables["send_with_dialer_handoff_last_error"] = {
+        "component_ref_id": component.get("ref_id"),
+        "code": "send_with_dialer_handoff_unsupported_channel_type",
+        "message": "O canal em foco não é elegível para discagem.",
+        "channel_type": channel_type,
+        "updated_at": updated_at.isoformat(),
+    }
+    runtime_variables["dialer_last_response"] = {
+        "component_ref_id": component.get("ref_id"),
+        "status": "failed",
+        "branch": "failed",
+        "reason": reason,
+    }
+    return "failed"
 
 
 async def _prepare_send_with_sms_contact_member(
@@ -8292,14 +8332,22 @@ async def execute_workflow_m2_for_session(
                             runtime_variables=runtime_variables,
                         )
                         if branch_label is None:
-                            await _prepare_send_with_dialer_handoff_contact_member(
-                                db_session=db_session,
-                                flow_uuid=flow_uuid,
-                                session_id=session_id,
+                            branch_label = _route_send_with_dialer_handoff_ineligible_channel(
                                 component=component,
                                 runtime_variables=runtime_variables,
-                                contact_list_member_id=routing_contact_list_member_id,
+                                contact_row=contact_runtime_context,
                             )
+                            if branch_label is None:
+                                await _prepare_send_with_dialer_handoff_contact_member(
+                                    db_session=db_session,
+                                    flow_uuid=flow_uuid,
+                                    session_id=session_id,
+                                    component=component,
+                                    runtime_variables=runtime_variables,
+                                    contact_list_member_id=routing_contact_list_member_id,
+                                )
+                            else:
+                                should_block_execution = False
                         else:
                             should_block_execution = False
                     elif kind == "send_with_sms":

@@ -53,6 +53,7 @@ from app.services.workflow_m2_service import (
     _read_loop_guard_repeat_threshold,
     _read_session_scope,
     _resolve_send_with_dialer_branch_label,
+    _route_send_with_dialer_handoff_ineligible_channel,
     _send_with_dialer_handoff_config,
     _resolved_contact_member_id_for_routing,
     _run_process_dialer_response,
@@ -1863,6 +1864,54 @@ async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action
     routing = runtime_variables["send_with_dialer_handoff_routing"]
     assert routing["assignment"]["linked_actuator"] == "dialer"
     assert routing["answer_action"]["type"] == "human"
+
+
+@pytest.mark.parametrize("channel_type", ["whatsapp", "rcs", "email", None])
+def test_send_with_dialer_handoff_routes_non_voice_channel_to_failed(
+    channel_type: str | None,
+) -> None:
+    runtime_variables: dict[str, object] = {}
+    branch = _route_send_with_dialer_handoff_ineligible_channel(
+        component={
+            "ref_id": "dialer-handoff-1",
+            "component_id": "send_with_dialer_handoff",
+            "parameters": {
+                "answer_action": "bot",
+                "flow": "11111111-1111-1111-1111-111111111111",
+            },
+        },
+        runtime_variables=runtime_variables,
+        contact_row=(
+            {"contact_channel_type": channel_type}
+            if channel_type is not None
+            else None
+        ),
+    )
+
+    assert branch == "failed"
+    assert runtime_variables["send_with_dialer_handoff_routing"]["assignment"] is None
+    assert runtime_variables["send_with_dialer_handoff_routing"]["channel_type"] == channel_type
+    assert runtime_variables["dialer_last_response"] == {
+        "component_ref_id": "dialer-handoff-1",
+        "status": "failed",
+        "branch": "failed",
+        "reason": "unsupported_channel_type",
+    }
+    assert (
+        runtime_variables["send_with_dialer_handoff_last_error"]["code"]
+        == "send_with_dialer_handoff_unsupported_channel_type"
+    )
+
+
+def test_send_with_dialer_handoff_accepts_voice_channel() -> None:
+    runtime_variables: dict[str, object] = {}
+
+    assert _route_send_with_dialer_handoff_ineligible_channel(
+        component={"component_id": "send_with_dialer_handoff"},
+        runtime_variables=runtime_variables,
+        contact_row={"contact_channel_type": "phone"},
+    ) is None
+    assert runtime_variables == {}
 
 
 def test_should_resume_whatsapp_blocking_execution_when_status_or_message_or_pending() -> None:
