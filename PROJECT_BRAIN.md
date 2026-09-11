@@ -108,6 +108,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 
 ## Invariantes criticas
 
+- Com PgBouncer, `NullPool`, o cache de statements do `asyncpg` e o cache de prepared statements do dialeto SQLAlchemy devem permanecer desativados; migrations externas podem invalidar planos sem derrubar o health de API/Celery.
 - `entity_origin_app` e origem historica; o evento corrente esta em `runtime_variables.source_app` e snapshots.
 - `unassigned_at IS NOT NULL` impede reuso normal.
 - `finish_flow` deve deixar `state=3`, `ended_at` preenchido e `next_card_uuid=NULL`.
