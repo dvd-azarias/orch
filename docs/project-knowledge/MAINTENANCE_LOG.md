@@ -1,5 +1,33 @@
 # Maintenance Log
 
+## 2026-09-11 — Vigência da lista no `send_with_dialer_handoff`
+
+### REQUEST / CLASSIFICATION
+
+Permitir que somente o novo card de Discador limite a seleção de contatos à data do vínculo ou a D+N, sem alterar o `send_with_dialer` legado. `ALPHA_FIX_OPTIONAL`; risco médio por escrita em objeto compartilhado e dependência coordenada de migration/Supplier no Target Core.
+
+### CHANGE
+
+- O runtime ausente continua sendo `indefinite`, mantendo definitions anteriores em `list_validity=NULL`.
+- Um caminho de repositório exclusivo do novo card grava `linked_actuator=dialer` e `list_validity` juntos; a função compartilhada pelo card legado não foi modificada.
+- D0/D+N usam o `flow_mailing_links.linked_at` ativo do mesmo flow, mailing e contact list, convertido para `America/Sao_Paulo`. Vínculo limitado ausente não produz escrita parcial.
+- A política normalizada e a data ISO retornada pelo banco ficam no runtime para diagnóstico; falhas determinísticas terminalizam com alarme específico.
+
+### VALIDATION
+
+- Inventário somente leitura confirmou `list_validity DATE NULL` sem default nos 59 workspaces ativos, inclusive pela conexão usada pelo ORCH.
+- Testes direcionados de engine: `175 passed`.
+- Teste PostgreSQL em tabelas temporárias: `2 passed`; cobriu D+N na fronteira UTC/Brasília, limpeza para indefinida e ausência de escrita com vínculo inativo.
+- Após o fast-forward para o `main` `5f093bd`, a regressão dirigida de engine ficou em `148 passed` e o teste PostgreSQL específico de vigência passou isoladamente. O teste legado vizinho continuou sujeito ao `InvalidCachedStatementError` conhecido de tabelas temporárias.
+- Suíte completa ORCH pós-fast-forward: `684 passed, 28 failed`. As mesmas 28 falhas permanecem nas famílias de baseline documentadas (assinatura antiga de `trigger_orch`, estado compartilhado do PostgreSQL, planos invalidados de tabelas temporárias e um caso WhatsApp); nenhum teste novo falhou.
+- A stack local completa subiu com as filas isoladas `f5_local`; API e os três grupos de workers/beats ficaram prontos. Após o fast-forward, o smoke canônico criou as sessões `7845` e `7846`, ambas aceitas pela API e concluídas em `state=3` com `ended_at`. O script oficial declarou todos os componentes `down`, mas deixou processos-mestre órfãos desta worktree; eles foram conferidos pelo executável/filas, encerrados graciosamente com `SIGTERM` e a verificação final deixou a porta 7777 e os processos locais vazios.
+- O Supplier, incorporado separadamente no Target Core pelo PR `#481`, passou `76` testes após o merge da migration e uma prova PostgreSQL revertida: `NULL`, hoje e futuro foram selecionados; ontem foi excluído em initialize, seleção Dialer e seleção simples.
+- Catálogo/422 preparado separadamente passou `44` testes. Deploy, fluxo real e canário permanecem pendentes.
+
+### ROLLBACK
+
+Reverter catálogo, engine e filtro do Supplier nesta ordem lógica; a coluna nullable pode permanecer inerte. Não alterar o `send_with_dialer` legado nem apagar membros/sessões automaticamente.
+
 ## 2026-09-10 — Engine aditiva `send_with_dialer_handoff`
 
 ### REQUEST / CLASSIFICATION

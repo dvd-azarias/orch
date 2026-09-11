@@ -55,6 +55,7 @@ from app.repositories.orch_channel_events_repository import (
     mark_channel_event_processed,
 )
 from app.repositories.orch_sessions_repository import (
+    assign_dialer_handoff_routing_for_session,
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
     clear_session_frozen_until,
@@ -130,6 +131,12 @@ SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
 SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email", "rcs"}
 SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
+DIALER_HANDOFF_LIST_VALIDITY_MODES = {
+    "indefinite",
+    "link_date",
+    "days_after_link",
+}
+DIALER_HANDOFF_LIST_VALIDITY_MAX_DAYS = 3650
 
 WHATSAPP_RESPONSE_BRANCH_BY_STATUS = {
     "sent": "sent",
@@ -200,6 +207,9 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "send_with_sms_contact_not_eligible",
     "send_with_email_contact_not_eligible",
     "send_with_dialer_handoff_invalid_answer_action",
+    "send_with_dialer_handoff_invalid_list_validity_days",
+    "send_with_dialer_handoff_invalid_list_validity_mode",
+    "send_with_dialer_handoff_list_validity_update_failed",
     "send_with_dialer_handoff_missing_flow",
     "send_with_dialer_handoff_missing_live_channel",
     "send_with_dialer_handoff_missing_target_queue",
@@ -2225,6 +2235,59 @@ def _send_with_dialer_handoff_config(component: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _send_with_dialer_handoff_list_validity_config(
+    component: dict[str, Any],
+) -> dict[str, Any]:
+    params = _send_with_dialer_handoff_parameters(component)
+    if "list_validity_mode" not in params:
+        return {"mode": "indefinite", "days": None}
+
+    raw_mode = params.get("list_validity_mode")
+    if isinstance(raw_mode, list) and len(raw_mode) != 1:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_list_validity_mode",
+            "O campo list_validity_mode deve conter uma única opção.",
+        )
+    mode = str(_catalog_parameter_scalar(raw_mode) or "").strip().lower()
+    if mode not in DIALER_HANDOFF_LIST_VALIDITY_MODES:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_list_validity_mode",
+            "O campo list_validity_mode deve ser indefinite, link_date ou days_after_link.",
+        )
+
+    if mode == "indefinite":
+        return {"mode": mode, "days": None}
+    if mode == "link_date":
+        return {"mode": mode, "days": 0}
+
+    raw_days = params.get("list_validity_days")
+    if isinstance(raw_days, list) and len(raw_days) != 1:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_list_validity_days",
+            "O campo list_validity_days deve conter um único número inteiro.",
+        )
+    scalar_days = _catalog_parameter_scalar(raw_days)
+    if isinstance(scalar_days, bool):
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_list_validity_days",
+            "O campo list_validity_days deve ser um número inteiro positivo.",
+        )
+    try:
+        numeric_days = float(str(scalar_days).strip())
+    except (TypeError, ValueError):
+        numeric_days = math.nan
+    if (
+        not math.isfinite(numeric_days)
+        or not numeric_days.is_integer()
+        or not 1 <= numeric_days <= DIALER_HANDOFF_LIST_VALIDITY_MAX_DAYS
+    ):
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_list_validity_days",
+            "O campo list_validity_days deve ser um inteiro entre 1 e 3650.",
+        )
+    return {"mode": mode, "days": int(numeric_days)}
+
+
 async def _prepare_send_with_dialer_handoff_contact_member(
     *,
     db_session: AsyncSession,
@@ -2235,23 +2298,30 @@ async def _prepare_send_with_dialer_handoff_contact_member(
     contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
     answer_action = _send_with_dialer_handoff_config(component)
-    assignment = await assign_dialer_routing_for_session(
+    list_validity = _send_with_dialer_handoff_list_validity_config(component)
+    assignment = await assign_dialer_handoff_routing_for_session(
         db_session,
         flow_uuid=flow_uuid,
         session_id=session_id,
+        list_validity_mode=str(list_validity["mode"]),
+        list_validity_days=int(list_validity["days"] or 0),
         contact_list_member_id=contact_list_member_id,
     )
     prepared_at = datetime.now(timezone.utc)
     runtime_variables["send_with_dialer_handoff_routing"] = {
         "answer_action": answer_action,
+        "list_validity": list_validity,
         "assignment": assignment,
         "prepared_at": prepared_at.isoformat(),
         "updated_at": prepared_at.isoformat(),
     }
-    if contact_list_member_id is not None and assignment is None:
+    if assignment is None:
         raise WorkflowExecutionError(
-            "contact_member_routing_update_failed",
-            "O membro contextual deixou de estar ativo antes do roteamento Dialer.",
+            "send_with_dialer_handoff_list_validity_update_failed",
+            (
+                "O membro contextual ou o vínculo ativo da lista deixou de estar "
+                "disponível antes do roteamento Dialer."
+            ),
         )
     runtime_variables.pop("send_with_dialer_handoff_last_error", None)
     return assignment

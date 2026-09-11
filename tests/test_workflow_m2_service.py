@@ -55,6 +55,7 @@ from app.services.workflow_m2_service import (
     _resolve_send_with_dialer_branch_label,
     _route_send_with_dialer_handoff_ineligible_channel,
     _send_with_dialer_handoff_config,
+    _send_with_dialer_handoff_list_validity_config,
     _resolved_contact_member_id_for_routing,
     _run_process_dialer_response,
     _run_run_flow,
@@ -262,6 +263,9 @@ def test_contact_member_terminal_failures_have_inline_alarms() -> None:
     person_scope_alarm = m2_alarm_from_stopped_reason(
         "person_scope_channel_component_not_supported"
     )
+    list_validity_alarm = m2_alarm_from_stopped_reason(
+        "send_with_dialer_handoff_list_validity_update_failed"
+    )
 
     assert scope_alarm == (
         "error",
@@ -277,6 +281,14 @@ def test_contact_member_terminal_failures_have_inline_alarms() -> None:
         "error",
         "workflow_m2_person_scope_channel_component_not_supported",
         "Sessão por pessoa encerrada ao alcançar comunicação sem seleção explícita de canal.",
+    )
+    assert list_validity_alarm == (
+        "error",
+        "workflow_m2_send_with_dialer_handoff_list_validity_update_failed",
+        (
+            "Sessão encerrada porque a configuração, o membro ou o vínculo "
+            "da lista não permaneceu elegível para o handoff do Dialer."
+        ),
     )
 
 
@@ -1822,6 +1834,96 @@ def test_send_with_dialer_handoff_config_fails_closed(
     assert exc.value.code == expected_code
 
 
+@pytest.mark.parametrize(
+    ("parameters", "expected"),
+    [
+        ({}, {"mode": "indefinite", "days": None}),
+        (
+            {"list_validity_mode": {"id": "indefinite", "name": "Indefinida"}},
+            {"mode": "indefinite", "days": None},
+        ),
+        (
+            {"list_validity_mode": "link_date"},
+            {"mode": "link_date", "days": 0},
+        ),
+        (
+            {
+                "list_validity_mode": [
+                    {"id": "days_after_link", "name": "Por N dias"}
+                ],
+                "list_validity_days": "3",
+            },
+            {"mode": "days_after_link", "days": 3},
+        ),
+    ],
+)
+def test_send_with_dialer_handoff_list_validity_normalizes_catalog_shapes(
+    parameters: object,
+    expected: dict[str, object],
+) -> None:
+    component = {
+        "ref_id": "dialer-handoff-1",
+        "component_id": "send_with_dialer_handoff",
+        "parameters": parameters,
+    }
+
+    assert _send_with_dialer_handoff_list_validity_config(component) == expected
+
+
+@pytest.mark.parametrize(
+    ("parameters", "expected_code"),
+    [
+        (
+            {"list_validity_mode": "tomorrow"},
+            "send_with_dialer_handoff_invalid_list_validity_mode",
+        ),
+        (
+            {"list_validity_mode": ["indefinite", "link_date"]},
+            "send_with_dialer_handoff_invalid_list_validity_mode",
+        ),
+        (
+            {"list_validity_mode": "days_after_link"},
+            "send_with_dialer_handoff_invalid_list_validity_days",
+        ),
+        (
+            {
+                "list_validity_mode": "days_after_link",
+                "list_validity_days": 0,
+            },
+            "send_with_dialer_handoff_invalid_list_validity_days",
+        ),
+        (
+            {
+                "list_validity_mode": "days_after_link",
+                "list_validity_days": 1.5,
+            },
+            "send_with_dialer_handoff_invalid_list_validity_days",
+        ),
+        (
+            {
+                "list_validity_mode": "days_after_link",
+                "list_validity_days": 3651,
+            },
+            "send_with_dialer_handoff_invalid_list_validity_days",
+        ),
+    ],
+)
+def test_send_with_dialer_handoff_list_validity_fails_closed(
+    parameters: dict[str, object],
+    expected_code: str,
+) -> None:
+    with pytest.raises(WorkflowExecutionError) as exc:
+        _send_with_dialer_handoff_list_validity_config(
+            {
+                "ref_id": "dialer-handoff-1",
+                "component_id": "send_with_dialer_handoff",
+                "parameters": parameters,
+            }
+        )
+
+    assert exc.value.code == expected_code
+
+
 @pytest.mark.asyncio
 async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action(
     monkeypatch,
@@ -1830,15 +1932,18 @@ async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action
 
     async def fake_assign(*_args, **kwargs):
         assert kwargs["contact_list_member_id"] == 10655
+        assert kwargs["list_validity_mode"] == "days_after_link"
+        assert kwargs["list_validity_days"] == 2
         return {
             "contact_list_member_id": 10655,
             "linked_actuator": "dialer",
             "mode": "dialer",
+            "list_validity": "2026-09-13",
         }
 
     monkeypatch.setattr(
         workflow_m2_service,
-        "assign_dialer_routing_for_session",
+        "assign_dialer_handoff_routing_for_session",
         fake_assign,
     )
     component = {
@@ -1848,6 +1953,8 @@ async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action
             "answer_action": "human",
             "target_queue_id": {"id": "team-1", "name": "Cobrança"},
             "live_channel_id": {"id": "channel-voice", "name": "Voz"},
+            "list_validity_mode": "days_after_link",
+            "list_validity_days": 2,
         },
     }
 
@@ -1864,6 +1971,42 @@ async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action
     routing = runtime_variables["send_with_dialer_handoff_routing"]
     assert routing["assignment"]["linked_actuator"] == "dialer"
     assert routing["answer_action"]["type"] == "human"
+    assert routing["list_validity"] == {"mode": "days_after_link", "days": 2}
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_with_dialer_handoff_fails_without_active_link(
+    monkeypatch,
+) -> None:
+    async def fake_assign(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    component = {
+        "ref_id": "dialer-handoff-1",
+        "component_id": "send_with_dialer_handoff",
+        "parameters": {
+            "answer_action": "bot",
+            "flow": "11111111-1111-1111-1111-111111111111",
+            "list_validity_mode": "link_date",
+        },
+    }
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _prepare_send_with_dialer_handoff_contact_member(
+            db_session=None,
+            flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+            session_id=6937,
+            component=component,
+            runtime_variables={},
+            contact_list_member_id=10655,
+        )
+
+    assert exc.value.code == "send_with_dialer_handoff_list_validity_update_failed"
 
 
 @pytest.mark.parametrize("channel_type", ["whatsapp", "rcs", "email", None])

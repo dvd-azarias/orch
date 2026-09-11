@@ -2356,6 +2356,107 @@ async def assign_dialer_routing_for_session(
     }
 
 
+async def assign_dialer_handoff_routing_for_session(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+    list_validity_mode: str,
+    list_validity_days: int,
+    contact_list_member_id: int | None = None,
+) -> dict[str, Any] | None:
+    parameters: dict[str, Any] = {
+        "flow_uuid": flow_uuid,
+        "session_id": session_id,
+        "list_validity_mode": list_validity_mode,
+        "list_validity_days": list_validity_days,
+    }
+    member_filter = ""
+    if contact_list_member_id is not None:
+        member_filter = "\n              AND clm.id = :contact_list_member_id"
+        parameters["contact_list_member_id"] = contact_list_member_id
+
+    result = await db_session.execute(
+        text(
+            f"""
+            WITH target AS (
+                SELECT
+                    clm.id,
+                    fml.linked_at
+                FROM contact_list_members clm
+                JOIN orch_sessions os
+                  ON os.entity = clm.contact_identifier
+                LEFT JOIN flow_mailing_links fml
+                  ON fml.flow_id = os.flow_uuid
+                 AND fml.mailing_id = clm.mailing_id
+                 AND fml.contact_list_id = clm.contact_list_id
+                 AND fml.unlinked_at IS NULL
+                WHERE os.id = :session_id
+                  AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                  AND os.unassigned_at IS NULL
+                  AND clm.unassigned_at IS NULL{member_filter}
+                  AND (
+                        :list_validity_mode = 'indefinite'
+                        OR fml.linked_at IS NOT NULL
+                  )
+                ORDER BY clm.created_at DESC, clm.id DESC
+                LIMIT 1
+                FOR UPDATE OF clm
+            )
+            UPDATE contact_list_members clm
+            SET
+                linked_actuator = 'dialer',
+                list_validity = CASE
+                    WHEN :list_validity_mode = 'indefinite' THEN NULL::date
+                    ELSE (
+                        target.linked_at AT TIME ZONE 'America/Sao_Paulo'
+                    )::date + CAST(:list_validity_days AS integer)
+                END,
+                updated_at = NOW()
+            FROM target
+            WHERE clm.id = target.id
+              AND clm.unassigned_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM orch_sessions os
+                  WHERE os.id = :session_id
+                    AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                    AND os.unassigned_at IS NULL
+                    AND os.entity = clm.contact_identifier
+              )
+            RETURNING
+                clm.id,
+                clm.ani,
+                clm.linked_actuator,
+                clm.list_validity,
+                target.linked_at
+            """
+        ),
+        parameters,
+    )
+    row = result.mappings().first()
+    if row is None:
+        return None
+
+    list_validity = row["list_validity"]
+    linked_at = row["linked_at"]
+    return {
+        "contact_list_member_id": int(row["id"]),
+        "ani": row["ani"],
+        "linked_actuator": row["linked_actuator"],
+        "mode": "dialer",
+        "consumption": None,
+        "list_validity": (
+            list_validity.isoformat()
+            if hasattr(list_validity, "isoformat")
+            else list_validity
+        ),
+        "mailing_linked_at": (
+            linked_at.isoformat() if hasattr(linked_at, "isoformat") else linked_at
+        ),
+    }
+
+
 async def fetch_contact_runtime_context_for_session(
     db_session: AsyncSession,
     *,
