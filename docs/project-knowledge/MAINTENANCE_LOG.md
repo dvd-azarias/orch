@@ -9,14 +9,17 @@ Eliminar `InvalidCachedStatementError` observado no workflow depois de DDL do Ta
 ### CAUSE / CHANGE
 
 - `statement_cache_size=0` cobria o cache do driver, mas nao o cache separado do dialeto SQLAlchemy, cujo default instalado era 100.
-- Adicionado somente `prepared_statement_cache_size=0` aos `connect_args`; `NullPool`, DSN, transacoes, filas e queries permanecem iguais.
-- Teste unitario fixa o contrato dos dois caches e do `NullPool`.
+- O primeiro patch adicionou `prepared_statement_cache_size=0`, mas a producao mostrou que nomes gerados por cliente ainda permitiam ao backend PgBouncer reutilizar planos entre workspaces.
+- O follow-up adiciona `prepared_statement_name_func=lambda: ""`; `NullPool`, DSN, transacoes, filas e queries permanecem iguais.
+- Teste unitario fixa o contrato dos dois caches, statement anonimo e `NullPool`.
 
 ### VALIDATION / ROLLOUT
 
 - Regressao dirigida do contrato de conexao, tasks, dispatcher e engine: `142 passed`; `compileall` e `git diff --check` passaram.
 - Prova controlada em PostgreSQL 16 descartavel: a configuracao anterior falhou depois de DDL; somente `prepared_statement_cache_size=0` eliminou a falha e passou outras 20 reconexoes. A tabela efemera e o container foram removidos ao final.
-- Prova pelo PgBouncer real, PR e rollout permanecem pendentes porque a VPN ficou indisponivel durante esta etapa.
+- O primeiro rollout avancou 136 e 237 para `695f941`, preservou os `.env` byte a byte e reiniciou API e cinco workers. Mesmo assim, processos novos ainda emitiram 88 linhas da excecao depois do corte, ate 09:34:13.
+- Matriz transacional pelo PgBouncer real: nomes padrão produziram `58 ok / 237 invalid_cached`; statements anonimos produziram `295 ok / 0 erros` nos mesmos 59 workspaces. Todas as operacoes usaram IDs impossiveis e `ROLLBACK`.
+- PR e rollout do follow-up permanecem pendentes.
 - Rollback: reverter apenas este commit e reiniciar os processos ORCH; nao ha dado nem schema a compensar.
 
 ## 2026-09-11 — Vigência da lista no `send_with_dialer_handoff`

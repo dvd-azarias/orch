@@ -39,4 +39,7 @@ def test_asyncpg_statement_caches_are_disabled_for_pgbouncer(monkeypatch) -> Non
     assert isinstance(connect_args, dict)
     assert connect_args["statement_cache_size"] == 0
     assert connect_args["prepared_statement_cache_size"] == 0
+    statement_name_func = connect_args["prepared_statement_name_func"]
+    assert callable(statement_name_func)
+    assert statement_name_func() == ""
     assert connect_args["server_settings"] == {"application_name": "orch"}

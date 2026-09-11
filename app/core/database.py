@@ -21,6 +21,10 @@ def get_engine() -> AsyncEngine:
             # separate from asyncpg's statement cache. Both must remain disabled
             # behind PgBouncer because Target Core applies DDL out of process.
             "prepared_statement_cache_size": 0,
+            # PgBouncer serves many workspace schemas through shared backends.
+            # Unnamed statements prevent a backend plan prepared under one
+            # search_path from being reused by another client/workspace.
+            "prepared_statement_name_func": lambda: "",
             "statement_cache_size": 0,
             "server_settings": {
                 "application_name": "orch",

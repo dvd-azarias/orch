@@ -4,7 +4,7 @@
 
 - SQLAlchemy async + `asyncpg`.
 - `NullPool` e o default; pool local e configuravel.
-- Atraves do PgBouncer, os dois caches de statements ficam desativados: `asyncpg.statement_cache_size=0` e `SQLAlchemy prepared_statement_cache_size=0`. Isso evita reutilizar planos preparados depois de DDL executado por outro processo, como migrations do Target Core.
+- Atraves do PgBouncer, os dois caches de statements ficam desativados (`asyncpg.statement_cache_size=0` e `SQLAlchemy prepared_statement_cache_size=0`) e o dialeto usa prepared statements anonimos (`prepared_statement_name_func=lambda: ""`). O conjunto evita reutilizar planos depois de DDL externo ou entre clientes/workspaces servidos pelo mesmo backend.
 - Cada request/task seleciona `ws_<workspace_uuid>` via `search_path`.
 - A dependency HTTP commita ao final e faz rollback em excecao.
 - Nao existem models ORM declarativos; o schema real esta em SQL textual e migrations.
