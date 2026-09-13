@@ -11,7 +11,10 @@ from app.repositories.orch_sessions_repository import (
     mark_session_finished,
     set_session_state,
 )
-from app.services.workflow_m2_service import execute_workflow_m2_for_session
+from app.services.workflow_m2_service import (
+    RESTRICTION_LIST_CHECK_ERROR_CODES,
+    execute_workflow_m2_for_session,
+)
 from app.services.workflow_runtime_service import bootstrap_workflow_for_session
 
 logger = get_logger(__name__)
@@ -63,7 +66,7 @@ TERMINAL_FAILURE_STOP_REASONS = {
     "wait_for_event_invalid_timeout_seconds",
     "wait_for_event_invalid_output_var",
     "wait_for_event_state_mismatch",
-}
+} | RESTRICTION_LIST_CHECK_ERROR_CODES
 FATAL_NON_RESUMABLE_STOP_REASONS = {
     "flow_not_found",
     "revision_not_found",

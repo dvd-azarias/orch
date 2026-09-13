@@ -23,6 +23,10 @@
 - `app/repositories/send_with_email_repository.py`: marcação transacional e idempotente do membro `email` exato com `linked_actuator=email`, sem materializar conteúdo ou enviar mensagem.
 - `app/services/workflow_runtime_service.py`: bootstrap M1.
 - `app/services/workflow_m2_service.py`: motor e componentes.
+- `app/services/restriction_list_check_service.py`: cliente autenticado do
+  evaluator de Listas de Restrição no perfil Supplier do Target Core; valida o
+  envelope integralmente, remove campos não permitidos e nunca converte falha
+  em liberação.
 - `app/services/identidade_person_service.py`: cliente fixo da Identidade.io, validação, normalização e merge de pessoa.
 - `app/services/identidade_person_flow_link_service.py`: contrato autenticado e idempotente para o Target Core confirmar mailing→flow sem fan-out de sessões.
 - `app/repositories/identidade_person_repository.py`: persistência transacional de `persons`, associação idempotente a `source_lists` e mudança protegida do estado materializado pessoa/lista no flow atual, compartilhada pelos cards `identidade_person` e `source_list_membership`.

@@ -82,6 +82,13 @@ Defaults importantes:
 
 - Files: `ARQUIVOS_*` e `SYNC_WS_*`.
 - Target Core: `SYNC_WEBHOOK_BASE_URL`, bearer configuravel e timeout `SYNC_WS_TIMEOUT_SECONDS`.
+- Listas de Restrição: `TARGET_CORE_SUPPLIER_API_BASE_URL` deve apontar para o
+  processo Supplier, não para o CRUD. A autenticação reutiliza
+  `TARGET_CORE_API_BEARER_TOKEN`; timeout, tentativas e backoff usam
+  `RESTRICTION_LIST_CHECK_HTTP_TIMEOUT_SECONDS` (default `5`),
+  `RESTRICTION_LIST_CHECK_MAX_ATTEMPTS` (default `2`, máximo `5`) e
+  `RESTRICTION_LIST_CHECK_RETRY_BACKOFF_SECONDS` (default `0.25`). A URL é
+  obrigatória quando o card for usado e exige restart de API/workers.
 - `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 
