@@ -78,6 +78,32 @@ A garantia forte vale para revisoes publicadas. O fallback historico para draft 
 como o Target Core edita o draft existente, uma sessao fixada em draft ainda pode observar alteracoes sob
 o mesmo `revision_id`.
 
+## Card `check_restriction_lists`
+
+1. O card recebe uma ou mais Listas de Restrição ativas, o escopo
+   `person|current_channel` e uma variável de saída opcional.
+2. Em `person`, o ORCH envia somente o `person_uuid`; o perfil Supplier carrega
+   e avalia os identificadores autorizados da pessoa. Em `current_channel`, o
+   ORCH envia o tipo e endereço do membro exato em execução.
+3. A chamada autenticada usa
+   `POST /v2/contact-supplier/restrictions/evaluate` no endpoint exclusivo do
+   perfil Supplier. O ORCH não lê as tabelas do domínio e não envia a definição
+   do flow ao Target Core.
+4. Resposta consistente `restricted` percorre somente o branch `restricted`;
+   `allowed` percorre somente `allowed`. O runtime recebe o resumo seguro e as
+   ocorrências mascaradas, nunca o valor bruto consultado.
+5. Lista ausente/inativa, contexto insuficiente, HTTP não exitoso,
+   indisponibilidade ou envelope inconsistente são falhas terminais. Esses
+   caminhos não possuem branch de exceção e nunca liberam o contato.
+
+```text
+check_restriction_lists
+  -> Target Core SUPPLIER /v2/contact-supplier/restrictions/evaluate
+     -> restricted -> branch Restrito
+     -> allowed    -> branch Liberado
+     -> falha      -> sessão terminal + alarme, sem liberação
+```
+
 ## Card `identidade_person`
 
 1. Renderiza `document` com o runtime e valida CPF de 11 dígitos, UUID do workspace, token e enums do envelope.

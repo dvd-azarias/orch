@@ -132,6 +132,10 @@ class Settings:
     sync_ws_timeout_seconds: float
     target_core_api_base_url: str | None
     target_core_api_bearer_token: str | None
+    target_core_supplier_api_base_url: str | None
+    restriction_list_check_http_timeout_seconds: float
+    restriction_list_check_max_attempts: int
+    restriction_list_check_retry_backoff_seconds: float
     switch_bot_flow_enabled: bool
     switch_bot_flow_http_timeout_seconds: float
     switch_bot_flow_max_attempts: int
@@ -607,6 +611,31 @@ def get_settings() -> Settings:
         target_core_api_bearer_token=(
             _read_env_optional("TARGET_CORE_API_BEARER_TOKEN")
             or _read_env_optional("SYNC_WEBHOOK_BEARER_TOKEN")
+        ),
+        target_core_supplier_api_base_url=_read_env_optional(
+            "TARGET_CORE_SUPPLIER_API_BASE_URL"
+        ),
+        restriction_list_check_http_timeout_seconds=max(
+            1.0,
+            float(
+                _read_env_optional(
+                    "RESTRICTION_LIST_CHECK_HTTP_TIMEOUT_SECONDS", "5"
+                )
+                or "5"
+            ),
+        ),
+        restriction_list_check_max_attempts=max(
+            1,
+            min(_read_env_int("RESTRICTION_LIST_CHECK_MAX_ATTEMPTS", 2), 5),
+        ),
+        restriction_list_check_retry_backoff_seconds=max(
+            0.0,
+            float(
+                _read_env_optional(
+                    "RESTRICTION_LIST_CHECK_RETRY_BACKOFF_SECONDS", "0.25"
+                )
+                or "0.25"
+            ),
         ),
         switch_bot_flow_enabled=_read_env_bool("SWITCH_BOT_FLOW_ENABLED", False),
         switch_bot_flow_http_timeout_seconds=float(

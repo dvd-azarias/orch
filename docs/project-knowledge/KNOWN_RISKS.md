@@ -733,3 +733,43 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 `ROLLBACK`: retirar o novo card dos flows, reverter catálogo/engine/consumidor e reiniciar apenas os serviços afetados. Não alterar nem remover `send_with_dialer`.
 
 `V2`: contrato tipado de handoff de voz com destino discriminado e correlação explícita de sessão/chamada/tabulação.
+
+## R38 — Consulta de restrição pode liberar indevidamente se falha técnica virar decisão de negócio
+
+`STATUS`: MITIGATED IN IMPLEMENTATION / DEPLOY AND E2E PENDING
+
+`IMPACT`: critical
+
+`PROBABILITY`: low com o contrato fail-closed; high se o evaluator for chamado
+no perfil errado ou se erros forem roteados para `allowed`
+
+`AFFECTED AREA`: `check_restriction_lists` / ORCH M2 / Target Core Supplier /
+acionamentos posteriores do flow
+
+`DESCRIPTION`: uma consulta não confirmada não prova que a pessoa ou o canal
+está liberado. O perfil CRUD não expõe o evaluator e devolve `405`; usar sua
+URL, aceitar resposta parcial ou transformar timeout/erro em `allowed` faria o
+fluxo continuar sem decisão confiável.
+
+`MITIGATION`: usar `TARGET_CORE_SUPPLIER_API_BASE_URL` explícita; validar
+decisão, booleano, ocorrências, todas as listas avaliadas e identificadores da
+resposta; preservar somente campos mascarados; aplicar retry limitado apenas a
+erros transitórios; terminalizar e alarmar qualquer falha sem branch de
+exceção.
+
+`DETECTION`: alarmes `workflow_m2_check_restriction_lists_*`, logs estruturados
+sem endereço/identificador, teste de indisponibilidade e canário periódico com
+um canal restrito e um controle liberado.
+
+`EVIDENCE`: em 2026-09-13, o cliente ORCH real encontrou `405` ao apontar para o
+CRUD, falhou fechado e, depois de receber a URL do processo Supplier no `.239`,
+confirmou `restricted` com uma ocorrência mascarada e `allowed` sem ocorrência,
+ambos na primeira tentativa. As suítes focadas e de regressão passaram; falta o
+E2E pelo canvas após merge/deploy.
+
+`ROLLBACK`: remover o card dos flows, reverter catálogo/engine e reiniciar os
+serviços afetados. As Listas de Restrição e o legado permanecem inertes e
+inalterados.
+
+`V2`: policy engine central com disponibilidade, circuit breaker, trilha de
+decisão e contratos tipados de negação por padrão.

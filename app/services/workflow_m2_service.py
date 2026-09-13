@@ -89,6 +89,10 @@ from app.services.identidade_person_service import (
 )
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
+from app.services.restriction_list_check_service import (
+    RestrictionListCheckError,
+    evaluate_restriction_lists,
+)
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.switch_bot_flow_service import (
     SwitchBotFlowError,
@@ -131,6 +135,9 @@ SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
 SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email", "rcs"}
 SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
+CHECK_RESTRICTION_LISTS_SCOPES = {"person", "current_channel"}
+CHECK_RESTRICTION_LISTS_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+CHECK_RESTRICTION_LISTS_MAX_LISTS = 100
 DIALER_HANDOFF_LIST_VALIDITY_MODES = {
     "indefinite",
     "link_date",
@@ -194,6 +201,16 @@ LOOP_GUARD_LAST_TRANSITION_KEY = "last_transition_signature"
 POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 TERMINAL_WORKFLOW_ERROR_CODES = {
     "api_call_missing_url",
+    "check_restriction_lists_invalid_evaluation_scope",
+    "check_restriction_lists_invalid_list_ids",
+    "check_restriction_lists_invalid_output_var",
+    "check_restriction_lists_missing_channel",
+    "check_restriction_lists_missing_person_uuid",
+    "check_restriction_lists_supplier_base_url_missing",
+    "check_restriction_lists_target_core_bearer_missing",
+    "check_restriction_lists_target_core_http_error",
+    "check_restriction_lists_target_core_invalid_response",
+    "check_restriction_lists_target_core_unavailable",
     "condition_branch_not_mapped",
     "contact_member_routing_update_failed",
     "person_scope_channel_component_not_supported",
@@ -228,6 +245,11 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "wait_for_event_invalid_timeout_seconds",
     "wait_for_event_invalid_output_var",
     "wait_for_event_state_mismatch",
+}
+RESTRICTION_LIST_CHECK_ERROR_CODES = {
+    code
+    for code in TERMINAL_WORKFLOW_ERROR_CODES
+    if code.startswith("check_restriction_lists_")
 }
 WHATSAPP_HSM_ERROR_CODES = {
     code for code in TERMINAL_WORKFLOW_ERROR_CODES if code.startswith("whatsapp_hsm_")
@@ -4237,6 +4259,175 @@ async def _run_select_contact_channel(
     return _SelectContactChannelExecution("selected", dict(candidate))
 
 
+def _check_restriction_lists_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _check_restriction_lists_ids(value: Any) -> list[str]:
+    selected: Any = value
+    if isinstance(selected, dict):
+        for key in ("in_use", "selected", "items", "value"):
+            if key in selected:
+                selected = selected.get(key)
+                break
+        else:
+            selected = [selected]
+    if selected in (None, "", [], {}):
+        raise WorkflowExecutionError(
+            "check_restriction_lists_invalid_list_ids",
+            "Selecione ao menos uma Lista de Restrição ativa.",
+        )
+    if not isinstance(selected, list):
+        selected = [selected]
+
+    normalized: list[str] = []
+    for item in selected:
+        candidate = item
+        if isinstance(candidate, dict):
+            for key in ("id", "uuid", "value"):
+                if key in candidate:
+                    candidate = candidate.get(key)
+                    break
+        try:
+            normalized.append(str(UUID(str(candidate).strip())))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise WorkflowExecutionError(
+                "check_restriction_lists_invalid_list_ids",
+                "As Listas de Restrição devem possuir UUIDs válidos.",
+            ) from exc
+    if (
+        not normalized
+        or len(normalized) > CHECK_RESTRICTION_LISTS_MAX_LISTS
+        or len(normalized) != len(set(normalized))
+    ):
+        raise WorkflowExecutionError(
+            "check_restriction_lists_invalid_list_ids",
+            "Selecione de uma a 100 Listas de Restrição, sem duplicidades.",
+        )
+    return normalized
+
+
+def _check_restriction_lists_config(
+    component: dict[str, Any],
+) -> tuple[list[str], str, str]:
+    params = _check_restriction_lists_parameters(component)
+    restriction_list_ids = _check_restriction_lists_ids(
+        params.get("restriction_list_ids")
+    )
+    evaluation_scope = str(
+        _catalog_parameter_scalar(params.get("evaluation_scope")) or ""
+    ).strip().lower()
+    if evaluation_scope not in CHECK_RESTRICTION_LISTS_SCOPES:
+        raise WorkflowExecutionError(
+            "check_restriction_lists_invalid_evaluation_scope",
+            "O campo evaluation_scope deve ser person ou current_channel.",
+        )
+
+    output_var = str(
+        _catalog_parameter_scalar(params.get("output_var")) or "restriction_check"
+    ).strip()
+    if (
+        len(output_var) > 128
+        or _TEMPLATE_PATTERN.search(output_var)
+        or CHECK_RESTRICTION_LISTS_OUTPUT_VAR_RE.fullmatch(output_var) is None
+    ):
+        raise WorkflowExecutionError(
+            "check_restriction_lists_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return restriction_list_ids, evaluation_scope, output_var
+
+
+async def _run_check_restriction_lists(
+    *,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+) -> str:
+    restriction_list_ids, evaluation_scope, output_var = (
+        _check_restriction_lists_config(component)
+    )
+    if not isinstance(contact_row, dict):
+        missing_code = (
+            "check_restriction_lists_missing_person_uuid"
+            if evaluation_scope == "person"
+            else "check_restriction_lists_missing_channel"
+        )
+        raise WorkflowExecutionError(
+            missing_code,
+            "A sessão não possui contexto de contato para consultar Listas de Restrição.",
+        )
+
+    person_uuid: str | None = None
+    channel_type: str | None = None
+    channel_address: str | None = None
+    if evaluation_scope == "person":
+        try:
+            person_uuid = str(UUID(str(contact_row.get("person_uuid"))))
+        except (TypeError, ValueError) as exc:
+            raise WorkflowExecutionError(
+                "check_restriction_lists_missing_person_uuid",
+                "A sessão não possui person_uuid válido para consultar a pessoa completa.",
+            ) from exc
+    else:
+        channel_type = _normalize_channel_type(
+            contact_row.get("contact_channel_type")
+        )
+        channel_address = str(
+            contact_row.get("contact_channel_address") or ""
+        ).strip()
+        if not channel_type or not channel_address:
+            raise WorkflowExecutionError(
+                "check_restriction_lists_missing_channel",
+                "A sessão não possui tipo e endereço do canal atual para consulta.",
+            )
+
+    try:
+        result = await asyncio.to_thread(
+            evaluate_restriction_lists,
+            workspace_uuid=get_current_workspace_uuid(),
+            restriction_list_ids=restriction_list_ids,
+            evaluation_scope=evaluation_scope,
+            person_uuid=person_uuid,
+            channel_type=channel_type,
+            channel_address=channel_address,
+        )
+    except RestrictionListCheckError as exc:
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+
+    result_payload = result.runtime_payload()
+    result_payload.update(
+        {
+            "component_ref_id": component.get("ref_id"),
+            "evaluation_scope": evaluation_scope,
+            "output_var": output_var,
+        }
+    )
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs[output_var] = dict(result_payload)
+    runtime_variables["check_restriction_lists_last_result"] = dict(
+        result_payload
+    )
+    runtime_variables.pop("check_restriction_lists_last_error", None)
+    return result.decision
+
+
 def _wait_for_event_parameters(component: dict[str, Any]) -> dict[str, Any]:
     raw = component.get("parameters")
     if isinstance(raw, dict):
@@ -7761,6 +7952,62 @@ async def execute_workflow_m2_for_session(
                                 "contact_list_member_id": (
                                     contact_runtime_context.get("contact_list_member_id")
                                     if channel_execution.contact_row is not None
+                                    else None
+                                ),
+                            },
+                        )
+                elif kind == "check_restriction_lists":
+                    try:
+                        branch_label = await _run_check_restriction_lists(
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
+                        )
+                    except WorkflowExecutionError as exc:
+                        runtime_variables.pop(
+                            "check_restriction_lists_last_result", None
+                        )
+                        runtime_variables["check_restriction_lists_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 restriction list check failed",
+                            extra={
+                                "event": "orch.workflow.m2.check_restriction_lists.failed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                            },
+                        )
+                        raise
+                    else:
+                        check_result = runtime_variables.get(
+                            "check_restriction_lists_last_result"
+                        )
+                        logger.info(
+                            "workflow m2 restriction list check completed",
+                            extra={
+                                "event": "orch.workflow.m2.check_restriction_lists.completed",
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "session_uuid": session_uuid_for_metrics,
+                                "revision_id": revision_id_for_metrics,
+                                "component_ref_id": component.get("ref_id"),
+                                "outcome": branch_label,
+                                "evaluation_scope": (
+                                    check_result.get("evaluation_scope")
+                                    if isinstance(check_result, dict)
+                                    else None
+                                ),
+                                "match_count": (
+                                    check_result.get("match_count")
+                                    if isinstance(check_result, dict)
                                     else None
                                 ),
                             },
