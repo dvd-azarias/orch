@@ -240,6 +240,28 @@ Sempre que possivel, o mesmo agente que implementou uma alteracao nao deve ser a
 
 ## Convencoes praticas deste repositorio
 
+* Regra canonica para inspecao da UI de Gestao de Extensoes (OBRIGATORIA):
+
+  * para abrir, navegar, inspecionar ou demonstrar a UI do `10.1.20.239`, usar
+    o CLI oficial `@playwright/cli`; nao voltar a procurar outra superficie de
+    browser enquanto este procedimento estiver disponivel;
+  * instalacao/verificacao canonica:
+
+    * `npm install -g @playwright/cli@latest`
+    * quando `/usr/local` nao for gravavel sem `sudo`, usar
+      `npm install -g --prefix /Users/deividazarias/.local @playwright/cli@latest`
+      e confirmar `command -v playwright-cli`;
+  * abertura canonica:
+
+    * `playwright-cli open http://10.1.20.239:8300/`
+  * a UI usa HTTP Basic. Nunca colocar credenciais na URL, em comandos
+    registrados ou no Git; quando a automacao precisar autenticar, usar um
+    arquivo temporario fora do repositorio com
+    `browser.contextOptions.httpCredentials` e remove-lo ao terminar;
+  * `.playwright-cli/`, snapshots, logs, perfis e arquivos de autenticacao sao
+    artefatos locais e nunca devem ser commitados;
+  * detalhes e smoke visual: `docs/project-knowledge/DIALING_MANAGEMENT_UI_RUNBOOK.md`.
+
 * Gatilho operacional (OBRIGATORIO):
 
   * quando o usuario escrever `SUBA_O_AMBIENTE`, interpretar como ordem para:
