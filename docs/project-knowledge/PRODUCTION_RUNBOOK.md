@@ -176,6 +176,9 @@ serviços ORCH para uma alteração exclusiva da interface.
 - Node global `18.19.1`: proibido para build;
 - arquitetura: navegador -> BFF restrito -> APIs v2 Target Core, sem acesso
   direto ao banco;
+- inspeção visual canônica: instalar `@playwright/cli` e abrir com
+  `playwright-cli open http://10.1.20.239:8300/`; autenticação automatizada usa
+  configuração temporária fora do Git, nunca credenciais na URL;
 - release ativa confirmada em 2026-09-13:
   `20260913T125615-telecom-response-ui`.
 

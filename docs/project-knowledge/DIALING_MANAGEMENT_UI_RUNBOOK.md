@@ -123,6 +123,69 @@ npm run build
 
 O build local não substitui o build final da release Linux no `.239`.
 
+## Navegador e inspeção visual canônicos
+
+Não redescobrir nem substituir este procedimento a cada manutenção. Para
+abrir, navegar, demonstrar ou inspecionar esta UI, usar o CLI oficial
+`@playwright/cli`.
+
+Instalação canônica:
+
+```bash
+npm install -g @playwright/cli@latest
+```
+
+Na estação atual, o prefixo global `/usr/local` pode exigir uma senha de
+administrador diferente das credenciais dos servidores. Se a instalação acima
+falhar com `EACCES`, instalar no prefixo do usuário e confirmar a resolução do
+binário:
+
+```bash
+npm install -g --prefix /Users/deividazarias/.local @playwright/cli@latest
+command -v playwright-cli
+```
+
+Abertura canônica:
+
+```bash
+playwright-cli open http://10.1.20.239:8300/
+```
+
+Comandos da mesma sessão podem então usar as referências do snapshot:
+
+```bash
+playwright-cli snapshot
+playwright-cli click <ref>
+```
+
+A interface usa HTTP Basic. Não inserir usuário/senha na URL nem persistir
+segredo no repositório. Para automação não interativa, usar `--config` apontando
+para um JSON temporário fora do Git contendo exclusivamente
+`browser.contextOptions.httpCredentials`; obter as credenciais do ambiente
+server-side e remover o arquivo ao final. Exemplo sem valores reais:
+
+```json
+{
+  "browser": {
+    "contextOptions": {
+      "httpCredentials": {
+        "username": "<credencial-temporaria>",
+        "password": "<credencial-temporaria>"
+      }
+    }
+  }
+}
+```
+
+```bash
+playwright-cli close
+playwright-cli open http://10.1.20.239:8300/ --config=/private/tmp/target-extensions-playwright.json
+```
+
+`.playwright-cli/`, snapshots, logs, perfis e arquivos de autenticação são
+artefatos locais. Nunca commitá-los. Remover também qualquer configuração
+temporária de autenticação após o uso.
+
 ## Deploy canônico no `10.1.20.239`
 
 ### 1. Preflight somente leitura
@@ -213,6 +276,31 @@ symlink.
 - `GET /api/telecom/trunks`: `200`;
 - tela de MetaSip limita edição aos DIDs, conforme contrato real da Pool;
 - nenhuma mutação de tronco foi executada durante este deploy.
+
+## Homologação real de Telecom / Troncos em 2026-09-13
+
+O caminho BFF -> Target Core v2 -> Pool foi exercitado no workspace
+`ba7eb0ec-e565-447c-8c11-8f870cf72a60`:
+
+- `GET /api/telecom/trunks`: `200`;
+- `PATCH` vazio: `422` no envelope de validação esperado;
+- `PATCH` de descrição no `Tronco Teste 0017`: `200`, confirmado por `GET`,
+  seguido de restauração do valor original;
+- tronco IP temporário: `POST 201`, `PUT 200` e confirmação por `GET`;
+- remoção exclusiva do tronco temporário: `DELETE 204`, corpo vazio, seguida de
+  `GET 404` e ausência no inventário final;
+- Target Core CRUD, UI e BFF permaneceram `active/running`, com zero restarts e
+  sem warning, exception ou traceback na janela do teste.
+
+O `Tronco Teste 0017` terminou com nome, descrição, autenticação e DID
+preservados; apenas `updated_at` avançou pela mutação e restauração. O smoke
+visual via `playwright-cli` confirmou cinco troncos e nenhuma sobra do registro
+temporário.
+
+A inspeção do console também encontrou `404` não bloqueante nos arquivos de
+fonte cujas URLs ainda apontam para uma release histórica e no `favicon.ico`.
+Esse defeito visual/de empacotamento não afetou o CRUD e deve ser tratado em
+patch isolado, sem ser confundido com regressão da integração Telecom.
 
 ## Consolidação Git concluída em 2026-09-13
 
