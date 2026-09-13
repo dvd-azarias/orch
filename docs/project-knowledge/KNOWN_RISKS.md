@@ -773,3 +773,49 @@ inalterados.
 
 `V2`: policy engine central com disponibilidade, circuit breaker, trilha de
 decisão e contratos tipados de negação por padrão.
+
+## R39 — Build da UI pode ser capturado pelo Node 18 ou por fonte não canônica
+
+`STATUS`: MITIGATED / MONITOR
+
+`IMPACT`: high
+
+`PROBABILITY`: low com repositório/CI/runbook; high se o procedimento for ignorado
+
+`AFFECTED AREA`: Gestão de Extensões / Perfis de Discagem / Listas de Restrição /
+Telecom / deploy no `10.1.20.239`
+
+`DESCRIPTION`: a UI passou a ser usada operacionalmente quando ainda existia em
+working copies sem Git e releases no servidor. A fonte foi consolidada no
+repositório privado `GOHP-LAB/target-extensions-ui`, mas a pasta histórica e
+stagings ainda podem confundir uma manutenção. No `.239`, o Node global é
+`18.19.1`; até a invocação do `npm-cli.js` pelo Node 22 pode iniciar o script
+Vinext com o Node global e falhar. Partir da cópia errada pode apagar
+funcionalidades já homologadas; construir com o runtime errado pode produzir
+falha ou artefato inconsistente.
+
+`MITIGATION`: iniciar qualquer mudança no `main` atualizado do repositório
+oficial, cuja baseline `3035362` passou no CI Node `22.17.0`; construir no host
+chamando diretamente o CLI Vinext com o runtime dedicado; criar release física
+nova e ativar por symlink atômico. Seguir
+`DIALING_MANAGEMENT_UI_RUNBOOK.md` e o `AGENTS.md` da própria UI.
+
+`DETECTION`: ausência de `.git`, mudança iniciada em
+`dial-rule-studio-prototype` sem reconciliação, caminho sob `/private/tmp` usado
+como fonte, `node --version` retornando `v18`, erro `node:util.styleText`, build
+executado em `current` ou duas releases resolvendo para o mesmo diretório.
+
+`EVIDENCE`: em 2026-09-13, o host confirmou Node global `18.19.1` e runtime
+dedicado `22.17.0`. O build via `npm-cli.js` falhou ainda sob Node 18; a chamada
+direta `node-v22 .../vinext/dist/cli.js build` passou. Uma implantação anterior
+também preservou acidentalmente o symlink com `cp -a`; a release foi depois
+materializada corretamente. A fonte limpa da release ativa foi importada no
+repositório oficial; instalação, lint, TypeScript, smoke BFF e build passaram
+localmente e no primeiro CI.
+
+`ROLLBACK`: para falha de deploy, reposicionar `current` para
+`20260913T105323-telecom-crud` e reiniciar somente UI/BFF. Isso não recupera
+código-fonte perdido nem reverte dados criados pelas APIs.
+
+`V2`: repositório e pipeline próprios, artefato imutável produzido em CI,
+promoção por ambiente e deploy sem build no host.

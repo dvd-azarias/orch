@@ -1,5 +1,57 @@
 # Maintenance Log
 
+## 2026-09-13 — Consolidação operacional da UI de Gestão de Extensões
+
+### REQUEST / CLASSIFICATION
+
+Deixar de tratar a UI de Perfis de Discagem, Listas de Restrição e Telecom como
+artefato descartável e eliminar a redescoberta recorrente do runtime correto.
+`ALPHA_FIX_REQUIRED` para operação/documentação; não altera runtime do ORCH.
+
+### FINDINGS
+
+- o host `.239` possui Node global `18.19.1`, incompatível com o Vinext atual;
+- o runtime dedicado e homologado é Node `22.17.0` em
+  `/etc/gohp/dialing-management-demo/runtime/`;
+- chamar o `npm-cli.js` com Node 22 não garantiu o runtime do script: o Vinext
+  voltou ao Node 18 e falhou em `node:util.styleText`;
+- a chamada direta do CLI Vinext pelo binário Node 22 concluiu o build;
+- a fonte mais recente ainda está em staging descartável, a working copy local
+  histórica está desatualizada e não existe repositório Git oficial;
+- o `.239` é destino de deploy e não pode assumir o papel de fonte do código.
+
+### CHANGE / ROLLOUT
+
+- criada a release física
+  `20260913T125615-telecom-response-ui`, sem copiar o symlink `current`;
+- MetaSip passou a expor na edição somente DIDs, conforme o contrato da Pool;
+- ativação atômica do symlink e restart somente das units UI/BFF;
+- `AGENTS.md`, `PROJECT_STEWARD.md`, `PROJECT_BRAIN.md`, o plano maior, riscos e
+  o novo `DIALING_MANAGEMENT_UI_RUNBOOK.md` passaram a fixar fonte, runtime,
+  build, deploy, smoke e rollback.
+- criada a fonte privada oficial `GOHP-LAB/target-extensions-ui`, baseline
+  `3035362`, com governança própria, working copy estável e proteção da `main`.
+
+### VALIDATION
+
+- local: lint, TypeScript, smoke BFF e build passaram;
+- servidor: build com Node 22 direto passou; UI/BFF ficaram `active/running`,
+  zero restart e sem warnings no journal;
+- BFF health e `GET /api/telecom/trunks` responderam `200`;
+- Target Core no `.239` executa o merge `0f39dcb` da PR `#492`;
+- primeiro CI oficial da UI: `validate` aprovado em Node `22.17.0`, incluindo
+  instalação limpa, lint, TypeScript, smoke BFF e build;
+- nenhuma mutação de tronco foi executada durante o deploy.
+
+### FOLLOW-UP / ROLLBACK
+
+A fonte oficial já foi consolidada. O follow-up separado é avaliar, sem
+`npm audit fix --force`, a atualização coordenada de Next/Vinext: o audit de
+produção apontou duas severidades altas e uma crítica alcançadas por
+`next@16.2.6`. Para rollback de UI, reposicionar `current` para
+`20260913T105323-telecom-crud` e reiniciar somente UI/BFF; dados das APIs não
+são revertidos pela troca de release.
+
 ## 2026-09-11 — Cache de prepared statements asyncpg/PgBouncer
 
 ### REQUEST / CLASSIFICATION

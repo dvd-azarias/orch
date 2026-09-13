@@ -308,6 +308,39 @@ Sempre que possivel, o mesmo agente que implementou uma alteracao nao deve ser a
   * antes de validar E2E, confirmar quem esta na porta `7777` e quais workers/beats estao ativos para evitar processo com codigo antigo;
   * se houver conflito/duvida de processo stale, parar tudo e subir novamente de forma limpa (fonte unica de execucao).
 
+## Regra canonica da UI de Gestao de Extensoes — OBRIGATORIA
+
+* Antes de alterar ou implantar a UI de Perfis de Discagem, Listas de Restricao
+  ou Telecom, ler integralmente
+  `docs/project-knowledge/DIALING_MANAGEMENT_UI_RUNBOOK.md`.
+* A UI deixou de ser tratada como artefato descartavel. O host
+  `10.1.20.239`, suas releases e qualquer pasta em `/private/tmp` nao sao fonte
+  da verdade do codigo.
+* O repositorio Git oficial e privado e `GOHP-LAB/target-extensions-ui`; a
+  working copy local canonica fica em
+  `/Users/deividazarias/google/prof/gohp/git/target-extensions-ui`. Toda nova
+  funcionalidade deve partir de seu `main` atualizado e seguir o `AGENTS.md` do
+  proprio projeto. Nao partir da working copy historica desatualizada.
+* No servidor, o Node global `18.19.1` e incompatível com o build atual. Usar
+  sempre o runtime dedicado Node `22.17.0` e chamar diretamente o CLI do Vinext:
+
+  ```bash
+  /etc/gohp/dialing-management-demo/runtime/node-v22.17.0-linux-x64/bin/node \
+    node_modules/vinext/dist/cli.js build
+  ```
+
+* Nao usar `npm run build` no `.239` sem prova previa de que o subprocesso esta
+  executando Node 22. Invocar o `npm-cli.js` com Node 22 tambem nao basta: os
+  scripts podem resolver `#!/usr/bin/env node` para o Node 18 global.
+* Cada deploy deve criar diretorio fisico novo em `releases/`, construir antes
+  da ativacao, trocar `current` atomicamente, reiniciar somente UI/BFF e executar
+  health, GET real somente leitura e auditoria do journal.
+* Ao copiar a release ativa, usar `cp -a current/. <nova-release>/`. Nunca usar
+  `cp -a current <destino>`, pois isso pode preservar o symlink e destruir a
+  independencia do rollback.
+* A UI nunca recebe acesso ao banco. O caminho permanece
+  `navegador -> BFF restrito -> APIs v2 do Target Core`.
+
 ## Regra canonica FileApp (Fase 7) — OBRIGATORIA
 
 * Decisao por `mapping_template` e somente por ele:
@@ -355,4 +388,5 @@ Sempre que possivel, o mesmo agente que implementou uma alteracao nao deve ser a
 * `PROJECT_BRAIN.md`, quando existir
 * `README.md`
 * `docs/project-knowledge/`, quando existir
+* `docs/project-knowledge/DIALING_MANAGEMENT_UI_RUNBOOK.md`, quando a tarefa envolver a UI de Gestao de Extensoes
 * `docs/MIGRATIONS_PLAYBOOK.md`

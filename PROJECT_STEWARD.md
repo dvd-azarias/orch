@@ -1680,6 +1680,48 @@ Este inventario e uma baseline operacional confirmada, nao uma garantia eterna. 
 
 ---
 
+# 50-A. STEWARDSHIP DA UI DE GESTAO DE EXTENSOES
+
+A UI iniciada como prototipo de Perfis de Discagem passou a reunir tambem
+Listas de Restricao e Telecom e foi incorporada ao trabalho operacional. Ela nao
+deve mais ser tratada como demo descartavel, ainda que o caminho tecnico atual
+continue usando o nome historico `dialing-management-demo`.
+
+Fronteira confirmada:
+
+```text
+navegador -> BFF restrito no 10.1.20.239 -> APIs v2 do Target Core
+```
+
+Ela nao pertence ao runtime do ORCH, nao acessa PostgreSQL e nao deve ser
+embutida arquiteturalmente neste Alpha. Seu repositorio privado oficial e
+`GOHP-LAB/target-extensions-ui`, com `AGENTS.md`, `PROJECT_BRAIN.md`, runbook e
+CI Node 22 proprios. Este repositorio ORCH preserva apenas o mapa da integracao e
+as evidencias coordenadas do projeto maior.
+
+Regras de stewardship:
+
+1. fonte, release e estado atual devem ser conhecidos antes de qualquer
+   alteracao;
+2. `/private/tmp` e o servidor `.239` nunca sao fonte da verdade;
+3. toda nova funcionalidade deve partir do `main` atualizado de
+   `GOHP-LAB/target-extensions-ui`, nunca de uma working copy historica;
+4. build e runtime do servidor usam exclusivamente o Node 22 dedicado; o Node
+   18 global e uma armadilha operacional conhecida;
+5. release nova, ativacao atomica, smoke real somente leitura e rollback
+   explicito sao obrigatorios;
+6. segredos permanecem server-side e nunca entram no bundle, Git ou
+   documentacao;
+7. mutacao externa que terminou em timeout/`5xx` deve ser investigada antes de
+   retry, pois o efeito pode ter sido consumado.
+
+O procedimento completo, caminhos, units, comando de build, evidencias e
+rollback ficam em:
+
+`docs/project-knowledge/DIALING_MANAGEMENT_UI_RUNBOOK.md`
+
+---
+
 # 51. REGRA FINAL
 
 Cada manutencao deve tentar deixar o ORCH:
