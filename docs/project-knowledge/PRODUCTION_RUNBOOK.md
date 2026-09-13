@@ -163,3 +163,23 @@ Reparacao historica e uma operacao separada. Nao executar backfill em massa: rec
 6. antes de ampliar a allowlist, executar um controle fora dela e comprovar que N pessoas com M canais continuam produzindo N×M sessões.
 
 Rollback do piloto: retirar o UUID da allowlist e reiniciar o Target Core. Não é necessário desligar o roteamento contextual do ORCH; ele também protege o modo `channel`. Desassociar/reassociar ou reparar sessões existentes é operação separada e exige autorização.
+
+## UI operacional de Gestão de Extensões no `10.1.20.239`
+
+Esta UI é adjacente ao ORCH, mas possui runtime e deploy próprios. Não reiniciar
+serviços ORCH para uma alteração exclusiva da interface.
+
+- units: `dialing-management-demo-ui.service` e
+  `dialing-management-demo-bff.service`;
+- entrada autenticada: `10.1.20.239:8300`;
+- runtime obrigatório: Node dedicado `22.17.0`;
+- Node global `18.19.1`: proibido para build;
+- arquitetura: navegador -> BFF restrito -> APIs v2 Target Core, sem acesso
+  direto ao banco;
+- release ativa confirmada em 2026-09-13:
+  `20260913T125615-telecom-response-ui`.
+
+Antes de investigar, alterar, implantar ou reverter essa UI, ler integralmente
+`docs/project-knowledge/DIALING_MANAGEMENT_UI_RUNBOOK.md`. A fonte oficial é o
+repositório privado `GOHP-LAB/target-extensions-ui`; nenhuma nova funcionalidade
+deve partir de `/private/tmp`, do servidor ou da working copy histórica.
