@@ -188,6 +188,54 @@ temporária de autenticação após o uso.
 
 ## Deploy canônico no `10.1.20.239`
 
+### Caminho feliz obrigatório
+
+O procedimento padrão não é mais a sequência manual abaixo. A partir da
+working copy do ORCH, execute o script versionado, que sempre empacota o
+`origin/main` atualizado do repositório oficial da UI:
+
+```bash
+scripts/deploy_target_extensions_ui.sh \
+  --label <assunto> \
+  --smoke-path '<GET-read-only-da-funcionalidade>'
+```
+
+Exemplo:
+
+```bash
+scripts/deploy_target_extensions_ui.sh \
+  --label calendar-exceptions \
+  --smoke-path '/api/dialing/calendar-exceptions?per_page=1'
+```
+
+Antes de publicar, é possível validar resolução de fonte, commit, host e smoke
+sem transferir ou alterar o servidor:
+
+```bash
+scripts/deploy_target_extensions_ui.sh \
+  --label calendar-exceptions \
+  --smoke-path '/api/dialing/calendar-exceptions?per_page=1' \
+  --dry-run
+```
+
+O script:
+
+1. atualiza e resolve exclusivamente `origin/main` da UI oficial;
+2. ignora alterações da working copy ao criar o pacote Git;
+3. transfere pacote e executor com checksum SHA-256;
+4. eleva pelo caminho autorizado no host, `sudo su -c`, solicitando a senha
+   interativamente sem colocá-la em argumento ou arquivo;
+5. confirma serviços, symlink, espaço lógico e Node `22.17.0`;
+6. cria uma release física a partir de `current/.`;
+7. instala dependências com Node 22 somente se o lockfile mudou;
+8. executa build limpo e valida sintaxe do BFF fora de `current`;
+9. ativa o symlink atomicamente e reinicia somente UI/BFF;
+10. valida health, o GET somente leitura informado, units e journal;
+11. restaura automaticamente a release anterior se falhar após a ativação.
+
+Usar os passos manuais das seções seguintes apenas para diagnóstico, recuperação
+ou evolução do próprio script. Não redescobrir o procedimento em cada deploy.
+
 ### 1. Preflight somente leitura
 
 ```bash
