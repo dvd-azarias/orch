@@ -1,18 +1,92 @@
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
 
 from app.core.database import get_session_factory
+from app.repositories.orch_channel_events_repository import (
+    discard_pending_channel_events,
+)
 from app.repositories.orch_sessions_repository import (
+    apply_dialer_supplier_v2_terminal_callback,
     assign_dialer_handoff_routing_for_session,
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
     fetch_contact_runtime_context_for_session,
     patch_session_dialer_supplier_v2_registration,
 )
+
+
+@pytest.mark.asyncio
+async def test_supplier_v2_discards_only_pending_raw_dialer_callbacks() -> None:
+    session_factory = get_session_factory()
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE orch_channel_events (
+                        id BIGINT PRIMARY KEY,
+                        session_id BIGINT NOT NULL,
+                        channel TEXT NOT NULL,
+                        processed_at TIMESTAMPTZ NULL,
+                        discard_reason TEXT NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO orch_channel_events (
+                        id, session_id, channel, processed_at
+                    ) VALUES
+                        (1, 9101, 'dialer', NULL),
+                        (2, 9101, 'whatsapp', NULL),
+                        (3, 9101, 'dialer', NOW())
+                    """
+                )
+            )
+
+            discarded = await discard_pending_channel_events(
+                db_session,
+                session_id=9101,
+                channel="dialer",
+                discard_reason="supplier_v2_nonterminal_raw_callback",
+            )
+            rows = (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT id, processed_at IS NOT NULL AS processed,
+                               discard_reason
+                          FROM orch_channel_events
+                         ORDER BY id
+                        """
+                    )
+                )
+            ).mappings().all()
+
+            assert discarded == 1
+            assert dict(rows[0]) == {
+                "id": 1,
+                "processed": True,
+                "discard_reason": "supplier_v2_nonterminal_raw_callback",
+            }
+            assert dict(rows[1]) == {
+                "id": 2,
+                "processed": False,
+                "discard_reason": None,
+            }
+            assert dict(rows[2]) == {
+                "id": 3,
+                "processed": True,
+                "discard_reason": None,
+            }
 
 
 @pytest.mark.asyncio
@@ -440,3 +514,119 @@ async def test_supplier_v2_registration_patch_preserves_concurrent_runtime_keys(
                 "status": "ready",
                 "cycle_id": "11111111-1111-4111-8111-111111111111",
             }
+
+
+@pytest.mark.asyncio
+async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
+    flow_uuid = str(uuid4())
+    session_uuid = str(uuid4())
+    revision_uuid = str(uuid4())
+    card_uuid = str(uuid4())
+    cycle_uuid = str(uuid4())
+    attempt_uuid = str(uuid4())
+    event_uuid = str(uuid4())
+    session_factory = get_session_factory()
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE orch_sessions (
+                        id BIGINT PRIMARY KEY,
+                        uuid UUID NOT NULL,
+                        flow_uuid UUID NOT NULL,
+                        state INTEGER NOT NULL,
+                        ended_at TIMESTAMPTZ NULL,
+                        unassigned_at TIMESTAMPTZ NULL,
+                        runtime_variables JSONB NOT NULL,
+                        last_card_uuid UUID NULL,
+                        next_card_uuid UUID NULL,
+                        frozen_until TIMESTAMPTZ NULL,
+                        updated_at TIMESTAMPTZ NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            registration = {
+                "status": "ready",
+                "cycle_id": cycle_uuid,
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+                "flow_revision_id": revision_uuid,
+                "component_ref_id": card_uuid,
+            }
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO orch_sessions (
+                        id, uuid, flow_uuid, state, runtime_variables,
+                        last_card_uuid, next_card_uuid
+                    ) VALUES (
+                        9101, CAST(:session_uuid AS uuid), CAST(:flow_uuid AS uuid), 1,
+                        CAST(:runtime_variables AS jsonb),
+                        CAST(:card_uuid AS uuid), CAST(:card_uuid AS uuid)
+                    )
+                    """
+                ),
+                {
+                    "session_uuid": session_uuid,
+                    "flow_uuid": flow_uuid,
+                    "card_uuid": card_uuid,
+                    "runtime_variables": json.dumps(
+                        {
+                            "workflow_v2": {
+                                "blocking_execution": True,
+                                "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+                                "dialer_supplier_v2": registration,
+                            }
+                        }
+                    ),
+                },
+            )
+            payload = {
+                "event_id": event_uuid,
+                "cycle_id": cycle_uuid,
+                "attempt_id": attempt_uuid,
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+                "flow_revision_id": revision_uuid,
+                "component_ref_id": card_uuid,
+                "outcome": "answered",
+                "terminal": True,
+                "terminal_reason": "answered",
+                "occurred_at": "2026-09-15T13:03:13+00:00",
+            }
+
+            first = await apply_dialer_supplier_v2_terminal_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload=payload,
+            )
+            replay = await apply_dialer_supplier_v2_terminal_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload=payload,
+            )
+            conflict = await apply_dialer_supplier_v2_terminal_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload={**payload, "event_id": str(uuid4()), "outcome": "busy"},
+            )
+            runtime = (
+                await db_session.execute(
+                    text(
+                        "SELECT runtime_variables FROM orch_sessions WHERE id = 9101"
+                    )
+                )
+            ).scalar_one()
+
+            assert first is not None and first["accepted"] is True
+            assert first["idempotent"] is False
+            assert replay is not None and replay["idempotent"] is True
+            assert conflict is not None and conflict["status"] == "terminal_conflict"
+            terminal = runtime["workflow_v2"]["dialer_supplier_v2"][
+                "terminal_delivery"
+            ]
+            assert terminal["event_id"] == event_uuid
+            assert terminal["outcome"] == "answered"

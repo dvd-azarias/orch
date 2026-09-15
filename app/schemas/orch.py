@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -139,6 +141,44 @@ class OrchSwitchBotFlowCallbackResponse(BaseModel):
     orch_session_id: int
     orch_session_uuid: str
     idempotent: bool
+
+
+class OrchDialerSupplierV2TerminalRequest(BaseModel):
+    """Terminal decision emitted by Target Core for one pinned dialer cycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID
+    cycle_id: UUID
+    attempt_id: UUID
+    session_uuid: UUID
+    flow_revision_id: UUID
+    component_ref_id: str = Field(min_length=1, max_length=255)
+    outcome: Literal[
+        "answered",
+        "busy",
+        "machine",
+        "no_answer",
+        "rejected",
+        "invalid_number",
+        "failed",
+        "limit_reached",
+    ]
+    terminal: Literal[True]
+    terminal_reason: str | None = Field(default=None, max_length=255)
+    occurred_at: datetime
+
+
+class OrchDialerSupplierV2TerminalResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    accepted: bool
+    flow_uuid: str
+    session_uuid: str
+    cycle_id: str
+    event_id: str
+    idempotent: bool
+    reason: str | None = None
 
 
 class OrchFlowAliasSummary(BaseModel):

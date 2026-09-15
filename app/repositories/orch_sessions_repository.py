@@ -1608,6 +1608,148 @@ async def apply_switch_bot_flow_callback(
     }
 
 
+async def apply_dialer_supplier_v2_terminal_callback(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    callback_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Persist one terminal Supplier V2 decision without reopening stale sessions."""
+
+    session_uuid = str(callback_payload.get("session_uuid") or "").strip()
+    cycle_id = str(callback_payload.get("cycle_id") or "").strip()
+    event_id = str(callback_payload.get("event_id") or "").strip()
+    candidate = (
+        await db_session.execute(
+            text(
+                """
+                SELECT id
+                FROM orch_sessions
+                WHERE uuid = CAST(:session_uuid AS uuid)
+                  AND flow_uuid = CAST(:flow_uuid AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"session_uuid": session_uuid, "flow_uuid": flow_uuid},
+        )
+    ).scalar()
+    if candidate is None:
+        return None
+
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
+        {"class_id": 92021, "object_id": int(candidate)},
+    )
+    row = (
+        await db_session.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    uuid::text AS uuid,
+                    state,
+                    ended_at,
+                    unassigned_at,
+                    runtime_variables,
+                    last_card_uuid::text AS last_card_uuid,
+                    next_card_uuid::text AS next_card_uuid
+                FROM orch_sessions
+                WHERE id = :session_id
+                  AND uuid = CAST(:session_uuid AS uuid)
+                  AND flow_uuid = CAST(:flow_uuid AS uuid)
+                LIMIT 1
+                """
+            ),
+            {
+                "session_id": int(candidate),
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+            },
+        )
+    ).mappings().first()
+    if row is None:
+        return None
+
+    runtime_variables = row.get("runtime_variables")
+    if not isinstance(runtime_variables, dict):
+        return {"status": "invalid_registration", "session_id": int(row["id"])}
+    workflow_meta = runtime_variables.get("workflow_v2")
+    registration = (
+        workflow_meta.get("dialer_supplier_v2")
+        if isinstance(workflow_meta, dict)
+        else None
+    )
+    if not isinstance(registration, dict):
+        return {"status": "invalid_registration", "session_id": int(row["id"])}
+
+    identity_matches = all(
+        str(registration.get(registration_field) or "").strip()
+        == str(callback_payload.get(payload_field) or "").strip()
+        for registration_field, payload_field in (
+            ("cycle_id", "cycle_id"),
+            ("session_uuid", "session_uuid"),
+            ("flow_uuid", "flow_uuid"),
+            ("flow_revision_id", "flow_revision_id"),
+            ("component_ref_id", "component_ref_id"),
+        )
+    )
+    if not identity_matches:
+        return {"status": "identity_mismatch", "session_id": int(row["id"])}
+
+    previous = registration.get("terminal_delivery")
+    if isinstance(previous, dict):
+        same_delivery = (
+            str(previous.get("event_id") or "") == event_id
+            and str(previous.get("cycle_id") or "") == cycle_id
+            and str(previous.get("outcome") or "")
+            == str(callback_payload.get("outcome") or "")
+        )
+        return {
+            "status": "accepted" if same_delivery else "terminal_conflict",
+            "session_id": int(row["id"]),
+            "session_uuid": str(row["uuid"]),
+            "idempotent": same_delivery,
+            "accepted": same_delivery,
+        }
+
+    if row.get("unassigned_at") is not None or row.get("ended_at") is not None:
+        return {
+            "status": "inactive_session",
+            "session_id": int(row["id"]),
+            "session_uuid": str(row["uuid"]),
+            "idempotent": False,
+            "accepted": False,
+        }
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    registration["terminal_delivery"] = {
+        "event_id": event_id,
+        "cycle_id": cycle_id,
+        "attempt_id": str(callback_payload.get("attempt_id") or ""),
+        "outcome": str(callback_payload.get("outcome") or ""),
+        "terminal": True,
+        "terminal_reason": callback_payload.get("terminal_reason"),
+        "occurred_at": callback_payload.get("occurred_at"),
+        "received_at": now_iso,
+    }
+    registration["status"] = "terminal_received"
+    registration["updated_at"] = now_iso
+    await replace_session_workflow_state(
+        db_session,
+        session_id=int(row["id"]),
+        runtime_variables=runtime_variables,
+        last_card_uuid=row.get("last_card_uuid"),
+        next_card_uuid=row.get("next_card_uuid") or row.get("last_card_uuid"),
+    )
+    return {
+        "status": "accepted",
+        "session_id": int(row["id"]),
+        "session_uuid": str(row["uuid"]),
+        "idempotent": False,
+        "accepted": True,
+    }
+
+
 async def fetch_session_webhook_snapshot(
     db_session: AsyncSession,
     *,

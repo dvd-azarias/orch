@@ -23,6 +23,8 @@ from app.schemas.orch import (
     OrchBillingReprocessResponse,
     OrchBillingStatusResponse,
     OrchCreateSessionRequest,
+    OrchDialerSupplierV2TerminalRequest,
+    OrchDialerSupplierV2TerminalResponse,
     OrchFlowAliasCreateResponse,
     OrchFlowAliasSummary,
     OrchMigrateAllResponse,
@@ -51,6 +53,7 @@ from app.repositories.orch_fileapp_ingest_receipts_repository import (
 )
 from app.repositories.orch_whatsapp_limits_repository import register_whatsapp_limit_event
 from app.repositories.orch_sessions_repository import (
+    apply_dialer_supplier_v2_terminal_callback,
     apply_switch_bot_flow_callback,
     set_session_assigned_at_default,
     set_unassigned_at_by_flow_and_entity_address,
@@ -168,6 +171,19 @@ def _is_allowed_supplier_client(*, client_id: str | None, client_secret: str | N
     if settings.arquivos_client_id and settings.arquivos_client_secret:
         accepted_pairs.append((str(settings.arquivos_client_id).strip(), str(settings.arquivos_client_secret).strip()))
     return any(normalized_id == expected_id and normalized_secret == expected_secret for expected_id, expected_secret in accepted_pairs)
+
+
+def _require_dialer_supplier_v2_client(
+    *, client_id: str | None, client_secret: str | None
+) -> None:
+    if not _is_allowed_supplier_client(
+        client_id=client_id,
+        client_secret=client_secret,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciais inválidas para o retorno do Supplier V2.",
+        )
 
 
 def _require_billing_admin(*, client_id: str | None, client_secret: str | None) -> None:
@@ -813,6 +829,112 @@ async def callback_switch_bot_flow_by_workspace(
         orch_session_id=int(persisted["session_id"]),
         orch_session_uuid=str(persisted["session_uuid"]),
         idempotent=bool(persisted["idempotent"]),
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/supplier-v2/dialer-terminal",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchDialerSupplierV2TerminalResponse,
+)
+async def callback_dialer_supplier_v2_by_workspace(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    request: OrchDialerSupplierV2TerminalRequest = Body(...),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchDialerSupplierV2TerminalResponse:
+    """Resume only the exact handoff card pinned by a terminal Supplier V2 event."""
+
+    _require_dialer_supplier_v2_client(
+        client_id=x_client_id,
+        client_secret=x_client_secret,
+    )
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(str(workspace_uuid))
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    callback_payload = request.model_dump(mode="json")
+    callback_payload["flow_uuid"] = str(flow_uuid)
+
+    tx_context = (
+        db_session.begin_nested()
+        if db_session.in_transaction()
+        else db_session.begin()
+    )
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        persisted = await apply_dialer_supplier_v2_terminal_callback(
+            db_session,
+            flow_uuid=str(flow_uuid),
+            callback_payload=callback_payload,
+        )
+    if persisted is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sessão do ciclo Supplier V2 não encontrada.",
+        )
+    result_status = str(persisted.get("status") or "")
+    if result_status in {
+        "invalid_registration",
+        "identity_mismatch",
+        "terminal_conflict",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "O retorno não corresponde ao ciclo fixado na sessão.",
+                "error_code": f"dialer_supplier_v2_{result_status}",
+            },
+        )
+    if db_session.in_transaction():
+        await db_session.commit()
+
+    accepted = bool(persisted.get("accepted"))
+    idempotent = bool(persisted.get("idempotent"))
+    if accepted and not idempotent:
+        settings = get_settings()
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: advance_session_task.apply_async(
+                    kwargs={
+                        "workspace_uuid": safe_workspace_uuid,
+                        "flow_uuid": str(flow_uuid),
+                        "session_id": int(persisted["session_id"]),
+                    },
+                    queue=settings.celery_execute_queue,
+                    routing_key=settings.celery_execute_queue,
+                )
+            ),
+            timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+        )
+
+    logger.info(
+        "dialer Supplier V2 terminal callback handled",
+        extra={
+            "event": "orch.dialer_supplier_v2.terminal_callback",
+            "supplier_version": "v2",
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": str(flow_uuid),
+            "session_id": persisted.get("session_id"),
+            "session_uuid": str(request.session_uuid),
+            "cycle_id": str(request.cycle_id),
+            "event_id": str(request.event_id),
+            "outcome": request.outcome,
+            "accepted": accepted,
+            "idempotent": idempotent,
+            "reason": None if accepted else result_status,
+        },
+    )
+    return OrchDialerSupplierV2TerminalResponse(
+        status="accepted" if accepted else "ignored",
+        accepted=accepted,
+        flow_uuid=str(flow_uuid),
+        session_uuid=str(request.session_uuid),
+        cycle_id=str(request.cycle_id),
+        event_id=str(request.event_id),
+        idempotent=idempotent,
+        reason=None if accepted else result_status,
     )
 
 

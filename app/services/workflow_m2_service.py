@@ -49,6 +49,7 @@ from app.repositories.identidade_person_repository import (
 )
 from app.repositories.orch_channel_events_repository import (
     claim_next_pending_channel_event,
+    discard_pending_channel_events,
     fetch_channel_event_by_identity,
     fetch_next_pending_channel_event,
     has_pending_channel_events,
@@ -198,6 +199,7 @@ DIALER_RESPONSE_BRANCH_BY_STATUS = {
     "no_answer": "no_answer",
     "failed": "failed",
     "machine": "machine",
+    "limit_reached": "limit_reached",
 }
 FINISH_FLOW_WEBHOOK_DISPATCHED_REASON = "finish_flow_webhook_dispatched"
 LOOP_GUARD_WORKFLOW_META_KEY = "loop_guard"
@@ -1452,7 +1454,20 @@ def _resolve_send_with_dialer_branch_label(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
 ) -> str | None:
-    status = _extract_dialer_status_from_runtime(runtime_variables)
+    registration = _dialer_supplier_v2_registration_for_handoff(
+        runtime_variables,
+        component=component,
+    )
+    if registration is not None:
+        terminal_delivery = registration.get("terminal_delivery")
+        status = (
+            str(terminal_delivery.get("outcome") or "").strip().lower()
+            if isinstance(terminal_delivery, dict)
+            and terminal_delivery.get("terminal") is True
+            else None
+        )
+    else:
+        status = _extract_dialer_status_from_runtime(runtime_variables)
     if status is None:
         return None
     branch = DIALER_RESPONSE_BRANCH_BY_STATUS.get(status)
@@ -1462,6 +1477,37 @@ def _resolve_send_with_dialer_branch_label(
         "branch": branch,
     }
     return branch
+
+
+def _dialer_supplier_v2_registration_for_handoff(
+    runtime_variables: dict[str, Any],
+    *,
+    component: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if component is not None:
+        component_kind = str(
+            component.get("component_id") or component.get("id") or ""
+        ).strip().lower()
+        if component_kind != "send_with_dialer_handoff":
+            return None
+    workflow_meta = runtime_variables.get("workflow_v2")
+    registration = (
+        workflow_meta.get("dialer_supplier_v2")
+        if isinstance(workflow_meta, dict)
+        else None
+    )
+    if not isinstance(registration, dict):
+        return None
+    if not str(registration.get("cycle_id") or "").strip():
+        return None
+    status = str(registration.get("status") or "").strip().lower()
+    if status not in {"ready", "terminal_received"}:
+        return None
+    if component is not None and str(registration.get("component_ref_id") or "") != str(
+        component.get("ref_id") or ""
+    ):
+        return None
+    return registration
 
 
 def _run_run_flow(
@@ -2771,6 +2817,18 @@ def _should_resume_dialer_blocking_execution(runtime_variables: dict[str, Any]) 
     blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
     if blocking_stop_reason not in DIALER_BLOCKING_STOP_REASONS:
         return False
+    if blocking_stop_reason == "blocked_send_with_dialer_handoff":
+        registration = _dialer_supplier_v2_registration_for_handoff(
+            runtime_variables
+        )
+        if registration is not None:
+            terminal_delivery = registration.get("terminal_delivery")
+            return bool(
+                isinstance(terminal_delivery, dict)
+                and terminal_delivery.get("terminal") is True
+                and str(terminal_delivery.get("outcome") or "")
+                in DIALER_RESPONSE_BRANCH_BY_STATUS
+            )
     return _extract_dialer_status_from_runtime(runtime_variables) is not None
 
 
@@ -7614,6 +7672,30 @@ async def execute_workflow_m2_for_session(
             contact_row=contact_runtime_context,
         )
 
+        blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+        if (
+            blocking_stop_reason == "blocked_send_with_dialer_handoff"
+            and _dialer_supplier_v2_registration_for_handoff(runtime_variables)
+            is not None
+        ):
+            discarded_raw_callbacks = await discard_pending_channel_events(
+                db_session,
+                session_id=session_id,
+                channel="dialer",
+                discard_reason="supplier_v2_nonterminal_raw_callback",
+            )
+            if discarded_raw_callbacks:
+                logger.info(
+                    "raw dialer callbacks consumed by Supplier V2 ownership",
+                    extra={
+                        "event": "orch.dialer_supplier_v2.raw_callback_discarded",
+                        "supplier_version": "v2",
+                        "flow_uuid": flow_uuid,
+                        "session_id": session_id,
+                        "discarded_count": discarded_raw_callbacks,
+                    },
+                )
+
         has_pending_whatsapp_events = False
         has_pending_dialer_events = False
         resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
@@ -7634,7 +7716,6 @@ async def execute_workflow_m2_for_session(
         current_next_card_uuid = session_state.get("next_card_uuid")
         if current_next_card_uuid is None:
             current_next_card_uuid = _read_next_cursor(runtime_variables)
-        blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
 
         frozen_until = session_state.get("frozen_until")
         should_preempt_to_whatsapp_resume_cursor = _should_preempt_to_whatsapp_resume_cursor(

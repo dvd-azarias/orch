@@ -22,6 +22,16 @@
   flow. O POST E2E do
   canário ainda é obrigatório antes do rollout. Seleção, feedback e decisões
   intermediárias/terminais permanecem nos gates seguintes.
+- **Checkpoint de 2026-09-15:** a Gate 2D foi preparada em branches isolados.
+  O Target processa o callback durável em fila própria, decide retentativa no
+  mesmo telefone ou terminalidade e entrega o terminal por outbox. O ORCH aceita
+  somente o terminal autenticado e integralmente correlacionado e impede que o
+  callback bruto do PBX avance uma sessão V2. Testes automatizados e PostgreSQL
+  real passaram; implantação conjunta e discagem canário continuam obrigatórias.
+- **Condição de retorno ao blueprint:** depois da homologação do canário
+  `4e163399-e9a0-4335-895f-316c6a161299`, o fluxo completo
+  `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152` deve ter sua definição revisada e
+  ajustada ao contrato final. Não basta reativar a definição atual.
 
 Este documento preserva integralmente o plano aprovado conceitualmente antes da mudança de prioridade. Nenhum item abaixo deve ser interpretado como já implementado. Quando o trabalho for retomado, o desenho da Dial Rule deverá ser reconciliado com o novo CRUD; as fronteiras de segurança entre Supplier V1, Supplier V2 e ORCH devem ser preservadas.
 

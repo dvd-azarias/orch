@@ -1,5 +1,45 @@
 # Maintenance Log
 
+## 2026-09-15 — Gate 2D: retorno terminal pinado do Supplier V2
+
+### REQUEST / CLASSIFICATION
+
+Impedir que o callback bruto do PBX avance prematuramente o novo Dialer e aceitar
+somente a decisão terminal produzida pelo Supplier V2. `ALPHA_FIX_REQUIRED`;
+mudança restrita ao `send_with_dialer_handoff` registrado na V2, sem alterar o
+card Dialer legado nem seus callbacks.
+
+### CHANGE / SAFETY
+
+- novo endpoint interno autenticado recebe somente envelopes `terminal=true` e
+  outcomes conhecidos;
+- a persistência bloqueia a sessão e exige correspondência exata de ciclo,
+  sessão, flow, revisão e card com o registro runtime; replay idêntico é
+  idempotente e terminal conflitante é recusado;
+- sessão encerrada ou já desvinculada não é reaberta;
+- enquanto existe ciclo V2 ativo, callback bruto de telefonia é marcado como
+  processado com motivo auditável e não escolhe branch nem mantém hot loop;
+- a engine só retoma o card pelo terminal pinado entregue pelo Target. O caminho
+  legado continua usando o evento bruto como antes.
+
+### VALIDATION / PENDING
+
+- regressão focada mais recente: `139 passed`, incluindo persistência terminal,
+  idempotência e descarte seletivo do callback bruto;
+- suíte ampliada: `736 passed, 26 failed`; as 26 falhas são a baseline já
+  documentada de testes que ainda chamam `trigger_orch(flow_uuid=...)` e não
+  foram introduzidas por esta mudança;
+- falta implantar em conjunto com a Gate 2D do Target e repetir a discagem real
+  no flow canário `4e163399-e9a0-4335-895f-316c6a161299`;
+- somente depois do canário, revisar e ajustar a definição do fluxo completo
+  `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152` antes de retomá-lo.
+
+### ROLLBACK
+
+Desabilitar primeiro o dispatch V2 no discador, preservar o runtime/ciclos para
+auditoria e reverter somente este endpoint e os guards do novo card. Não aplicar
+o comportamento ao `send_with_dialer` legado.
+
 ## 2026-09-14 — Gate 3: registro de ciclo do novo Dialer no Supplier V2
 
 ### REQUEST / CLASSIFICATION
