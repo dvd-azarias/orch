@@ -901,6 +901,70 @@ def test_resolve_send_with_dialer_branch_label_returns_none_without_status() -> 
     assert "dialer_last_response" not in runtime_variables
 
 
+def test_supplier_v2_handoff_ignores_raw_pbx_status_until_terminal_decision() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+            "dialer_supplier_v2": {
+                "status": "ready",
+                "cycle_id": "11111111-1111-4111-8111-111111111111",
+                "component_ref_id": "dialer-handoff-1",
+            },
+        },
+        "last_payload": {
+            "hangup": {"Disposition": "BUSY", "DialerHangupCause": "17"}
+        },
+    }
+    component = {
+        "component_id": "send_with_dialer_handoff",
+        "ref_id": "dialer-handoff-1",
+    }
+
+    assert (
+        _resolve_send_with_dialer_branch_label(
+            component=component,
+            runtime_variables=runtime_variables,
+        )
+        is None
+    )
+    assert _should_resume_dialer_blocking_execution(runtime_variables) is False
+
+
+def test_supplier_v2_handoff_routes_only_pinned_terminal_decision() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+            "dialer_supplier_v2": {
+                "status": "terminal_received",
+                "cycle_id": "11111111-1111-4111-8111-111111111111",
+                "component_ref_id": "dialer-handoff-1",
+                "terminal_delivery": {
+                    "terminal": True,
+                    "outcome": "limit_reached",
+                },
+            },
+        },
+        "last_payload": {
+            "hangup": {"Disposition": "BUSY", "DialerHangupCause": "17"}
+        },
+    }
+    component = {
+        "component_id": "send_with_dialer_handoff",
+        "ref_id": "dialer-handoff-1",
+    }
+
+    assert _should_resume_dialer_blocking_execution(runtime_variables) is True
+    assert (
+        _resolve_send_with_dialer_branch_label(
+            component=component,
+            runtime_variables=runtime_variables,
+        )
+        == "limit_reached"
+    )
+
+
 def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -> None:
     component = {
         "parameters": {

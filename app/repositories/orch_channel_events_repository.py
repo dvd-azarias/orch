@@ -339,6 +339,34 @@ async def mark_pending_channel_events_processed(
     return int(result.rowcount or 0)
 
 
+async def discard_pending_channel_events(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    channel: str,
+    discard_reason: str,
+) -> int:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_channel_events
+            SET
+                processed_at = NOW(),
+                discard_reason = :discard_reason
+            WHERE session_id = :session_id
+              AND channel = :channel
+              AND processed_at IS NULL
+            """
+        ),
+        {
+            "session_id": session_id,
+            "channel": channel,
+            "discard_reason": discard_reason,
+        },
+    )
+    return int(result.rowcount or 0)
+
+
 async def mark_whatsapp_messages_processed_by_ids(
     db_session: AsyncSession,
     *,
