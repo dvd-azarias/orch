@@ -27,7 +27,10 @@
   mesmo telefone ou terminalidade e entrega o terminal por outbox. O ORCH aceita
   somente o terminal autenticado e integralmente correlacionado e impede que o
   callback bruto do PBX avance uma sessão V2. Testes automatizados e PostgreSQL
-  real passaram; implantação conjunta e discagem canário continuam obrigatórias.
+  real passaram. O primeiro canário real confirmou um ciclo, uma tentativa,
+  `answered` e continuação até `finish_flow`, mas revelou corrida entre replay do
+  registro e entrega terminal. A correção ORCH torna o terminal monotônico e
+  está validada localmente; implantação e novo canário continuam obrigatórios.
 - **Condição de retorno ao blueprint:** depois da homologação do canário
   `4e163399-e9a0-4335-895f-316c6a161299`, o fluxo completo
   `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152` deve ter sua definição revisada e

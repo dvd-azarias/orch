@@ -134,6 +134,40 @@ async def test_registration_task_marks_transient_error_for_retry(
 
 
 @pytest.mark.asyncio
+async def test_registration_task_does_not_retry_when_terminal_wins_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = _intent()
+    monkeypatch.setattr(tasks, "get_settings", lambda: _settings())
+
+    async def _claim(**_kwargs):  # type: ignore[no-untyped-def]
+        return {"status": "claimed", "intent": intent, "attempt": 1}
+
+    async def _store_error(**_kwargs):  # type: ignore[no-untyped-def]
+        return False
+
+    def _register(**_kwargs):  # type: ignore[no-untyped-def]
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_invalid_response",
+            "Replay já terminal.",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(tasks, "_claim_registration_attempt", _claim)
+    monkeypatch.setattr(tasks, "register_dialer_cycle", _register)
+    monkeypatch.setattr(tasks, "_store_registration_error", _store_error)
+
+    result = await tasks._register_dialer_supplier_v2_cycle_task(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        session_id=71,
+        attempt=1,
+    )
+
+    assert result == {"status": "stale"}
+
+
+@pytest.mark.asyncio
 async def test_registration_task_stops_retrying_permanent_422(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,6 +264,31 @@ async def test_registration_task_does_not_spend_retry_on_concurrent_lock(
     assert result == {"status": "in_progress"}
 
 
+@pytest.mark.asyncio
+async def test_registration_task_skips_terminal_received_before_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tasks, "get_settings", lambda: _settings())
+
+    async def _claim(**_kwargs):  # type: ignore[no-untyped-def]
+        return {"status": "terminal_received", "cycle_id": CYCLE_ID}
+
+    def _unexpected_register(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("task terminal não deve chamar o Supplier")
+
+    monkeypatch.setattr(tasks, "_claim_registration_attempt", _claim)
+    monkeypatch.setattr(tasks, "register_dialer_cycle", _unexpected_register)
+
+    result = await tasks._register_dialer_supplier_v2_cycle_task(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        session_id=71,
+        attempt=1,
+    )
+
+    assert result == {"status": "terminal_received", "cycle_id": CYCLE_ID}
+
+
 class _Transaction:
     async def __aenter__(self):  # noqa: ANN204
         return self
@@ -268,6 +327,50 @@ class _Session:
         if 'FROM "orch_sessions"' in str(statement):
             return _Rows()
         return object()
+
+
+@pytest.mark.asyncio
+async def test_stale_registration_error_does_not_emit_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alarm_called = False
+
+    async def _stale_patch(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return False
+
+    async def _persist_alarm(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal alarm_called
+        alarm_called = True
+
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: (lambda: _Session()))
+    monkeypatch.setattr(
+        tasks,
+        "bind_workspace_context",
+        lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "patch_session_dialer_supplier_v2_registration",
+        _stale_patch,
+    )
+    monkeypatch.setattr(tasks, "persist_alarm", _persist_alarm)
+
+    stored = await tasks._store_registration_error(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        session_id=71,
+        intent=_intent(),
+        attempt=1,
+        error=DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_invalid_response",
+            "Replay já terminal.",
+            retryable=True,
+        ),
+        will_retry=True,
+    )
+
+    assert stored is False
+    assert alarm_called is False
 
 
 @pytest.mark.asyncio

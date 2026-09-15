@@ -288,8 +288,13 @@ def _parse_cycle_response(
         checksum = str(data["profile_snapshot_checksum"] or "").strip()
         ready_at = _required_iso_datetime(data["ready_at"], "ready_at")
         callback_token = str(data["callback_token"] or "").strip()
+        accepted_states = (
+            {"ready", "deferred", "terminal"}
+            if replayed is True
+            else {"ready"}
+        )
         if (
-            state != "ready"
+            state not in accepted_states
             or not isinstance(replayed, bool)
             or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
             or not ready_at

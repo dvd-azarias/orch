@@ -2608,7 +2608,7 @@ async def patch_session_dialer_supplier_v2_registration(
     idempotency_key: str,
     registration: dict[str, Any],
 ) -> bool:
-    """Patch only the Gate 3 state, preserving concurrent runtime updates."""
+    """Patch Gate 3 state without overwriting a concurrent terminal delivery."""
 
     result = await db_session.execute(
         text(
@@ -2624,6 +2624,16 @@ async def patch_session_dialer_supplier_v2_registration(
                 updated_at = NOW()
             WHERE id = :session_id
               AND runtime_variables #>> '{workflow_v2,dialer_supplier_v2,idempotency_key}' = :idempotency_key
+              AND COALESCE(
+                    runtime_variables #>> '{workflow_v2,dialer_supplier_v2,status}',
+                    ''
+                  ) <> 'terminal_received'
+              AND COALESCE(
+                    jsonb_typeof(
+                        runtime_variables #> '{workflow_v2,dialer_supplier_v2,terminal_delivery}'
+                    ),
+                    ''
+                  ) <> 'object'
             RETURNING id
             """
         ),
