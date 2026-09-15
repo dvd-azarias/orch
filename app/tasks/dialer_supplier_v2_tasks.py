@@ -124,7 +124,7 @@ async def _register_dialer_supplier_v2_cycle_task(
         )
     except DialerSupplierV2RegistrationError as exc:
         will_retry = exc.retryable and not final_attempt
-        await _store_registration_error(
+        stored = await _store_registration_error(
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
             session_id=session_id,
@@ -133,6 +133,8 @@ async def _register_dialer_supplier_v2_cycle_task(
             error=exc,
             will_retry=will_retry,
         )
+        if not stored:
+            return {"status": "stale"}
         logger.warning(
             "dialer Supplier V2 cycle registration failed",
             extra={
@@ -162,7 +164,7 @@ async def _register_dialer_supplier_v2_cycle_task(
             retryable=True,
         )
         will_retry = not final_attempt
-        await _store_registration_error(
+        stored = await _store_registration_error(
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
             session_id=session_id,
@@ -171,6 +173,8 @@ async def _register_dialer_supplier_v2_cycle_task(
             error=wrapped,
             will_retry=will_retry,
         )
+        if not stored:
+            return {"status": "stale"}
         logger.exception(
             "unexpected dialer Supplier V2 cycle registration failure",
             extra={
@@ -279,6 +283,14 @@ async def _claim_registration_attempt(
 
             current_status = str(intent.get("status") or "").strip().lower()
             current_attempts = int(intent.get("attempts") or 0)
+            if (
+                current_status == "terminal_received"
+                or isinstance(intent.get("terminal_delivery"), dict)
+            ):
+                return {
+                    "status": "terminal_received",
+                    "cycle_id": intent.get("cycle_id"),
+                }
             if current_status == "ready":
                 return {"status": "ready", "cycle_id": intent.get("cycle_id")}
             if current_status == "failed":
@@ -398,6 +410,8 @@ async def _store_registration_error(
                 idempotency_key=str(intent["idempotency_key"]),
                 registration=registration,
             )
+            if not stored:
+                return False
             await persist_alarm(
                 db_session,
                 level="warning" if will_retry else "error",

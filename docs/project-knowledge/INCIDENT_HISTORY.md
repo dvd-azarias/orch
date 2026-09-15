@@ -1,5 +1,55 @@
 # Historico de Incidentes
 
+## 2026-09-15 — Task de registro Supplier V2 sobrescreveu terminal concorrente
+
+`STATUS`: FIX VALIDATED LOCALLY / PRODUCTION ROLLOUT PENDING
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60`
+
+`FLOW`: `4e163399-e9a0-4335-895f-316c6a161299`
+
+`SESSION`: `7976` (`57c1860f-ed23-4671-9758-aa0d9b277d31`)
+
+### Evidencia e causa
+
+- A discagem criou um único ciclo Supplier V2 e uma única tentativa. A release
+  `kcpa_Human` foi normalizada para `answered`, o terminal foi entregue pelo
+  outbox em uma tentativa e nenhuma nova chamada foi produzida.
+- O callback bruto acordou o workflow e publicou outra task de registro quase
+  simultaneamente ao terminal. Quando essa task chegou ao Target, o ciclo já
+  estava terminal e a idempotência devolveu o estado corrente.
+- O ORCH validava qualquer resposta de registro como `state=ready`. Por isso,
+  rejeitou o replay `terminal`, tentou novamente duas vezes e persistiu
+  `status=failed`, apagando do fragmento a entrega terminal concorrente.
+- A sessão funcional percorreu o branch `answered`, recebeu a tabulação
+  controlada `POSITIVO` e terminou em `finish_flow`; a inconsistência ficou no
+  diagnóstico runtime e nos alarmes, demonstrando uma corrida real mesmo sem
+  chamada duplicada neste canário.
+
+### Correcao e seguranca
+
+- A decisão terminal passa a ser monotônica: registro atrasado não pode
+  sobrescrever `terminal_received` nem um objeto `terminal_delivery`.
+- O claim terminal não chama HTTP. Escrita stale encerra a task sem retry e sem
+  alarme. Apenas replay idempotente aceita `ready|deferred|terminal`; criação
+  nova permanece restrita a `ready`.
+- A alteração não alcança `send_with_dialer`, Supplier V1, callbacks legados,
+  `DEFAULT_DIALRULE`, tabelas ou rotas do Target.
+
+### Validacao e pendencias
+
+- Testes adversariais cobrem terminal anterior ao claim e terminal durante a
+  requisição em voo. O compare-and-set foi confirmado em PostgreSQL real.
+- Implantar API/worker ORCH afetados, gerar sessão/ciclo novos e confirmar:
+  exatamente uma tentativa elegível, terminal preservado, sessão finalizada,
+  nenhuma chamada extra e nenhum novo alarme de registro.
+- Não limpar os alarmes do incidente nem corrigir a sessão histórica: ambos são
+  evidência operacional.
+
 ## 2026-09-11 — Planos preparados invalidados apos migration do Target Core
 
 `STATUS`: FOLLOW-UP FIX VALIDATED / PRODUCTION ROLLOUT PENDING

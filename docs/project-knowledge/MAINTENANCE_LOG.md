@@ -1,5 +1,59 @@
 # Maintenance Log
 
+## 2026-09-15 — Corrida registro/terminal no Supplier V2
+
+### REQUEST / CLASSIFICATION
+
+Preservar a decisão terminal quando uma task de registro atrasada recebe o
+replay idempotente de um ciclo que já terminou. `ALPHA_FIX_REQUIRED`; mudança
+restrita ao registro assíncrono do `send_with_dialer_handoff` no Supplier V2,
+sem migration e sem alterar Supplier V1 ou o card legado.
+
+### EVIDENCE / ROOT CAUSE
+
+- o canário real criou somente o ciclo
+  `f485ddbd-5fa6-4526-8dff-b73f7072f73e`, a tentativa
+  `c08c56be-4ce3-45ec-a12b-9f3c43c5c767` e o terminal `answered` para a sessão
+  ORCH `7976` (`57c1860f-ed23-4671-9758-aa0d9b277d31`);
+- o outbox Target entregou o terminal ao ORCH em uma tentativa e a sessão
+  percorreu `wait_for_event` até `finish_flow`, sem nova chamada;
+- uma segunda task de registro, publicada quando o callback bruto acordou o
+  workflow, já estava em voo. O Target respondeu corretamente com replay do
+  ciclo em estado `terminal`, mas o parser ORCH aceitava somente `ready`;
+- a task classificou o replay como resposta inválida, sobrescreveu no runtime o
+  terminal já persistido com `failed` e emitiu dois alarmes de retry e um de
+  falha. Os alarmes históricos foram preservados para auditoria.
+
+### CHANGE / SAFETY
+
+- criação nova continua aceitando exclusivamente ciclo `ready`; somente replay
+  idempotente aceita os estados conhecidos `ready`, `deferred` e `terminal`;
+- claim que encontra `terminal_received` ou `terminal_delivery` encerra como
+  no-op antes de chamar o Supplier;
+- o patch do fragmento JSONB usa compare-and-set e não pode substituir uma
+  entrega terminal concorrente;
+- se a gravação de sucesso/erro perder essa corrida, a task encerra `stale`,
+  sem consumir retry e sem emitir alarme falso;
+- nenhuma sessão ou alarme de produção foi apagado ou reescrito.
+
+### VALIDATION / ROLLBACK
+
+- regressão focada de serviço, task e workflow: `215 passed`;
+- PostgreSQL real: `6 passed`, incluindo preservação das demais chaves runtime,
+  rejeição de idempotency key stale, proteção do terminal e idempotência do
+  callback;
+- suíte completa final: `743 passed, 26 failed`; as 26 falhas são a baseline
+  conhecida da assinatura antiga
+  `trigger_orch(flow_uuid=...)` e não alcançam os arquivos deste patch;
+- stack local completa em porta `7788` e filas exclusivas
+  `*_supplier_v2_race_local`: API, três workers e dois Beats ficaram `up`. O
+  smoke criou as sessões `7995`/`7996`; ambas terminaram em `state=3`, com
+  `ended_at`, cursor nulo e zero alarmes. Não houve erro/traceback nos logs e o
+  shutdown deixou a porta e os processos da worktree vazios;
+- rollback é somente de código e restart do worker Supplier V2. Antes de
+  reverter, desabilitar o canário/flag e preservar ciclos, sessões e alarmes para
+  auditoria. Após implantação, repetir um canário novo antes de ampliar escopo.
+
 ## 2026-09-15 — Gate 2D: retorno terminal pinado do Supplier V2
 
 ### REQUEST / CLASSIFICATION

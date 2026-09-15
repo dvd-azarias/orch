@@ -434,7 +434,7 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
 
 
 @pytest.mark.asyncio
-async def test_supplier_v2_registration_patch_preserves_concurrent_runtime_keys() -> None:
+async def test_supplier_v2_registration_patch_preserves_runtime_and_terminal() -> None:
     session_factory = get_session_factory()
     idempotency_key = "orch:v2:dial-cycle:" + ("a" * 64)
 
@@ -514,6 +514,59 @@ async def test_supplier_v2_registration_patch_preserves_concurrent_runtime_keys(
                 "status": "ready",
                 "cycle_id": "11111111-1111-4111-8111-111111111111",
             }
+
+            terminal_registration = {
+                "idempotency_key": idempotency_key,
+                "status": "terminal_received",
+                "cycle_id": "11111111-1111-4111-8111-111111111111",
+                "terminal_delivery": {
+                    "event_id": "22222222-2222-4222-8222-222222222222",
+                    "outcome": "answered",
+                },
+            }
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET runtime_variables = jsonb_set(
+                            runtime_variables,
+                            '{workflow_v2,dialer_supplier_v2}',
+                            CAST(:registration AS jsonb),
+                            true
+                       )
+                     WHERE id = 9002
+                    """
+                ),
+                {"registration": json.dumps(terminal_registration)},
+            )
+            terminal_overwrite = (
+                await patch_session_dialer_supplier_v2_registration(
+                    db_session,
+                    session_id=9002,
+                    idempotency_key=idempotency_key,
+                    registration={
+                        "idempotency_key": idempotency_key,
+                        "status": "failed",
+                    },
+                )
+            )
+            protected_runtime = (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT runtime_variables
+                          FROM orch_sessions
+                         WHERE id = 9002
+                        """
+                    )
+                )
+            ).scalar_one()
+
+            assert terminal_overwrite is False
+            assert (
+                protected_runtime["workflow_v2"]["dialer_supplier_v2"]
+                == terminal_registration
+            )
 
 
 @pytest.mark.asyncio
