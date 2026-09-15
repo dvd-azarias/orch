@@ -646,14 +646,22 @@ URL nem registradas neste documento.
    `dial_profile_id`, com flow de homologação salvo e publicado.
 8. **Concluído:** Lista de Restrição e importações reais homologadas pela UI;
    evaluator confirmou os casos `restricted` e `allowed` no perfil Supplier.
-9. **Atual:** publicar catálogo/422 e engine ORCH do card
-   `check_restriction_lists`, configurar a URL exclusiva do Supplier e
-   homologar os dois branches em um flow pequeno.
-10. Introduzir o card no fluxo geral
-    `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152` após o canário.
-11. Adaptar o plano `POSTERGADO_SUPPLIER_V2_DIAL_RULE.md` ao snapshot do Perfil.
-12. Implementar ciclos, feedback, retentativas e decisão terminal da Supplier V2.
-13. Exercitar o fluxo completo real sem tocar no discador legado.
+9. **Concluído:** catálogo/`422`, engine ORCH e canário dos branches
+   `restricted|allowed` do card `check_restriction_lists`, usando a URL
+   exclusiva do processo Supplier.
+10. **Concluído:** Gate 2A no Target Core com persistência, snapshot publicado e
+    API idempotente `POST /v2/contact-supplier/dialer-cycles`.
+11. **Atual:** Gate 3 no ORCH implementado e validado localmente: intenção
+    persistida, publicação pós-commit, fila própria, retry limitado,
+    reconciliação e isolamento por flag+allowlist. Falta executar o POST/replay
+    E2E no flow canário antes de commit, rollout ou promoção.
+12. Introduzir no fluxo geral
+    `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152` somente os cards já homologados que
+    ainda não estejam presentes.
+13. Implementar os próximos Gates de seleção, feedback, retentativas e decisão
+    terminal da Supplier V2, adaptando
+    `POSTERGADO_SUPPLIER_V2_DIAL_RULE.md` ao snapshot real do Perfil.
+14. Exercitar o fluxo completo real sem tocar no discador legado.
 
 ## Rollback
 

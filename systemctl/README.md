@@ -59,7 +59,10 @@ sudo systemctl restart orch-api orch-celery-worker orch-celery-fileapp-worker or
 ## Topologia recomendada (fase atual)
 
 - `orch-api`: API FastAPI.
-- `orch-celery-worker`: filas de workflow (`orch_dispatch`, `orch_execute`, `orch_heartbeat`).
+- `orch-celery-worker`: filas de workflow (`orch_dispatch`, `orch_execute`,
+  `orch_heartbeat`) e, quando o Gate 3 do novo Dialer for implantado,
+  `orch_dialer_supplier_v2`; a fila continua exclusiva mesmo compartilhando o
+  processo neste Alpha.
 - `orch-celery-fileapp-worker`: filas FileApp (`orch_fileapp_ingest_events`, `orch_fileapp_source_list_ingest`).
 - `orch-celery-beat`: beat do workflow (dispatch/heartbeat).
 - `orch-celery-generate-file-worker`: worker do componente `generate_file`.
@@ -68,6 +71,14 @@ sudo systemctl restart orch-api orch-celery-worker orch-celery-fileapp-worker or
 - `orch-celery-billing-beat`: scheduler exclusivo de billing; exatamente uma instancia por ambiente.
 
 Essa separação evita competição de consumo com outras aplicações e melhora visibilidade no Flower.
+
+O reconciliador de ciclos Supplier V2 é desligado por padrão. Em rollout
+canário, habilitar `CELERY_BEAT_DIALER_SUPPLIER_V2_RECONCILE_ENABLED=true` em
+exatamente uma das units Beat reais do `10.1.20.237`; todas as demais devem
+permanecer `false`. Confirmar a topologia instalada antes de editar units, pois
+os templates deste diretório não representam literalmente o host.
+`DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST` deve conter somente os workspaces do
+rollout; ela impede que o reconciliador percorra schemas alheios ao canário.
 
 ## Hostnames padronizados (Flower)
 

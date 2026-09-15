@@ -18,6 +18,9 @@ from app.repositories.orch_sessions_repository import (
     replace_session_workflow_state,
 )
 from app.services.alarm_service import persist_alarm
+from app.services.dialer_supplier_v2_service import (
+    dialer_supplier_v2_enabled_for_context,
+)
 from app.services.identidade_person_flow_link_service import link_identidade_mailing_to_current_flow
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
@@ -431,6 +434,27 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
             },
             queue=settings.celery_execute_queue,
             routing_key=settings.celery_execute_queue,
+        )
+    elif (
+        stopped_reason == "blocked_send_with_dialer_handoff"
+        and dialer_supplier_v2_enabled_for_context(
+            settings=settings,
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+        )
+    ):
+        from app.tasks.dialer_supplier_v2_tasks import (
+            register_dialer_supplier_v2_cycle_task,
+        )
+
+        register_dialer_supplier_v2_cycle_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_dialer_supplier_v2_queue,
+            routing_key=settings.celery_dialer_supplier_v2_queue,
         )
     logger.info(
         "workflow session advanced",

@@ -75,6 +75,11 @@ from app.repositories.send_with_rcs_repository import assign_rcs_routing_for_ses
 from app.repositories.send_with_sms_repository import assign_sms_routing_for_session
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
+from app.services.dialer_supplier_v2_service import (
+    DialerSupplierV2RegistrationError,
+    build_dialer_cycle_intent,
+    dialer_supplier_v2_enabled_for_context,
+)
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.identidade_person_service import (
     IdentidadePersonQueryResult,
@@ -224,6 +229,8 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "send_with_sms_contact_not_eligible",
     "send_with_email_contact_not_eligible",
     "send_with_dialer_handoff_invalid_answer_action",
+    "send_with_dialer_handoff_cycle_intent_invalid",
+    "send_with_dialer_handoff_invalid_dial_profile_id",
     "send_with_dialer_handoff_invalid_list_validity_days",
     "send_with_dialer_handoff_invalid_list_validity_mode",
     "send_with_dialer_handoff_list_validity_update_failed",
@@ -2310,6 +2317,32 @@ def _send_with_dialer_handoff_list_validity_config(
     return {"mode": mode, "days": int(numeric_days)}
 
 
+def _send_with_dialer_handoff_dial_profile_id(
+    component: dict[str, Any],
+) -> str:
+    raw_profile = _send_with_dialer_handoff_parameters(component).get(
+        "dial_profile_id"
+    )
+    if isinstance(raw_profile, list) and len(raw_profile) != 1:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_dial_profile_id",
+            "Selecione um único Perfil de Discagem no novo card.",
+        )
+    try:
+        profile_id = UUID(str(_catalog_parameter_scalar(raw_profile) or "").strip())
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_dial_profile_id",
+            "Selecione um Perfil de Discagem válido no novo card.",
+        ) from exc
+    if profile_id.int == 0:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_invalid_dial_profile_id",
+            "Selecione um Perfil de Discagem válido no novo card.",
+        )
+    return str(profile_id)
+
+
 async def _prepare_send_with_dialer_handoff_contact_member(
     *,
     db_session: AsyncSession,
@@ -2318,6 +2351,9 @@ async def _prepare_send_with_dialer_handoff_contact_member(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
     contact_list_member_id: int | None = None,
+    workspace_uuid: str | None = None,
+    session_uuid: str | None = None,
+    flow_revision_id: str | None = None,
 ) -> dict[str, Any] | None:
     answer_action = _send_with_dialer_handoff_config(component)
     list_validity = _send_with_dialer_handoff_list_validity_config(component)
@@ -2345,6 +2381,37 @@ async def _prepare_send_with_dialer_handoff_contact_member(
                 "disponível antes do roteamento Dialer."
             ),
         )
+    settings = get_settings()
+    if dialer_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid=str(workspace_uuid or ""),
+        flow_uuid=flow_uuid,
+    ):
+        profile_id = _send_with_dialer_handoff_dial_profile_id(component)
+        workflow_meta = _ensure_workflow_meta(runtime_variables)
+        existing_intent = workflow_meta.get("dialer_supplier_v2")
+        try:
+            workflow_meta["dialer_supplier_v2"] = build_dialer_cycle_intent(
+                session_uuid=str(session_uuid or ""),
+                flow_uuid=flow_uuid,
+                flow_revision_id=str(flow_revision_id or ""),
+                component_ref_id=str(component.get("ref_id") or ""),
+                contact_list_id=str(assignment.get("contact_list_id") or ""),
+                contact_list_member_id=int(
+                    assignment.get("contact_list_member_id") or 0
+                ),
+                dial_profile_id=profile_id,
+                existing=(
+                    existing_intent
+                    if isinstance(existing_intent, dict)
+                    else None
+                ),
+            )
+        except DialerSupplierV2RegistrationError as exc:
+            raise WorkflowExecutionError(
+                "send_with_dialer_handoff_cycle_intent_invalid",
+                exc.message,
+            ) from exc
     runtime_variables.pop("send_with_dialer_handoff_last_error", None)
     return assignment
 
@@ -8662,6 +8729,9 @@ async def execute_workflow_m2_for_session(
                                     component=component,
                                     runtime_variables=runtime_variables,
                                     contact_list_member_id=routing_contact_list_member_id,
+                                    workspace_uuid=get_current_workspace_uuid(),
+                                    session_uuid=str(session_uuid_for_metrics or ""),
+                                    flow_revision_id=str(revision_id_for_metrics or ""),
                                 )
                             else:
                                 should_block_execution = False

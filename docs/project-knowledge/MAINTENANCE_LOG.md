@@ -1,5 +1,64 @@
 # Maintenance Log
 
+## 2026-09-14 — Gate 3: registro de ciclo do novo Dialer no Supplier V2
+
+### REQUEST / CLASSIFICATION
+
+Integrar exclusivamente `send_with_dialer_handoff` à API de registro de ciclos
+Supplier V2 já implantada no Target Core, sem alterar Discador legado, Supplier
+V1 ou `DEFAULT_DIALRULE`. `ALPHA_FIX_REQUIRED`; risco alto contido por feature
+flag, allowlists de um workspace/flow, fila própria e rollout canário.
+
+### CHANGE / SAFETY
+
+- o ORCH primeiro marca o membro exato e materializa `list_validity`; no mesmo
+  commit persiste uma intenção idempotente pinada à sessão, revisão, card,
+  lista, membro e Perfil publicado;
+- a chamada externa ocorre somente pós-commit em task própria. `201` e replay
+  `200` exigem identidade integral, ciclo `ready` e metadados válidos;
+- o `callback_token` devolvido pelo Target Core é consumido apenas em memória e
+  descartado: não integra dataclass, runtime, log, alarme ou métrica;
+- retry é limitado a falhas transitórias. `422` é terminal e alarmado. Claims
+  possuem lease e um reconciliador opt-in recupera publicação perdida, worker
+  interrompido ou `pending_retry` stale; concorrência de lock não consome
+  tentativa;
+- a configuração falha no startup quando a flag está ativa sem allowlists de
+  workspace/flow, URL Supplier ou Bearer. O reconciliador deve existir em
+  exatamente um Beat e consulta somente os schemas permitidos;
+- com flag desligada ou flow fora da allowlist, o novo card preserva o caminho
+  marker-only existente. `send_with_dialer` não foi modificado.
+
+### VALIDATION / PENDING
+
+- contrato HTTP, idempotência, replay, segredo descartado, `422`, `503`, timeout,
+  claims, retry, fila pós-commit, allowlist e configuração fail-closed passaram
+  na regressão dirigida;
+- consultas PostgreSQL reais em `pg_temp` comprovaram a seleção do reconciliador,
+  patch JSONB sem apagar callback concorrente e retorno do `contact_list_id`;
+- suíte completa final: `732 passed, 26 failed`; todas as falhas são a baseline
+  documentada da assinatura antiga `trigger_orch(flow_uuid=...)`;
+- stack local completa subiu com as filas `*_f5_local`; health confirmou três
+  workers e Beats, e os dois smokes encadeados retornaram `202`. A primeira
+  medição do reconciliador global levou 36s ao atravessar todos os workspaces;
+  o Gate passou a exigir allowlist de workspace para remover esse scan
+  transversal; duas execuções escopadas concluíram em `1.13s` e `0.79s`. O
+  launcher local também passou a usar `exec`, evitando processos API/Celery
+  órfãos em restart;
+- GET autenticado ao Supplier V2 no `.239:7502` confirmou rota e workspace com
+  o `404 contact_supplier_v2_cycle_not_found` esperado para UUID inexistente;
+- flow canário `4e163399-e9a0-4335-895f-316c6a161299` está ativo na revisão 11,
+  com `dial_profile_id` publicado; o mailing foi desvinculado antes do Gate 3.
+  Falta integrar o branch, implantar o runtime com allowlist exclusiva e então
+  gerar uma sessão nova para observar o POST real, ciclo `ready`, replay e
+  ausência do token no runtime antes de ampliar a allowlist.
+
+### ROLLBACK
+
+Desligar primeiro `DIALER_SUPPLIER_V2_ENABLED` ou retirar o canário da allowlist,
+reiniciar API/workers/Beat afetados e preservar ciclos já criados para auditoria.
+Reverter apenas o código Gate 3 depois. Não compensar membros, sessões ou ciclos
+automaticamente e não tocar no legado.
+
 ## 2026-09-13 — Consolidação operacional da UI de Gestão de Extensões
 
 ### REQUEST / CLASSIFICATION
