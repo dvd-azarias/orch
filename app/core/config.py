@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote_plus
+from uuid import UUID
 
 
 @dataclass(frozen=True)
@@ -36,10 +37,12 @@ class Settings:
     celery_dispatch_queue: str
     celery_execute_queue: str
     celery_switch_bot_flow_queue: str
+    celery_dialer_supplier_v2_queue: str
     celery_heartbeat_queue: str
     celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
     celery_beat_reconcile_pending_events_enabled: bool
+    celery_beat_dialer_supplier_v2_reconcile_enabled: bool
     celery_dispatch_workspace_uuid: str | None
     celery_reconcile_pending_events_workspace_uuid: str | None
     celery_task_always_eager: bool
@@ -133,6 +136,15 @@ class Settings:
     target_core_api_base_url: str | None
     target_core_api_bearer_token: str | None
     target_core_supplier_api_base_url: str | None
+    dialer_supplier_v2_enabled: bool
+    dialer_supplier_v2_workspace_allowlist: tuple[str, ...]
+    dialer_supplier_v2_flow_allowlist: tuple[str, ...]
+    dialer_supplier_v2_http_timeout_seconds: float
+    dialer_supplier_v2_max_attempts: int
+    dialer_supplier_v2_retry_backoff_seconds: float
+    dialer_supplier_v2_reconcile_interval_seconds: int
+    dialer_supplier_v2_reconcile_batch_size: int
+    dialer_supplier_v2_registration_lease_seconds: int
     restriction_list_check_http_timeout_seconds: float
     restriction_list_check_max_attempts: int
     restriction_list_check_retry_backoff_seconds: float
@@ -266,6 +278,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         "dispatch": "orch_dispatch",
         "execute": "orch_execute",
         "switch_bot_flow": "orch_switch_bot_flow",
+        "dialer_supplier_v2": "orch_dialer_supplier_v2",
         "heartbeat": "orch_heartbeat",
         "fileapp_ingest": "orch_fileapp_ingest_events",
         "fileapp_process": "orch_fileapp_source_list_ingest",
@@ -283,6 +296,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "dispatch": "orch_dispatch_launchd_local",
             "execute": "orch_execute_launchd_local",
             "switch_bot_flow": "orch_switch_bot_flow_launchd_local",
+            "dialer_supplier_v2": "orch_dialer_supplier_v2_launchd_local",
             "heartbeat": "orch_heartbeat_launchd_local",
             "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
             "fileapp_process": "orch_fileapp_source_list_launchd_local",
@@ -297,6 +311,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "dispatch": "orch_dispatch_f5_local",
             "execute": "orch_execute_f5_local",
             "switch_bot_flow": "orch_switch_bot_flow_f5_local",
+            "dialer_supplier_v2": "orch_dialer_supplier_v2_f5_local",
             "heartbeat": "orch_heartbeat_f5_local",
             "fileapp_ingest": "orch_fileapp_ingest_f5_local",
             "fileapp_process": "orch_fileapp_source_list_f5_local",
@@ -377,6 +392,13 @@ def get_settings() -> Settings:
             )
             or _default_queue_by_profile(queue_profile, "switch_bot_flow")
         ),
+        celery_dialer_supplier_v2_queue=(
+            _read_env_optional(
+                "CELERY_DIALER_SUPPLIER_V2_QUEUE",
+                _default_queue_by_profile(queue_profile, "dialer_supplier_v2"),
+            )
+            or _default_queue_by_profile(queue_profile, "dialer_supplier_v2")
+        ),
         celery_heartbeat_queue=(
             _read_env_optional("CELERY_HEARTBEAT_QUEUE", _default_queue_by_profile(queue_profile, "heartbeat"))
             or _default_queue_by_profile(queue_profile, "heartbeat")
@@ -384,6 +406,9 @@ def get_settings() -> Settings:
         celery_beat_heartbeat_enabled=_read_env_bool("CELERY_BEAT_HEARTBEAT_ENABLED", True),
         celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
         celery_beat_reconcile_pending_events_enabled=_read_env_bool("CELERY_BEAT_RECONCILE_PENDING_EVENTS_ENABLED", True),
+        celery_beat_dialer_supplier_v2_reconcile_enabled=_read_env_bool(
+            "CELERY_BEAT_DIALER_SUPPLIER_V2_RECONCILE_ENABLED", False
+        ),
         celery_dispatch_workspace_uuid=_read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
         celery_reconcile_pending_events_workspace_uuid=_read_env_optional(
             "CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID",
@@ -615,6 +640,48 @@ def get_settings() -> Settings:
         target_core_supplier_api_base_url=_read_env_optional(
             "TARGET_CORE_SUPPLIER_API_BASE_URL"
         ),
+        dialer_supplier_v2_enabled=_read_env_bool(
+            "DIALER_SUPPLIER_V2_ENABLED", False
+        ),
+        dialer_supplier_v2_workspace_allowlist=_read_env_csv(
+            "DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST", ()
+        ),
+        dialer_supplier_v2_flow_allowlist=_read_env_csv(
+            "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST", ()
+        ),
+        dialer_supplier_v2_http_timeout_seconds=_read_env_float_range(
+            "DIALER_SUPPLIER_V2_HTTP_TIMEOUT_SECONDS",
+            5.0,
+            minimum=1.0,
+            maximum=60.0,
+        ),
+        dialer_supplier_v2_max_attempts=_read_env_int_range(
+            "DIALER_SUPPLIER_V2_MAX_ATTEMPTS", 3, minimum=1, maximum=8
+        ),
+        dialer_supplier_v2_retry_backoff_seconds=_read_env_float_range(
+            "DIALER_SUPPLIER_V2_RETRY_BACKOFF_SECONDS",
+            2.0,
+            minimum=0.0,
+            maximum=300.0,
+        ),
+        dialer_supplier_v2_reconcile_interval_seconds=_read_env_int_range(
+            "DIALER_SUPPLIER_V2_RECONCILE_INTERVAL_SECONDS",
+            30,
+            minimum=10,
+            maximum=3600,
+        ),
+        dialer_supplier_v2_reconcile_batch_size=_read_env_int_range(
+            "DIALER_SUPPLIER_V2_RECONCILE_BATCH_SIZE",
+            100,
+            minimum=1,
+            maximum=500,
+        ),
+        dialer_supplier_v2_registration_lease_seconds=_read_env_int_range(
+            "DIALER_SUPPLIER_V2_REGISTRATION_LEASE_SECONDS",
+            120,
+            minimum=30,
+            maximum=3600,
+        ),
         restriction_list_check_http_timeout_seconds=max(
             1.0,
             float(
@@ -674,4 +741,42 @@ def get_settings() -> Settings:
         raise ValueError("BILLING_RABBITMQ_URL é obrigatória quando ORCH_BILLING_ENABLED=true.")
     if settings.orch_billing_enabled and settings.celery_broker_url == "memory://":
         raise ValueError("CELERY_BROKER_URL real é obrigatória quando ORCH_BILLING_ENABLED=true.")
+    if settings.dialer_supplier_v2_enabled:
+        if not settings.celery_enabled:
+            raise ValueError(
+                "CELERY_ENABLED=true é obrigatório quando "
+                "DIALER_SUPPLIER_V2_ENABLED=true, pois o registro ocorre "
+                "somente após o commit em fila dedicada."
+            )
+        if not settings.dialer_supplier_v2_workspace_allowlist:
+            raise ValueError(
+                "DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST é obrigatória quando "
+                "DIALER_SUPPLIER_V2_ENABLED=true."
+            )
+        if not settings.dialer_supplier_v2_flow_allowlist:
+            raise ValueError(
+                "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST é obrigatória quando "
+                "DIALER_SUPPLIER_V2_ENABLED=true."
+            )
+        try:
+            for workspace_uuid in settings.dialer_supplier_v2_workspace_allowlist:
+                if UUID(workspace_uuid).int == 0:
+                    raise ValueError
+            for flow_uuid in settings.dialer_supplier_v2_flow_allowlist:
+                if UUID(flow_uuid).int == 0:
+                    raise ValueError
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                "As allowlists do Supplier V2 contêm UUID inválido."
+            ) from exc
+        if not str(settings.target_core_supplier_api_base_url or "").strip():
+            raise ValueError(
+                "TARGET_CORE_SUPPLIER_API_BASE_URL é obrigatória quando "
+                "DIALER_SUPPLIER_V2_ENABLED=true."
+            )
+        if not str(settings.target_core_api_bearer_token or "").strip():
+            raise ValueError(
+                "TARGET_CORE_API_BEARER_TOKEN é obrigatória quando "
+                "DIALER_SUPPLIER_V2_ENABLED=true."
+            )
     return settings

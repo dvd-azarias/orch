@@ -819,3 +819,42 @@ código-fonte perdido nem reverte dados criados pelas APIs.
 
 `V2`: repositório e pipeline próprios, artefato imutável produzido em CI,
 promoção por ambiente e deploy sem build no host.
+
+## R40 — Registro Supplier V2 pode bloquear sessão ou expor segredo se tratado como chamada comum
+
+`STATUS`: MITIGATED IN IMPLEMENTATION / CANARY E2E PENDING
+
+`IMPACT`: critical no novo Dialer; nenhum impacto esperado no legado com a flag
+e allowlists desligadas
+
+`PROBABILITY`: low com o Gate 3; high se houver chamada inline, retry sem
+idempotência, múltiplos Beats ou persistência do callback token
+
+`AFFECTED AREA`: `send_with_dialer_handoff` / Celery / runtime da sessão /
+Target Core Supplier V2
+
+`DESCRIPTION`: há uma fronteira de falha entre o commit que marca o membro e o
+POST que cria o ciclo. Perder a publicação deixaria uma sessão bloqueada sem
+ciclo; repetir sem identidade estável poderia criar acionamentos duplicados.
+Além disso, a resposta de criação contém um token capaz de endereçar o callback
+do ciclo e esse segredo não pertence ao ORCH.
+
+`MITIGATION`: persistir a intenção antes do commit, publicar a task somente
+depois dele, usar chave determinística, validar integralmente a resposta e
+descartar o token ainda no cliente HTTP. Retry somente transitório, claim sob
+lock de sessão, lease para worker perdido, reconciliador opt-in em um único Beat
+e escopado pela allowlist de workspaces, recuperação de `pending_retry` stale e
+patch JSONB condicionado à mesma chave. Erros permanentes mantêm a sessão
+bloqueada e emitem alarme.
+
+`DETECTION`: estados `pending`, `registering`, `pending_retry`, `ready` e
+`failed` no runtime; eventos `orch.dialer_supplier_v2.*`; alarmes de retry/falha;
+fila `orch_dialer_supplier_v2`; busca de `callback_token` em runtime/logs deve
+retornar zero. Monitorar intents acima do lease e ciclos divergentes da revisão.
+
+`ROLLBACK`: retirar o flow da allowlist ou desligar a flag e reiniciar os
+processos Gate 3. Preservar ciclos para auditoria. Não liberar sessões nem
+limpar `linked_actuator` em massa e não redirecionar silenciosamente para V1.
+
+`V2`: outbox/inbox transacional dedicado, estado tipado de ciclo e gestão de
+segredos por capability sem trânsito pelo orquestrador.

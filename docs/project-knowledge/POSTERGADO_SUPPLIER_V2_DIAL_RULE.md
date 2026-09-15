@@ -2,7 +2,8 @@
 
 ## Estado
 
-- **Status:** `POSTERGADO`, não cancelado.
+- **Status:** `RETOMADO EM GATES`; o documento permanece como histórico do
+  plano original e itens não concluídos continuam pendentes.
 - **Registrado em:** 2026-09-11.
 - **Classificação proposta quando retomado:** `ALPHA_FIX_REQUIRED`.
 - **Motivo do adiamento:** a diretoria priorizou a criação de um CRUD de Dial Rules na Supplier. As regras deixarão de ser definidas dentro do card; o card manterá somente uma combo para selecionar uma Dial Rule criada e administrada por esse CRUD.
@@ -14,6 +15,13 @@
   workspace aprovado e acessíveis somente por túnel SSH. O canário de escrita e
   arquivamento passou. Este plano continua postergado apenas até o catálogo
   selecionar o Perfil e o desenho abaixo ser reconciliado com esse snapshot.
+- **Checkpoint de 2026-09-14:** CRUD, snapshot publicado, seletor
+  `dial_profile_id`, persistência dos ciclos e `POST /v2/contact-supplier/dialer-cycles`
+  já existem no Target Core. O Gate 3 ORCH implementa intenção idempotente,
+  task/fila própria, retry e reconciliação sob flag+allowlists de workspace e
+  flow. O POST E2E do
+  canário ainda é obrigatório antes do rollout. Seleção, feedback e decisões
+  intermediárias/terminais permanecem nos gates seguintes.
 
 Este documento preserva integralmente o plano aprovado conceitualmente antes da mudança de prioridade. Nenhum item abaixo deve ser interpretado como já implementado. Quando o trabalho for retomado, o desenho da Dial Rule deverá ser reconciliado com o novo CRUD; as fronteiras de segurança entre Supplier V1, Supplier V2 e ORCH devem ser preservadas.
 

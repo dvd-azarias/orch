@@ -118,3 +118,132 @@ async def test_advance_session_enqueues_identidade_link_only_after_commit(monkey
     )
 
     assert events == ["commit", "enqueue"]
+
+
+@pytest.mark.asyncio
+async def test_advance_session_enqueues_supplier_v2_only_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_uuid = "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+    flow_uuid = "4e163399-e9a0-4335-895f-316c6a161299"
+    queue = "orch_dialer_supplier_v2_test"
+    events: list[str] = []
+    enqueued: list[dict] = []
+    session_context = _DummySessionContext(events)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            dialer_supplier_v2_enabled=True,
+            dialer_supplier_v2_workspace_allowlist=(workspace_uuid,),
+            dialer_supplier_v2_flow_allowlist=(flow_uuid,),
+            celery_dialer_supplier_v2_queue=queue,
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_session_factory",
+        lambda: (lambda: session_context),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "bind_workspace_context",
+        lambda value: (value, f"ws_{value}"),
+    )
+
+    async def _advance(*_args, **_kwargs) -> str:
+        return "blocked_send_with_dialer_handoff"
+
+    async def _persist_metrics(*_args, **_kwargs) -> None:
+        return None
+
+    def _enqueue(**kwargs) -> None:  # type: ignore[no-untyped-def]
+        events.append("enqueue")
+        enqueued.append(kwargs)
+
+    monkeypatch.setattr(workflow_tasks, "advance_session_once", _advance)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "persist_session_metrics",
+        _persist_metrics,
+    )
+    from app.tasks import dialer_supplier_v2_tasks
+
+    monkeypatch.setattr(
+        dialer_supplier_v2_tasks.register_dialer_supplier_v2_cycle_task,
+        "apply_async",
+        _enqueue,
+    )
+
+    await workflow_tasks._advance_session_task(
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        session_id=123,
+    )
+
+    assert events == ["commit", "enqueue"]
+    assert enqueued == [
+        {
+            "kwargs": {
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": 123,
+            },
+            "queue": queue,
+            "routing_key": queue,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_advance_session_does_not_enqueue_supplier_v2_for_unlisted_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    workspace_uuid = "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+    session_context = _DummySessionContext(events)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            dialer_supplier_v2_enabled=True,
+            dialer_supplier_v2_workspace_allowlist=(workspace_uuid,),
+            dialer_supplier_v2_flow_allowlist=(
+                "4e163399-e9a0-4335-895f-316c6a161299",
+            ),
+            celery_dialer_supplier_v2_queue="orch_dialer_supplier_v2_test",
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_session_factory",
+        lambda: (lambda: session_context),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "bind_workspace_context",
+        lambda value: (value, f"ws_{value}"),
+    )
+
+    async def _advance(*_args, **_kwargs) -> str:
+        return "blocked_send_with_dialer_handoff"
+
+    async def _persist_metrics(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(workflow_tasks, "advance_session_once", _advance)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "persist_session_metrics",
+        _persist_metrics,
+    )
+
+    await workflow_tasks._advance_session_task(
+        workspace_uuid=workspace_uuid,
+        flow_uuid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        session_id=123,
+    )
+
+    assert events == ["commit"]

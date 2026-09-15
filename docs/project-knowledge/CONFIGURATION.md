@@ -52,6 +52,7 @@ As flags legada e nova sao mutuamente exclusivas. Detalhes: `docs/BILLING_BATCH_
 | dispatch | `orch_dispatch` | `orch_dispatch_launchd_local` | `orch_dispatch_f5_local` |
 | execute | `orch_execute` | `orch_execute_launchd_local` | `orch_execute_f5_local` |
 | switch BOT flow | `orch_switch_bot_flow` | `orch_switch_bot_flow_launchd_local` | `orch_switch_bot_flow_f5_local` |
+| Supplier V2 Dialer | `orch_dialer_supplier_v2` | `orch_dialer_supplier_v2_launchd_local` | `orch_dialer_supplier_v2_f5_local` |
 | heartbeat | `orch_heartbeat` | `orch_heartbeat_launchd_local` | `orch_heartbeat_f5_local` |
 | FileApp ingest | `orch_fileapp_ingest_events` | `orch_fileapp_ingest_launchd_local` | `orch_fileapp_ingest_f5_local` |
 | FileApp process | `orch_fileapp_source_list_ingest` | `orch_fileapp_source_list_launchd_local` | `orch_fileapp_source_list_f5_local` |
@@ -89,6 +90,24 @@ Defaults importantes:
   `RESTRICTION_LIST_CHECK_MAX_ATTEMPTS` (default `2`, máximo `5`) e
   `RESTRICTION_LIST_CHECK_RETRY_BACKOFF_SECONDS` (default `0.25`). A URL é
   obrigatória quando o card for usado e exige restart de API/workers.
+- Registro de ciclo Dialer Supplier V2: `DIALER_SUPPLIER_V2_ENABLED=false` por
+  padrão, com `DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST` e
+  `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST` obrigatórias quando habilitado. A primeira
+  limita também os schemas consultados pelo reconciliador; nunca deixá-la
+  global em banco compartilhado. O Gate exige `CELERY_ENABLED=true`, pois a
+  chamada externa é deliberadamente feita somente depois do commit.
+  Também exige `TARGET_CORE_SUPPLIER_API_BASE_URL` no perfil Supplier e
+  `TARGET_CORE_API_BEARER_TOKEN`; ausência impede a inicialização. Timeout,
+  tentativas, backoff, lease, intervalo e lote de reconciliação usam
+  `DIALER_SUPPLIER_V2_HTTP_TIMEOUT_SECONDS`,
+  `DIALER_SUPPLIER_V2_MAX_ATTEMPTS`,
+  `DIALER_SUPPLIER_V2_RETRY_BACKOFF_SECONDS`,
+  `DIALER_SUPPLIER_V2_REGISTRATION_LEASE_SECONDS`,
+  `DIALER_SUPPLIER_V2_RECONCILE_INTERVAL_SECONDS` e
+  `DIALER_SUPPLIER_V2_RECONCILE_BATCH_SIZE`. O consumer usa
+  `CELERY_DIALER_SUPPLIER_V2_QUEUE`. Habilitar
+  `CELERY_BEAT_DIALER_SUPPLIER_V2_RECONCILE_ENABLED=true` em exatamente um Beat
+  do ambiente; manter `false` nos demais.
 - `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 

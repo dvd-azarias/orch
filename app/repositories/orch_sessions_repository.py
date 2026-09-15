@@ -2427,6 +2427,7 @@ async def assign_dialer_handoff_routing_for_session(
             RETURNING
                 clm.id,
                 clm.ani,
+                clm.contact_list_id,
                 clm.linked_actuator,
                 clm.list_validity,
                 target.linked_at
@@ -2442,6 +2443,7 @@ async def assign_dialer_handoff_routing_for_session(
     linked_at = row["linked_at"]
     return {
         "contact_list_member_id": int(row["id"]),
+        "contact_list_id": str(row["contact_list_id"]),
         "ani": row["ani"],
         "linked_actuator": row["linked_actuator"],
         "mode": "dialer",
@@ -2455,6 +2457,41 @@ async def assign_dialer_handoff_routing_for_session(
             linked_at.isoformat() if hasattr(linked_at, "isoformat") else linked_at
         ),
     }
+
+
+async def patch_session_dialer_supplier_v2_registration(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    idempotency_key: str,
+    registration: dict[str, Any],
+) -> bool:
+    """Patch only the Gate 3 state, preserving concurrent runtime updates."""
+
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = jsonb_set(
+                    COALESCE(runtime_variables, '{}'::jsonb),
+                    '{workflow_v2,dialer_supplier_v2}',
+                    CAST(:registration AS jsonb),
+                    true
+                ),
+                updated_at = NOW()
+            WHERE id = :session_id
+              AND runtime_variables #>> '{workflow_v2,dialer_supplier_v2,idempotency_key}' = :idempotency_key
+            RETURNING id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "idempotency_key": idempotency_key,
+            "registration": json.dumps(registration, ensure_ascii=False),
+        },
+    )
+    return result.first() is not None
 
 
 async def fetch_contact_runtime_context_for_session(

@@ -1975,6 +1975,139 @@ async def test_prepare_send_with_dialer_handoff_marks_linked_actuator_and_action
 
 
 @pytest.mark.asyncio
+async def test_prepare_send_with_dialer_handoff_persists_supplier_v2_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "4e163399-e9a0-4335-895f-316c6a161299"
+    session_uuid = "11111111-1111-4111-8111-111111111111"
+    revision_uuid = "22222222-2222-4222-8222-222222222222"
+    component_ref_id = "33333333-3333-4333-8333-333333333333"
+    contact_list_id = "44444444-4444-4444-8444-444444444444"
+    profile_id = "55555555-5555-4555-8555-555555555555"
+    runtime_variables: dict[str, object] = {}
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "contact_list_member_id": 10655,
+            "contact_list_id": contact_list_id,
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+            "list_validity": None,
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "dialer_supplier_v2_enabled": True,
+                "dialer_supplier_v2_workspace_allowlist": (
+                    "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+                ),
+                "dialer_supplier_v2_flow_allowlist": (flow_uuid,),
+            },
+        )(),
+    )
+    component = {
+        "ref_id": component_ref_id,
+        "component_id": "send_with_dialer_handoff",
+        "parameters": {
+            "answer_action": "bot",
+            "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "dial_profile_id": {"id": profile_id, "name": "Canário"},
+        },
+    }
+
+    await _prepare_send_with_dialer_handoff_contact_member(
+        db_session=None,
+        flow_uuid=flow_uuid,
+        session_id=6937,
+        component=component,
+        runtime_variables=runtime_variables,
+        contact_list_member_id=10655,
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        session_uuid=session_uuid,
+        flow_revision_id=revision_uuid,
+    )
+
+    workflow_meta = runtime_variables["workflow_v2"]
+    assert isinstance(workflow_meta, dict)
+    intent = workflow_meta["dialer_supplier_v2"]
+    assert intent["status"] == "pending"
+    assert intent["session_uuid"] == session_uuid
+    assert intent["flow_uuid"] == flow_uuid
+    assert intent["flow_revision_id"] == revision_uuid
+    assert intent["component_ref_id"] == component_ref_id
+    assert intent["contact_list_id"] == contact_list_id
+    assert intent["contact_list_member_id"] == 10655
+    assert intent["dial_profile_id"] == profile_id
+    assert intent["idempotency_key"].startswith("orch:v2:dial-cycle:")
+    assert "callback_token" not in intent
+
+
+@pytest.mark.asyncio
+async def test_prepare_send_with_dialer_handoff_keeps_legacy_marker_only_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_variables: dict[str, object] = {}
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "contact_list_member_id": 10655,
+            "contact_list_id": "44444444-4444-4444-8444-444444444444",
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+            "list_validity": None,
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "dialer_supplier_v2_enabled": False,
+                "dialer_supplier_v2_flow_allowlist": (),
+            },
+        )(),
+    )
+    component = {
+        "ref_id": "dialer-handoff-1",
+        "component_id": "send_with_dialer_handoff",
+        "parameters": {
+            "answer_action": "bot",
+            "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+    }
+
+    await _prepare_send_with_dialer_handoff_contact_member(
+        db_session=None,
+        flow_uuid="4e163399-e9a0-4335-895f-316c6a161299",
+        session_id=6937,
+        component=component,
+        runtime_variables=runtime_variables,
+        contact_list_member_id=10655,
+    )
+
+    assert "send_with_dialer_handoff_routing" in runtime_variables
+    workflow_meta = runtime_variables.get("workflow_v2", {})
+    assert "dialer_supplier_v2" not in workflow_meta
+
+
+@pytest.mark.asyncio
 async def test_prepare_send_with_dialer_handoff_fails_without_active_link(
     monkeypatch,
 ) -> None:

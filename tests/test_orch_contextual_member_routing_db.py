@@ -11,6 +11,7 @@ from app.repositories.orch_sessions_repository import (
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
     fetch_contact_runtime_context_for_session,
+    patch_session_dialer_supplier_v2_registration,
 )
 
 
@@ -303,6 +304,7 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
 
             assert assignment is not None
             assert assignment["contact_list_member_id"] == 2001
+            assert assignment["contact_list_id"] == contact_list_uuid
             assert assignment["linked_actuator"] == "dialer"
             assert assignment["list_validity"] == "2026-09-12"
 
@@ -355,3 +357,86 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
                 )
             ).mappings().one()
             assert dict(row) == {"linked_actuator": None, "list_validity": None}
+
+
+@pytest.mark.asyncio
+async def test_supplier_v2_registration_patch_preserves_concurrent_runtime_keys() -> None:
+    session_factory = get_session_factory()
+    idempotency_key = "orch:v2:dial-cycle:" + ("a" * 64)
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE orch_sessions (
+                        id BIGINT PRIMARY KEY,
+                        runtime_variables JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO orch_sessions (id, runtime_variables)
+                    VALUES (
+                        9002,
+                        CAST(:runtime_variables AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "runtime_variables": (
+                        "{"
+                        '"callbacks_pending":[{"event_id":"evt-1"}],'
+                        '"workflow_v2":{"blocking_stop_reason":'
+                        '"blocked_send_with_dialer_handoff",'
+                        '"dialer_supplier_v2":{"idempotency_key":"'
+                        + idempotency_key
+                        + '","status":"pending"}}}'
+                    )
+                },
+            )
+
+            updated = await patch_session_dialer_supplier_v2_registration(
+                db_session,
+                session_id=9002,
+                idempotency_key=idempotency_key,
+                registration={
+                    "idempotency_key": idempotency_key,
+                    "status": "ready",
+                    "cycle_id": "11111111-1111-4111-8111-111111111111",
+                },
+            )
+            stale = await patch_session_dialer_supplier_v2_registration(
+                db_session,
+                session_id=9002,
+                idempotency_key="orch:v2:dial-cycle:" + ("b" * 64),
+                registration={"status": "failed"},
+            )
+            runtime = (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT runtime_variables
+                          FROM orch_sessions
+                         WHERE id = 9002
+                        """
+                    )
+                )
+            ).scalar_one()
+
+            assert updated is True
+            assert stale is False
+            assert runtime["callbacks_pending"] == [{"event_id": "evt-1"}]
+            assert (
+                runtime["workflow_v2"]["blocking_stop_reason"]
+                == "blocked_send_with_dialer_handoff"
+            )
+            assert runtime["workflow_v2"]["dialer_supplier_v2"] == {
+                "idempotency_key": idempotency_key,
+                "status": "ready",
+                "cycle_id": "11111111-1111-4111-8111-111111111111",
+            }

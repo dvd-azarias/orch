@@ -18,6 +18,7 @@ Environment=CELERY_ENABLED=true
 Environment=CELERY_DISPATCH_QUEUE=orch_dispatch
 Environment=CELERY_EXECUTE_QUEUE=orch_execute
 Environment=CELERY_SWITCH_BOT_FLOW_QUEUE=orch_switch_bot_flow
+Environment=CELERY_DIALER_SUPPLIER_V2_QUEUE=orch_dialer_supplier_v2
 Environment=CELERY_HEARTBEAT_QUEUE=orch_heartbeat
 Environment=CELERY_GENERATE_FILE_ENABLED=false
 Environment=CELERY_FILEAPP_INGEST_ENABLED=false
@@ -30,7 +31,7 @@ ExecStart=/opt/orch/.venv/bin/celery -A app.core.celery_app:celery_app worker \
   --hostname=orch-celery-worker@136_01 \
   --loglevel=INFO \
   --pool=prefork \
-  --queues=orch_dispatch,orch_execute,orch_switch_bot_flow,orch_heartbeat \
+  --queues=orch_dispatch,orch_execute,orch_switch_bot_flow,orch_dialer_supplier_v2,orch_heartbeat \
   --concurrency=8 \
   --prefetch-multiplier=1 \
   -Ofair \
