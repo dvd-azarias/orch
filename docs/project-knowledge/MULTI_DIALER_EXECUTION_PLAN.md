@@ -590,9 +590,10 @@ Fonte normativa:
   canal selecionado.
 - [x] Definir análise de dominância por caminho para consumidores de canal.
 - [x] Auditar definições existentes e medir o impacto dos futuros `422`.
-- [ ] Implementar metadados/registro normativo no Target Core.
-- [ ] Proteger create, update, patch, publish e rollback no padrão `422`.
-- [ ] Manter guards fail-closed equivalentes no ORCH.
+- [x] Implementar metadados/registro normativo no Target Core (`#514`).
+- [x] Proteger create, update, patch, publish e rollback no padrão `422`
+  (`#514`), sem bloquear vínculo de mailing em revisão legada já publicada.
+- [x] Manter guards fail-closed equivalentes no ORCH (`#180`).
 
 **Gate de saída:** nenhuma definição nova consegue combinar modo e cards com
 cardinalidade ou contexto incompatíveis; flows publicados existentes foram
@@ -605,12 +606,15 @@ auditados antes da ativação do bloqueio.
   limites rígidos.
 - [x] Confirmar o gap atual: `limit_action` existe no snapshot, mas não é
   executado/transportado no feedback terminal.
-- [ ] Congelar a semântica durável de `pause_person` e `block_phone` no snapshot.
-- [ ] Transportar decisão, origem, Perfil/revisão, membro e motivo terminal no
-  outbox Supplier V2.
-- [ ] Fazer `next_phone` depender de autorização/eligibilidade Supplier V2.
-- [ ] Garantir consumo idempotente da decisão pelo ORCH.
-- [ ] Provar que V1 e V2 single-card não mudaram de comportamento.
+- [x] Congelar a semântica durável de `pause_person` e `block_phone` no snapshot
+  (`#513`).
+- [x] Transportar decisão, origem, Perfil/revisão, membro e motivo terminal no
+  outbox Supplier V2 (`#513`/`#179`).
+- [x] Fazer `next_phone` depender de autorização/eligibilidade Supplier V2
+  (`#514`/`#180`).
+- [x] Garantir consumo idempotente da decisão pelo ORCH (`#180`).
+- [x] Provar por regressão automatizada que V1 e V2 single-card não mudaram de
+  comportamento (`#513`/`#179`).
 
 **Gate de saída:** o ORCH nunca deduz `next_phone` apenas pelo branch do evento;
 a decisão usada é explícita, auditável e corresponde ao Perfil/revisão do
@@ -618,13 +622,14 @@ ciclo.
 
 ### Gate 3C — seletor harmonizado
 
-- [ ] Adicionar `first_eligible|next_eligible`, com default retrocompatível
+- [x] Adicionar `first_eligible|next_eligible`, com default retrocompatível
   `first_eligible`.
-- [ ] Permitir `next_eligible` somente em `person`.
-- [ ] Adicionar `respect_dial_rule|flow_override` para próximo canal de voz.
-- [ ] Excluir o membro atual e limpar seleção em `not_found|exception`.
-- [ ] Adicionar branch `blocked_by_policy` sem retry técnico.
-- [ ] Invalidar seleção quando o membro contextual for desativado.
+- [x] Permitir `next_eligible` somente em `person`.
+- [x] Adicionar `respect_dial_rule|flow_override` para próximo canal de voz.
+- [x] Excluir o membro atual e limpar seleção em
+  `not_found|blocked_by_policy|exception`.
+- [x] Adicionar branch `blocked_by_policy` sem retry técnico.
+- [x] Invalidar seleção quando o membro contextual for desativado.
 - [ ] Cobrir o retorno ao mesmo card com nova geração de ciclo ou rejeição
   explícita; nunca reutilizar ciclo terminal silenciosamente.
 - [ ] Testar PostgreSQL real, stack local completa e canários controlados.
@@ -958,10 +963,11 @@ Ao retomar:
 
 ## Próxima ação exata
 
-Não vincular mailing ao canário. Com o relatório de impacto fechado, congelar a
-duração de `pause_person`/`block_phone` e implementar primeiro, em branch Target
-Core isolado, o contrato terminal Supplier V2 com `decision`,
-`decision_source`, Perfil/revisão e membro contextual. Não implementar
-`next_eligible` antes desse payload, não tocar Supplier V1 e não alterar
-Kerberos/`service_dialer` enquanto o contrato entre Supplier V2 e ORCH não
-estiver validado.
+Não vincular mailing ao canário antes do rollout. Integrar primeiro os PRs-base
+ORCH `#179` e Target Core `#513`; depois integrar/implantar o consumidor ORCH
+`#180` e somente então o catálogo/produtor Target Core `#514`. Confirmar health,
+workers e smoke sem mailing. Em seguida, usar
+`8b81e493-b39c-4829-8b1e-5bafd00aeb7c` em duas provas controladas: `channel`
+com ambos os discadores presos à âncora e `person` com seletor inicial mais
+`next_eligible` entre os discadores. Só depois fechar o retorno ao mesmo card e
+retomar o flow completo `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.

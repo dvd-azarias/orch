@@ -14,7 +14,8 @@ discagem. O contrato é uma precondição do canário multilane
 
 Classificação: `ALPHA_FIX_REQUIRED`.
 
-Estado: contrato aprovado; validações e runtime ainda não implementados.
+Estado: contrato aprovado; implementação validada nas PRs Target Core `#513`/
+`#514` e ORCH `#179`/`#180`, ainda pendente de merge e rollout coordenado.
 
 ## Invariantes
 
