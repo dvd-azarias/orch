@@ -27,6 +27,8 @@ async def fetch_select_contact_channel_candidate(
     person_uuid: str | None,
     channel_type: str,
     channel_label: str | None,
+    excluded_contact_list_member_id: int | None = None,
+    authorized_contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
     parameters: dict[str, Any] = {
         "flow_uuid": flow_uuid,
@@ -37,6 +39,8 @@ async def fetch_select_contact_channel_candidate(
         "person_uuid": person_uuid,
         "channel_type": channel_type,
         "channel_label": channel_label,
+        "excluded_contact_list_member_id": excluded_contact_list_member_id,
+        "authorized_contact_list_member_id": authorized_contact_list_member_id,
     }
     scope_filter = ""
     if session_scope == "channel":
@@ -49,6 +53,14 @@ async def fetch_select_contact_channel_candidate(
               AND (
                     CAST(:person_uuid AS uuid) IS NULL
                     OR clm.person_uuid = CAST(:person_uuid AS uuid)
+                  )
+              AND (
+                    CAST(:excluded_contact_list_member_id AS bigint) IS NULL
+                    OR clm.id <> CAST(:excluded_contact_list_member_id AS bigint)
+                  )
+              AND (
+                    CAST(:authorized_contact_list_member_id AS bigint) IS NULL
+                    OR clm.id = CAST(:authorized_contact_list_member_id AS bigint)
                   )
         """
 
