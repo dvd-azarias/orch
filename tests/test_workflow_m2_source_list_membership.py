@@ -290,6 +290,18 @@ async def test_membership_inactive_changes_only_materialized_scope(monkeypatch) 
     ensure_membership = AsyncMock()
     monkeypatch.setattr(workflow, "ensure_person_in_source_list", ensure_membership)
     runtime = _runtime()
+    runtime["workflow_v2"] = {
+        "selected_contact_channel": {
+            "selected": True,
+            "session_scope": "person",
+            "contact_list_member_id": 77,
+            "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "mailing_id": 1139,
+            "person_uuid": PERSON_UUID,
+            "type": "voice",
+            "address": "21999999999",
+        }
+    }
 
     branch = await workflow._run_source_list_membership(
         db_session=_NestedSession(),  # type: ignore[arg-type]
@@ -332,7 +344,9 @@ async def test_membership_inactive_changes_only_materialized_scope(monkeypatch) 
         "sessions_stopped": 2,
         "sessions_created": 0,
         "missing": None,
+        "selected_contact_channel_invalidated": True,
     }
+    assert "selected_contact_channel" not in runtime["workflow_v2"]
 
 
 @pytest.mark.asyncio

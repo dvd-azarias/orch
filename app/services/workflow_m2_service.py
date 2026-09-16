@@ -78,10 +78,12 @@ from app.repositories.send_with_sms_repository import assign_sms_routing_for_ses
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.dialer_supplier_v2_service import (
+    DialerSupplierV2EligibilityError,
     DialerSupplierV2RegistrationError,
     build_dialer_cycle_intent,
     dialer_supplier_v2_enabled_for_context,
     dialer_supplier_v2_multilane_enabled_for_context,
+    resolve_next_dialer_channel,
 )
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.identidade_person_service import (
@@ -141,6 +143,8 @@ WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
 SPLIT_RANDOM_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
 SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email", "rcs"}
+SELECT_CONTACT_CHANNEL_STRATEGIES = {"first_eligible", "next_eligible"}
+SELECT_CONTACT_CHANNEL_DIAL_RULE_MODES = {"respect_dial_rule", "flow_override"}
 SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
 CHECK_RESTRICTION_LISTS_SCOPES = {"person", "current_channel"}
@@ -226,7 +230,14 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "select_contact_channel_invalid_channel_label",
     "select_contact_channel_invalid_channel_type",
     "select_contact_channel_invalid_output_var",
+    "select_contact_channel_invalid_selection_strategy",
+    "select_contact_channel_invalid_dial_rule_mode",
     "select_contact_channel_missing_contact_context",
+    "select_contact_channel_next_requires_person",
+    "select_contact_channel_next_requires_selection",
+    "select_contact_channel_next_source_invalid",
+    "select_contact_channel_next_source_consumed",
+    "select_contact_channel_supplier_eligibility_failed",
     "select_contact_channel_persistence_failed",
     "select_contact_channel_rebind_failed",
     "send_with_rcs_contact_not_eligible",
@@ -4307,7 +4318,7 @@ def _select_contact_channel_parameters(component: dict[str, Any]) -> dict[str, A
 
 def _select_contact_channel_config(
     component: dict[str, Any],
-) -> tuple[str, str | None, str]:
+) -> tuple[str, str | None, str, str, str | None]:
     params = _select_contact_channel_parameters(component)
     raw_channel_type = params.get("channel_type")
     if isinstance(raw_channel_type, list) and len(raw_channel_type) != 1:
@@ -4365,7 +4376,45 @@ def _select_contact_channel_config(
             "select_contact_channel_invalid_output_var",
             "O campo output_var deve conter um nome de variável válido.",
         )
-    return channel_type, channel_label, output_var
+
+    raw_strategy = params.get("selection_strategy")
+    if isinstance(raw_strategy, list) and len(raw_strategy) > 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_selection_strategy",
+            "O campo selection_strategy deve conter uma única opção.",
+        )
+    selection_strategy = str(
+        _catalog_parameter_scalar(raw_strategy) or "first_eligible"
+    ).strip().lower()
+    if selection_strategy not in SELECT_CONTACT_CHANNEL_STRATEGIES:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_selection_strategy",
+            "O campo selection_strategy deve ser first_eligible ou next_eligible.",
+        )
+
+    dial_rule_mode: str | None = None
+    if selection_strategy == "next_eligible" and channel_type == "voice":
+        raw_dial_rule_mode = params.get("dial_rule_mode")
+        if isinstance(raw_dial_rule_mode, list) and len(raw_dial_rule_mode) > 1:
+            raise WorkflowExecutionError(
+                "select_contact_channel_invalid_dial_rule_mode",
+                "O campo dial_rule_mode deve conter uma única opção.",
+            )
+        dial_rule_mode = str(
+            _catalog_parameter_scalar(raw_dial_rule_mode) or ""
+        ).strip().lower()
+        if dial_rule_mode not in SELECT_CONTACT_CHANNEL_DIAL_RULE_MODES:
+            raise WorkflowExecutionError(
+                "select_contact_channel_invalid_dial_rule_mode",
+                "O campo dial_rule_mode deve respeitar o Perfil ou forçar a troca pelo fluxo.",
+            )
+    return (
+        channel_type,
+        channel_label,
+        output_var,
+        selection_strategy,
+        dial_rule_mode,
+    )
 
 
 def _select_contact_channel_anchor(
@@ -4425,6 +4474,114 @@ def _store_select_contact_channel_result(
         workflow_meta.pop("selected_contact_channel", None)
 
 
+def _next_voice_channel_terminal_context(
+    *,
+    runtime_variables: dict[str, Any],
+    flow_uuid: str,
+    flow_revision_id: str,
+    selector_component_ref_id: str,
+    mode: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    if not isinstance(workflow_meta, dict):
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_source_invalid",
+            "A sessão não possui contexto Supplier V2 para trocar o telefone.",
+        )
+    last_response = runtime_variables.get("dialer_last_response")
+    source_component_ref_id = (
+        str(last_response.get("component_ref_id") or "").strip()
+        if isinstance(last_response, dict)
+        else ""
+    )
+    if not source_component_ref_id:
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_source_invalid",
+            "Não foi possível identificar o card de discagem que autorizaria a troca.",
+        )
+
+    registrations: list[dict[str, Any]] = []
+    active = workflow_meta.get("dialer_supplier_v2")
+    if isinstance(active, dict):
+        registrations.append(active)
+    history = workflow_meta.get("dialer_supplier_v2_history")
+    if isinstance(history, dict):
+        registrations.extend(
+            item for item in history.values() if isinstance(item, dict)
+        )
+    registration = next(
+        (
+            item
+            for item in registrations
+            if str(item.get("flow_uuid") or "") == flow_uuid
+            and str(item.get("flow_revision_id") or "") == flow_revision_id
+            and str(item.get("component_ref_id") or "")
+            == source_component_ref_id
+            and str(item.get("status") or "").strip().lower()
+            == "terminal_received"
+            and isinstance(item.get("terminal_delivery"), dict)
+        ),
+        None,
+    )
+    if registration is None:
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_source_invalid",
+            "A decisão terminal do card de discagem não está disponível nesta sessão.",
+        )
+    terminal_delivery = registration["terminal_delivery"]
+    try:
+        int(terminal_delivery.get("contact_list_member_id"))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_source_invalid",
+            "A decisão terminal não identifica o telefone utilizado.",
+        ) from exc
+    if not all(
+        str(terminal_delivery.get(field) or "").strip()
+        for field in ("event_id", "cycle_id")
+    ):
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_source_invalid",
+            "A decisão terminal não possui evento e ciclo auditáveis.",
+        )
+
+    consumption = terminal_delivery.get("next_channel_consumption")
+    if isinstance(consumption, dict):
+        same_consumer = (
+            str(consumption.get("event_id") or "")
+            == str(terminal_delivery.get("event_id") or "")
+            and str(consumption.get("selector_component_ref_id") or "")
+            == selector_component_ref_id
+            and str(consumption.get("mode") or "") == mode
+        )
+        resolution = consumption.get("resolution")
+        if same_consumer and isinstance(resolution, dict):
+            return registration, terminal_delivery, dict(resolution)
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_source_consumed",
+            "Esta decisão de troca de telefone já foi consumida por outro seletor.",
+        )
+    return registration, terminal_delivery, None
+
+
+def _consume_next_voice_channel_decision(
+    *,
+    terminal_delivery: dict[str, Any],
+    selector_component_ref_id: str,
+    mode: str,
+    resolution: dict[str, Any],
+    consumed_at: datetime,
+) -> None:
+    terminal_delivery["next_channel_consumption"] = {
+        "event_id": terminal_delivery.get("event_id"),
+        "cycle_id": terminal_delivery.get("cycle_id"),
+        "selector_component_ref_id": selector_component_ref_id,
+        "mode": mode,
+        "resolution": copy.deepcopy(resolution),
+        "consumed_at": consumed_at.isoformat(),
+    }
+
+
 async def _run_select_contact_channel(
     *,
     db_session: AsyncSession,
@@ -4436,7 +4593,18 @@ async def _run_select_contact_channel(
     contact_row: dict[str, Any] | None,
     now: datetime | None = None,
 ) -> _SelectContactChannelExecution:
-    channel_type, channel_label, output_var = _select_contact_channel_config(component)
+    (
+        channel_type,
+        channel_label,
+        output_var,
+        selection_strategy,
+        dial_rule_mode,
+    ) = _select_contact_channel_config(component)
+    if selection_strategy == "next_eligible" and session_scope != "person":
+        raise WorkflowExecutionError(
+            "select_contact_channel_next_requires_person",
+            "A seleção do próximo canal exige uma sessão processada por pessoa.",
+        )
     (
         contact_list_member_id,
         contact_list_id,
@@ -4448,6 +4616,170 @@ async def _run_select_contact_channel(
             "select_contact_channel_missing_contact_context",
             "A sessão por pessoa não possui person_uuid válido para selecionar o canal.",
         )
+
+    excluded_member_id: int | None = None
+    authorized_member_id: int | None = None
+    supplier_resolution: dict[str, Any] | None = None
+    terminal_delivery: dict[str, Any] | None = None
+    decision_was_already_consumed = False
+    evaluated_at = now or datetime.now(timezone.utc)
+
+    if selection_strategy == "next_eligible":
+        registration: dict[str, Any] | None = None
+        cached_resolution: dict[str, Any] | None = None
+        if channel_type == "voice":
+            assert dial_rule_mode is not None
+            workflow_meta = _ensure_workflow_meta(runtime_variables)
+            flow_revision_id = str(workflow_meta.get("revision_id") or "").strip()
+            registration, terminal_delivery, cached_resolution = (
+                _next_voice_channel_terminal_context(
+                    runtime_variables=runtime_variables,
+                    flow_uuid=flow_uuid,
+                    flow_revision_id=flow_revision_id,
+                    selector_component_ref_id=str(component.get("ref_id") or ""),
+                    mode=dial_rule_mode,
+                )
+            )
+            decision_was_already_consumed = cached_resolution is not None
+            if cached_resolution is not None:
+                supplier_resolution = cached_resolution
+
+        if cached_resolution is not None:
+            try:
+                excluded_member_id = int(
+                    terminal_delivery.get("contact_list_member_id")
+                )
+            except (TypeError, ValueError) as exc:
+                raise WorkflowExecutionError(
+                    "select_contact_channel_next_source_invalid",
+                    "A decisão terminal não identifica o telefone utilizado.",
+                ) from exc
+        else:
+            active_selection = _active_selected_contact_channel(runtime_variables)
+            if not isinstance(active_selection, dict):
+                raise WorkflowExecutionError(
+                    "select_contact_channel_next_requires_selection",
+                    "Selecione um canal inicial antes de solicitar o próximo canal.",
+                )
+            try:
+                excluded_member_id = int(
+                    active_selection.get("contact_list_member_id")
+                )
+            except (TypeError, ValueError) as exc:
+                raise WorkflowExecutionError(
+                    "select_contact_channel_next_requires_selection",
+                    "A seleção atual não possui um membro de contato válido.",
+                ) from exc
+            if (
+                excluded_member_id != contact_list_member_id
+                or str(active_selection.get("contact_list_id") or "")
+                != contact_list_id
+                or int(active_selection.get("mailing_id") or 0) != mailing_id
+                or str(active_selection.get("person_uuid") or "")
+                != str(person_uuid or "")
+            ):
+                raise WorkflowExecutionError(
+                    "select_contact_channel_next_requires_selection",
+                    "A seleção atual diverge do membro contextual da sessão.",
+                )
+            if terminal_delivery is not None:
+                try:
+                    delivered_member_id = int(
+                        terminal_delivery.get("contact_list_member_id")
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_next_source_invalid",
+                        "A decisão terminal não identifica o telefone utilizado.",
+                    ) from exc
+                if delivered_member_id != excluded_member_id:
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_next_source_invalid",
+                        "A decisão terminal pertence a outro telefone da pessoa.",
+                    )
+
+        if channel_type == "voice":
+            assert dial_rule_mode is not None
+            assert registration is not None
+            assert terminal_delivery is not None
+            if cached_resolution is None:
+                try:
+                    resolved = await asyncio.to_thread(
+                        resolve_next_dialer_channel,
+                        workspace_uuid=get_current_workspace_uuid(),
+                        session_uuid=str(registration.get("session_uuid") or ""),
+                        flow_uuid=flow_uuid,
+                        flow_revision_id=flow_revision_id,
+                        source_component_ref_id=str(
+                            registration.get("component_ref_id") or ""
+                        ),
+                        selector_component_ref_id=str(
+                            component.get("ref_id") or ""
+                        ),
+                        cycle_id=str(terminal_delivery.get("cycle_id") or ""),
+                        event_id=str(terminal_delivery.get("event_id") or ""),
+                        current_contact_list_member_id=excluded_member_id,
+                        mode=dial_rule_mode,
+                        channel_label=channel_label,
+                    )
+                except DialerSupplierV2EligibilityError as exc:
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_supplier_eligibility_failed",
+                        f"A Supplier V2 não confirmou o próximo telefone: {exc.code}.",
+                    ) from exc
+                supplier_resolution = resolved.runtime_payload()
+
+            assert supplier_resolution is not None
+            supplier_decision = str(
+                supplier_resolution.get("decision") or ""
+            ).strip().lower()
+            candidate_authorization = supplier_resolution.get("candidate")
+            if supplier_decision == "selected" and isinstance(
+                candidate_authorization, dict
+            ):
+                try:
+                    authorized_member_id = int(
+                        candidate_authorization["contact_list_member_id"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_supplier_eligibility_failed",
+                        "A Supplier V2 devolveu um candidato inválido.",
+                    ) from exc
+            elif supplier_decision in {"not_found", "blocked_by_policy"}:
+                if not decision_was_already_consumed:
+                    _consume_next_voice_channel_decision(
+                        terminal_delivery=terminal_delivery,
+                        selector_component_ref_id=str(component.get("ref_id") or ""),
+                        mode=dial_rule_mode,
+                        resolution=supplier_resolution,
+                        consumed_at=evaluated_at,
+                    )
+                result = {
+                    "component_ref_id": component.get("ref_id"),
+                    "selected": False,
+                    "branch": supplier_decision,
+                    "session_scope": session_scope,
+                    "selection_strategy": selection_strategy,
+                    "dial_rule_mode": dial_rule_mode,
+                    "requested_type": channel_type,
+                    "requested_label": channel_label,
+                    "output_var": output_var,
+                    "supplier_eligibility": copy.deepcopy(supplier_resolution),
+                    "updated_at": evaluated_at.isoformat(),
+                }
+                _store_select_contact_channel_result(
+                    runtime_variables=runtime_variables,
+                    output_var=output_var,
+                    result=result,
+                    selected=False,
+                )
+                return _SelectContactChannelExecution(supplier_decision, None)
+            else:
+                raise WorkflowExecutionError(
+                    "select_contact_channel_supplier_eligibility_failed",
+                    "A Supplier V2 devolveu uma decisão incompatível.",
+                )
 
     try:
         async with db_session.begin_nested():
@@ -4462,7 +4794,39 @@ async def _run_select_contact_channel(
                 person_uuid=person_uuid,
                 channel_type=channel_type,
                 channel_label=channel_label,
+                excluded_contact_list_member_id=excluded_member_id,
+                authorized_contact_list_member_id=authorized_member_id,
             )
+            if (
+                candidate is None
+                and supplier_resolution is not None
+                and authorized_member_id is not None
+            ):
+                raise WorkflowExecutionError(
+                    "select_contact_channel_supplier_eligibility_failed",
+                    "O telefone autorizado deixou de estar disponível no contexto da sessão.",
+                )
+            if (
+                candidate is not None
+                and supplier_resolution is not None
+                and authorized_member_id is not None
+            ):
+                supplier_candidate = supplier_resolution.get("candidate")
+                if not isinstance(supplier_candidate, dict) or any(
+                    str(candidate.get(local_field) or "").strip()
+                    != str(supplier_candidate.get(remote_field) or "").strip()
+                    for local_field, remote_field in (
+                        ("contact_list_member_id", "contact_list_member_id"),
+                        ("contact_list_id", "contact_list_id"),
+                        ("mailing_id", "mailing_id"),
+                        ("person_uuid", "person_uuid"),
+                        ("contact_channel_address", "channel_address"),
+                    )
+                ):
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_supplier_eligibility_failed",
+                        "O telefone materializado diverge da autorização da Supplier V2.",
+                    )
             if candidate is not None and session_scope == "person":
                 rebound = await rebind_person_session_to_contact_channel(
                     db_session,
@@ -4490,13 +4854,15 @@ async def _run_select_contact_channel(
             "Falha ao selecionar o canal do contato.",
         ) from exc
 
-    updated_at = now or datetime.now(timezone.utc)
+    updated_at = evaluated_at
     if candidate is None:
         result = {
             "component_ref_id": component.get("ref_id"),
             "selected": False,
             "branch": "not_found",
             "session_scope": session_scope,
+            "selection_strategy": selection_strategy,
+            "dial_rule_mode": dial_rule_mode,
             "requested_type": channel_type,
             "requested_label": channel_label,
             "output_var": output_var,
@@ -4510,11 +4876,26 @@ async def _run_select_contact_channel(
         )
         return _SelectContactChannelExecution("not_found", None)
 
+    if (
+        terminal_delivery is not None
+        and supplier_resolution is not None
+        and not decision_was_already_consumed
+    ):
+        _consume_next_voice_channel_decision(
+            terminal_delivery=terminal_delivery,
+            selector_component_ref_id=str(component.get("ref_id") or ""),
+            mode=str(dial_rule_mode or ""),
+            resolution=supplier_resolution,
+            consumed_at=updated_at,
+        )
+
     result = {
         "component_ref_id": component.get("ref_id"),
         "selected": True,
         "branch": "selected",
         "session_scope": session_scope,
+        "selection_strategy": selection_strategy,
+        "dial_rule_mode": dial_rule_mode,
         "contact_list_member_id": int(candidate["contact_list_member_id"]),
         "contact_list_id": str(candidate["contact_list_id"]),
         "mailing_id": int(candidate["mailing_id"]),
@@ -4526,6 +4907,8 @@ async def _run_select_contact_channel(
         "output_var": output_var,
         "updated_at": updated_at.isoformat(),
     }
+    if supplier_resolution is not None:
+        result["supplier_eligibility"] = copy.deepcopy(supplier_resolution)
     _store_select_contact_channel_result(
         runtime_variables=runtime_variables,
         output_var=output_var,
@@ -6209,6 +6592,21 @@ async def _run_source_list_membership(
     ):
         previous_state = "active"
 
+    selected_channel_invalidated = False
+    if desired_state == "inactive" and branch != "not_found":
+        selected_channel = _active_selected_contact_channel(runtime_variables)
+        if (
+            isinstance(selected_channel, dict)
+            and str(selected_channel.get("contact_list_id") or "")
+            == str(materialized.get("contact_list_id") or "")
+            and str(selected_channel.get("person_uuid") or "")
+            == str(person_uuid or "")
+        ):
+            _ensure_workflow_meta(runtime_variables).pop(
+                "selected_contact_channel", None
+            )
+            selected_channel_invalidated = True
+
     output = {
         "action": branch,
         "desired_state": desired_state,
@@ -6230,6 +6628,8 @@ async def _run_source_list_membership(
         "sessions_created": 0,
         "missing": missing,
     }
+    if selected_channel_invalidated:
+        output["selected_contact_channel_invalidated"] = True
     _store_source_list_membership_output(
         runtime_variables=runtime_variables,
         output_var=output_var,
@@ -8108,6 +8508,11 @@ async def execute_workflow_m2_for_session(
                             },
                         )
                         branch_label = exception_branch
+                    selected_contact_channel = (
+                        _active_selected_contact_channel(runtime_variables)
+                        if session_scope == "person"
+                        else None
+                    )
                 elif kind == "split_random":
                     try:
                         branch_label = _run_split_random(

@@ -21,6 +21,9 @@ CYCLE_ID = "66666666-6666-4666-8666-666666666666"
 PROFILE_REVISION_ID = "77777777-7777-4777-8777-777777777777"
 POLICY_ID = "88888888-8888-4888-8888-888888888888"
 LIMIT_ID = "99999999-9999-4999-8999-999999999999"
+EVENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+PERSON_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+SELECTOR_REF_ID = "select-next-phone"
 
 
 class _Response:
@@ -94,6 +97,67 @@ def _response(intent: dict, *, replayed: bool = False) -> dict:
             "replayed": replayed,
         }
     }
+
+
+def _next_channel_response(*, decision: str = "selected") -> dict:
+    candidate = (
+        {
+            "contact_list_member_id": 72,
+            "contact_list_id": CONTACT_LIST_ID,
+            "mailing_id": 1140,
+            "person_uuid": PERSON_UUID,
+            "channel_type": "voice",
+            "channel_label": "telefone_2",
+            "channel_address": "5511988880002",
+            "is_primary": False,
+        }
+        if decision == "selected"
+        else None
+    )
+    return {
+        "data": {
+            "supplier_contract": "v2",
+            "decision": decision,
+            "reason": "eligible" if decision == "selected" else "calendar_closed",
+            "candidate": candidate,
+            "source": {
+                "cycle_id": CYCLE_ID,
+                "event_id": EVENT_ID,
+                "component_ref_id": COMPONENT_REF_ID,
+                "decision": "next_phone",
+                "decision_source": "dial_profile",
+                "terminal_reason": "outcome_attempt_limit_reached",
+            },
+            "authorization": (
+                {
+                    "mode": "respect_dial_rule",
+                    "decision_source": "dial_profile",
+                }
+                if decision == "selected"
+                else None
+            ),
+            "selector_component_ref_id": SELECTOR_REF_ID,
+            "evaluated_at": "2026-09-16T13:00:00+00:00",
+        }
+    }
+
+
+def _resolve_next_channel(**overrides: object):
+    values = {
+        "workspace_uuid": WORKSPACE_UUID,
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "source_component_ref_id": COMPONENT_REF_ID,
+        "selector_component_ref_id": SELECTOR_REF_ID,
+        "cycle_id": CYCLE_ID,
+        "event_id": EVENT_ID,
+        "current_contact_list_member_id": 71,
+        "mode": "respect_dial_rule",
+        "settings": _settings(),
+    }
+    values.update(overrides)
+    return service.resolve_next_dialer_channel(**values)  # type: ignore[arg-type]
 
 
 def test_feature_flag_requires_workspace_and_flow_allowlists() -> None:
@@ -222,6 +286,109 @@ def test_register_cycle_posts_exact_contract_and_discards_callback_token(
     assert result.replayed is False
     runtime_payload = result.runtime_payload()
     assert "callback_token" not in runtime_payload
+
+
+def test_resolve_next_channel_posts_terminal_identity_and_parses_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(req, *, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _Response(_next_channel_response(), status=200)
+
+    monkeypatch.setattr(service.request, "urlopen", _urlopen)
+
+    result = _resolve_next_channel()
+
+    assert captured["url"] == (
+        "https://supplier.internal/v2/contact-supplier/dialer-next-channel/resolve"
+    )
+    assert captured["headers"]["X-workspace-uuid"] == WORKSPACE_UUID  # type: ignore[index]
+    assert captured["body"] == {
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "source_component_ref_id": COMPONENT_REF_ID,
+        "selector_component_ref_id": SELECTOR_REF_ID,
+        "cycle_id": CYCLE_ID,
+        "event_id": EVENT_ID,
+        "current_contact_list_member_id": 71,
+        "mode": "respect_dial_rule",
+        "channel_label": None,
+    }
+    assert result.decision == "selected"
+    assert result.candidate is not None
+    assert result.candidate["contact_list_member_id"] == 72
+    assert result.source["decision"] == "next_phone"
+
+
+@pytest.mark.parametrize("decision", ["not_found", "blocked_by_policy"])
+def test_resolve_next_channel_accepts_business_outcomes_without_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            _next_channel_response(decision=decision), status=200
+        ),
+    )
+
+    result = _resolve_next_channel()
+
+    assert result.decision == decision
+    assert result.candidate is None
+
+
+def test_resolve_next_channel_rejects_response_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _next_channel_response()
+    response["data"]["source"]["event_id"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(response, status=200),
+    )
+
+    with pytest.raises(service.DialerSupplierV2EligibilityError) as exc_info:
+        _resolve_next_channel()
+
+    assert exc_info.value.code == "dialer_supplier_v2_next_channel_invalid_response"
+
+
+def test_resolve_next_channel_maps_supplier_policy_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = json.dumps(
+        {
+            "detail": {
+                "error_code": "contact_supplier_v2_next_channel_source_mismatch"
+            }
+        }
+    ).encode("utf-8")
+
+    def _urlopen(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise HTTPError(
+            "https://supplier.internal",
+            409,
+            "conflict",
+            {},
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr(service.request, "urlopen", _urlopen)
+
+    with pytest.raises(service.DialerSupplierV2EligibilityError) as exc_info:
+        _resolve_next_channel()
+
+    assert exc_info.value.code == "contact_supplier_v2_next_channel_source_mismatch"
+    assert exc_info.value.retryable is False
 
 
 def test_register_cycle_accepts_idempotent_replay(
