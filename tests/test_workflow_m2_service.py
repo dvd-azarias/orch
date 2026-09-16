@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -901,14 +902,21 @@ def test_resolve_send_with_dialer_branch_label_returns_none_without_status() -> 
     assert "dialer_last_response" not in runtime_variables
 
 
-def test_supplier_v2_handoff_ignores_raw_pbx_status_until_terminal_decision() -> None:
+@pytest.mark.parametrize("registration_status", ["pending", "ready"])
+def test_supplier_v2_handoff_ignores_raw_pbx_status_until_terminal_decision(
+    registration_status: str,
+) -> None:
     runtime_variables = {
         "workflow_v2": {
             "blocking_execution": True,
             "blocking_stop_reason": "blocked_send_with_dialer_handoff",
             "dialer_supplier_v2": {
-                "status": "ready",
-                "cycle_id": "11111111-1111-4111-8111-111111111111",
+                "status": registration_status,
+                "cycle_id": (
+                    "11111111-1111-4111-8111-111111111111"
+                    if registration_status == "ready"
+                    else None
+                ),
                 "component_ref_id": "dialer-handoff-1",
             },
         },
@@ -924,6 +932,46 @@ def test_supplier_v2_handoff_ignores_raw_pbx_status_until_terminal_decision() ->
     assert (
         _resolve_send_with_dialer_branch_label(
             component=component,
+            runtime_variables=runtime_variables,
+        )
+        is None
+    )
+    assert _should_resume_dialer_blocking_execution(runtime_variables) is False
+
+
+def test_multilane_active_card_never_inherits_terminal_history_or_raw_status() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+            "dialer_supplier_v2": {
+                "status": "pending",
+                "component_ref_id": "dialer-handoff-b",
+            },
+            "dialer_supplier_v2_history": {
+                "history-a": {
+                    "status": "terminal_received",
+                    "cycle_id": "11111111-1111-4111-8111-111111111111",
+                    "component_ref_id": "dialer-handoff-a",
+                    "terminal_delivery": {
+                        "terminal": True,
+                        "outcome": "answered",
+                    },
+                }
+            },
+        },
+        "last_payload": {
+            "hangup": {"Disposition": "ANSWERED", "DialerHangupCause": "200"}
+        },
+    }
+    component_b = {
+        "component_id": "send_with_dialer_handoff",
+        "ref_id": "dialer-handoff-b",
+    }
+
+    assert (
+        _resolve_send_with_dialer_branch_label(
+            component=component_b,
             runtime_variables=runtime_variables,
         )
         is None
@@ -2114,6 +2162,573 @@ async def test_prepare_send_with_dialer_handoff_persists_supplier_v2_intent(
     assert intent["dial_profile_id"] == profile_id
     assert intent["idempotency_key"].startswith("orch:v2:dial-cycle:")
     assert "callback_token" not in intent
+
+
+def _multilane_settings(flow_uuid: str, *, enabled: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        dialer_supplier_v2_enabled=True,
+        dialer_supplier_v2_workspace_allowlist=(
+            "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        ),
+        dialer_supplier_v2_flow_allowlist=(flow_uuid,),
+        orch_dialer_multilane_v2_enabled=enabled,
+        orch_dialer_multilane_v2_flow_uuids=(flow_uuid,),
+        orch_dialer_multilane_v2_max_lanes_per_flow=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_second_dialer_archives_terminal_cycle_by_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "8b81e493-b39c-4829-8b1e-5bafd00aeb7c"
+    workspace_uuid = "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+    session_uuid = "11111111-1111-4111-8111-111111111111"
+    revision_uuid = "22222222-2222-4222-8222-222222222222"
+    card_a = "33333333-3333-4333-8333-333333333333"
+    card_b = "44444444-4444-4444-8444-444444444444"
+    list_uuid = "55555555-5555-4555-8555-555555555555"
+    profile_b = "66666666-6666-4666-8666-666666666666"
+    previous = {
+        "session_uuid": session_uuid,
+        "flow_uuid": flow_uuid,
+        "flow_revision_id": revision_uuid,
+        "component_ref_id": card_a,
+        "contact_list_id": list_uuid,
+        "contact_list_member_id": 71,
+        "dial_profile_id": "77777777-7777-4777-8777-777777777777",
+        "idempotency_key": "orch:v2:dial-cycle:" + ("a" * 64),
+        "status": "terminal_received",
+        "cycle_id": "88888888-8888-4888-8888-888888888888",
+        "terminal_delivery": {
+            "event_id": "99999999-9999-4999-8999-999999999999",
+            "cycle_id": "88888888-8888-4888-8888-888888888888",
+            "outcome": "answered",
+            "terminal": True,
+        },
+    }
+    runtime_variables: dict[str, object] = {
+        "workflow_v2": {"dialer_supplier_v2": previous}
+    }
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "contact_list_member_id": 71,
+            "contact_list_id": list_uuid,
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+            "list_validity": None,
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: _multilane_settings(flow_uuid),
+    )
+    component_b = {
+        "ref_id": card_b,
+        "component_id": "send_with_dialer_handoff",
+        "parameters": {
+            "answer_action": "bot",
+            "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "dial_profile_id": profile_b,
+        },
+    }
+
+    await _prepare_send_with_dialer_handoff_contact_member(
+        db_session=None,
+        flow_uuid=flow_uuid,
+        session_id=9101,
+        component=component_b,
+        runtime_variables=runtime_variables,
+        contact_list_member_id=71,
+        workspace_uuid=workspace_uuid,
+        session_uuid=session_uuid,
+        flow_revision_id=revision_uuid,
+        dialer_handoff_component_count=2,
+    )
+
+    workflow_meta = runtime_variables["workflow_v2"]
+    assert isinstance(workflow_meta, dict)
+    current = workflow_meta["dialer_supplier_v2"]
+    assert current["component_ref_id"] == card_b
+    assert current["status"] == "pending"
+    history = workflow_meta["dialer_supplier_v2_history"]
+    assert list(history.values()) == [previous]
+    component_a = {
+        "ref_id": card_a,
+        "component_id": "send_with_dialer_handoff",
+    }
+    assert (
+        _resolve_send_with_dialer_branch_label(component_a, runtime_variables)
+        == "answered"
+    )
+
+
+@pytest.mark.asyncio
+async def test_multilane_session_blocks_and_resumes_independently_at_two_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_uuid = "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+    flow_uuid = "8b81e493-b39c-4829-8b1e-5bafd00aeb7c"
+    session_uuid = "11111111-1111-4111-8111-111111111111"
+    revision_uuid = "22222222-2222-4222-8222-222222222222"
+    card_a = "33333333-3333-4333-8333-333333333333"
+    card_b = "44444444-4444-4444-8444-444444444444"
+    finish = "55555555-5555-4555-8555-555555555555"
+    contact_list_id = "66666666-6666-4666-8666-666666666666"
+    runtime_variables: dict[str, object] = {
+        "input_payload": {"session_scope": "channel"},
+        "workflow_v2": {
+            "flow_id": flow_uuid,
+            "revision_id": revision_uuid,
+            "next_card_cursor": card_a,
+        },
+        "variables": {"payload": {}, "customs": {}},
+    }
+    definition = {
+        "components": [
+            {
+                "ref_id": card_a,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "77777777-7777-4777-8777-777777777777",
+                    "dial_profile_id": "88888888-8888-4888-8888-888888888888",
+                },
+            },
+            {
+                "ref_id": card_b,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "99999999-9999-4999-8999-999999999999",
+                    "dial_profile_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                },
+            },
+            {"ref_id": finish, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": card_a, "to": card_b, "branch": "answered"},
+            {"from": card_b, "to": finish, "branch": "answered"},
+        ],
+    }
+    session_state: dict[str, object] = {
+        "uuid": session_uuid,
+        "state": 0,
+        "entity_address": "5511999990001",
+        "runtime_variables": runtime_variables,
+        "last_card_uuid": None,
+        "next_card_uuid": card_a,
+        "frozen_until": None,
+    }
+    assignments: list[str] = []
+
+    class _Transaction:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *_args):  # type: ignore[no-untyped-def]
+            return False
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self):  # type: ignore[no-untyped-def]
+            return _Transaction()
+
+        def begin_nested(self):  # type: ignore[no-untyped-def]
+            return _Transaction()
+
+        async def execute(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return _Result()
+
+    async def fake_fetch_flow(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {"id": flow_uuid}
+
+    async def fake_fetch_revision(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return WorkflowRevisionResolution(
+            revision={"id": revision_uuid, "definition": definition},
+            source="pinned",
+            requested_revision_id=revision_uuid,
+            failure_reason=None,
+        )
+
+    async def fake_fetch_session(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return session_state
+
+    async def fake_fetch_contact(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "contact_list_member_id": 71,
+            "contact_list_id": contact_list_id,
+            "contact_channel_type": "voice",
+            "contact_channel_address": "5511999990001",
+        }
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        workflow_meta = runtime_variables["workflow_v2"]
+        assert isinstance(workflow_meta, dict)
+        assignments.append(str(workflow_meta.get("next_card_cursor") or ""))
+        return {
+            "contact_list_member_id": 71,
+            "contact_list_id": contact_list_id,
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+            "list_validity": None,
+        }
+
+    async def fake_replace(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        session_state["runtime_variables"] = kwargs["runtime_variables"]
+        for field in ("last_card_uuid", "next_card_uuid", "state", "ended_at"):
+            if field in kwargs:
+                session_state[field] = kwargs[field]
+
+    settings = _multilane_settings(flow_uuid)
+    settings.workflow_v2_execute_m2 = True
+    monkeypatch.setattr(workflow_m2_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_current_workspace_uuid",
+        lambda: workspace_uuid,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_current_workspace_schema",
+        lambda: "ws_test",
+    )
+    monkeypatch.setattr(workflow_m2_service, "fetch_flow_row", fake_fetch_flow)
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "resolve_workflow_revision_for_session",
+        fake_fetch_revision,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "fetch_session_workflow_state",
+        fake_fetch_session,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "fetch_contact_runtime_context_for_session",
+        fake_fetch_contact,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "replace_session_workflow_state",
+        fake_replace,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "persist_session_metrics",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "discard_pending_channel_events",
+        AsyncMock(return_value=0),
+    )
+
+    first = await execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=flow_uuid,
+        session_id=9101,
+    )
+    assert first.stopped_reason == "blocked_send_with_dialer_handoff"
+    assert first.last_card_uuid == card_a
+    active_a = runtime_variables["workflow_v2"]["dialer_supplier_v2"]  # type: ignore[index]
+    active_a.update(  # type: ignore[union-attr]
+        {
+            "status": "terminal_received",
+            "cycle_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "terminal_delivery": {
+                "event_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "cycle_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "outcome": "answered",
+                "terminal": True,
+            },
+        }
+    )
+
+    second = await execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=flow_uuid,
+        session_id=9101,
+    )
+    assert second.stopped_reason == "blocked_send_with_dialer_handoff"
+    assert second.last_card_uuid == card_b
+    workflow_meta = runtime_variables["workflow_v2"]
+    assert isinstance(workflow_meta, dict)
+    active_b = workflow_meta["dialer_supplier_v2"]
+    assert active_b["component_ref_id"] == card_b
+    assert active_b["status"] == "pending"
+    assert [item["component_ref_id"] for item in workflow_meta[
+        "dialer_supplier_v2_history"
+    ].values()] == [card_a]
+    active_b.update(
+        {
+            "status": "terminal_received",
+            "cycle_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            "terminal_delivery": {
+                "event_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                "cycle_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "outcome": "answered",
+                "terminal": True,
+            },
+        }
+    )
+
+    third = await execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=flow_uuid,
+        session_id=9101,
+    )
+    assert third.stopped_reason == "finished_by_component"
+    assert third.last_card_uuid == finish
+    assert assignments == [card_a, card_b]
+
+
+@pytest.mark.asyncio
+async def test_multilane_fails_closed_before_marking_member_when_not_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "8b81e493-b39c-4829-8b1e-5bafd00aeb7c"
+    assigned = False
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal assigned
+        assigned = True
+        return None
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: _multilane_settings(flow_uuid, enabled=False),
+    )
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _prepare_send_with_dialer_handoff_contact_member(
+            db_session=None,
+            flow_uuid=flow_uuid,
+            session_id=9101,
+            component={
+                "ref_id": "33333333-3333-4333-8333-333333333333",
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                },
+            },
+            runtime_variables={},
+            contact_list_member_id=71,
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            session_uuid="11111111-1111-4111-8111-111111111111",
+            flow_revision_id="22222222-2222-4222-8222-222222222222",
+            dialer_handoff_component_count=2,
+        )
+
+    assert exc.value.code == "send_with_dialer_handoff_multilane_disabled"
+    assert assigned is False
+
+
+@pytest.mark.asyncio
+async def test_multilane_fails_closed_before_marking_member_when_lane_limit_is_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "8b81e493-b39c-4829-8b1e-5bafd00aeb7c"
+    assigned = False
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal assigned
+        assigned = True
+        return None
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: _multilane_settings(flow_uuid),
+    )
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _prepare_send_with_dialer_handoff_contact_member(
+            db_session=None,
+            flow_uuid=flow_uuid,
+            session_id=9101,
+            component={
+                "ref_id": "33333333-3333-4333-8333-333333333333",
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                },
+            },
+            runtime_variables={},
+            contact_list_member_id=71,
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            session_uuid="11111111-1111-4111-8111-111111111111",
+            flow_revision_id="22222222-2222-4222-8222-222222222222",
+            dialer_handoff_component_count=3,
+        )
+
+    assert exc.value.code == "send_with_dialer_handoff_multilane_limit_exceeded"
+    assert assigned is False
+
+
+@pytest.mark.asyncio
+async def test_second_dialer_rejects_nonterminal_previous_cycle_before_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "8b81e493-b39c-4829-8b1e-5bafd00aeb7c"
+    assigned = False
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal assigned
+        assigned = True
+        return None
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: _multilane_settings(flow_uuid),
+    )
+    runtime_variables = {
+        "workflow_v2": {
+            "dialer_supplier_v2": {
+                "session_uuid": "11111111-1111-4111-8111-111111111111",
+                "flow_revision_id": "22222222-2222-4222-8222-222222222222",
+                "component_ref_id": "33333333-3333-4333-8333-333333333333",
+                "status": "ready",
+            }
+        }
+    }
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _prepare_send_with_dialer_handoff_contact_member(
+            db_session=None,
+            flow_uuid=flow_uuid,
+            session_id=9101,
+            component={
+                "ref_id": "44444444-4444-4444-8444-444444444444",
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "dial_profile_id": "55555555-5555-4555-8555-555555555555",
+                },
+            },
+            runtime_variables=runtime_variables,
+            contact_list_member_id=71,
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            session_uuid="11111111-1111-4111-8111-111111111111",
+            flow_revision_id="22222222-2222-4222-8222-222222222222",
+            dialer_handoff_component_count=2,
+        )
+
+    assert exc.value.code == "send_with_dialer_handoff_previous_cycle_not_terminal"
+    assert assigned is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_cycle_intent_rolls_back_dialer_routing_savepoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow_uuid = "4e163399-e9a0-4335-895f-316c6a161299"
+    transaction_exit: dict[str, object] = {}
+    runtime_variables: dict[str, object] = {}
+
+    class _NestedTransaction:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):  # type: ignore[no-untyped-def]
+            transaction_exit["exc_type"] = exc_type
+            return False
+
+    class _DbSession:
+        def begin_nested(self):  # type: ignore[no-untyped-def]
+            return _NestedTransaction()
+
+    async def fake_assign(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "contact_list_member_id": 71,
+            "contact_list_id": "invalid-contact-list",
+            "linked_actuator": "dialer",
+            "mode": "dialer",
+            "list_validity": None,
+        }
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "assign_dialer_handoff_routing_for_session",
+        fake_assign,
+    )
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            dialer_supplier_v2_enabled=True,
+            dialer_supplier_v2_workspace_allowlist=(
+                "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            ),
+            dialer_supplier_v2_flow_allowlist=(flow_uuid,),
+            orch_dialer_multilane_v2_enabled=False,
+            orch_dialer_multilane_v2_flow_uuids=(),
+        ),
+    )
+
+    with pytest.raises(WorkflowExecutionError) as exc:
+        await _prepare_send_with_dialer_handoff_contact_member(
+            db_session=_DbSession(),  # type: ignore[arg-type]
+            flow_uuid=flow_uuid,
+            session_id=9101,
+            component={
+                "ref_id": "33333333-3333-4333-8333-333333333333",
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "dial_profile_id": "55555555-5555-4555-8555-555555555555",
+                },
+            },
+            runtime_variables=runtime_variables,
+            contact_list_member_id=71,
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            session_uuid="11111111-1111-4111-8111-111111111111",
+            flow_revision_id="22222222-2222-4222-8222-222222222222",
+        )
+
+    assert exc.value.code == "send_with_dialer_handoff_cycle_intent_invalid"
+    assert transaction_exit["exc_type"] is WorkflowExecutionError
+    assert "send_with_dialer_handoff_routing" not in runtime_variables
 
 
 @pytest.mark.asyncio

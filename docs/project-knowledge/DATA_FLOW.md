@@ -179,6 +179,25 @@ O valor público desta composição é `tabulation`, em inglês. `tabulacao` con
 10. Somente depois do commit, a task `app.tasks.dialer_supplier_v2.register_cycle` envia a intenção para `POST /v2/contact-supplier/dialer-cycles`, sempre com Bearer, `X-WORKSPACE-UUID` e `Idempotency-Key`, pela fila dedicada.
 11. Respostas `201` e replays `200` são aceitos apenas quando repetem integralmente a identidade e retornam ciclo `ready`, revisão do Perfil, política, limite e checksum válidos. O `callback_token` é deliberadamente descartado no cliente e nunca entra em runtime, logs, alarmes ou métricas do ORCH.
 12. Falha transitória grava diagnóstico seguro e agenda retry limitado. Um reconciliador opt-in recupera intents `pending`, claims `registering` cujo lease expirou e `pending_retry` stale após a carência máxima de backoff; a retomada preserva o número da tentativa e disputa de lock não consome tentativa. Erro de configuração/`422` grava falha terminal e alarme, mantendo a sessão bloqueada em vez de liberar uma discagem incompleta.
+13. Quando um flow autorizado contém mais de um card novo, a intenção corrente
+    continua em `workflow_v2.dialer_supplier_v2` para preservar o contrato de
+    card único. Antes de alcançar outro card, o ciclo corrente precisa estar
+    terminal; ele é então copiado para
+    `workflow_v2.dialer_supplier_v2_history`, indexado pela impressão da chave
+    idempotente, e a intenção do novo card passa a ser a corrente. Sessão,
+    revisão e `component_ref_id` fazem parte da identidade de cada ciclo.
+14. Um callback terminal procura correspondência integral primeiro no ciclo
+    corrente e depois no histórico. Callback histórico pode ser reconhecido e
+    auditado, mas sempre retorna `resume_required=false`; portanto nunca
+    avança o cursor nem o branch do card ativo. Somente o ciclo corrente pode
+    reenfileirar a sessão. Um segundo card enquanto o anterior não for terminal,
+    flow fora da allowlist ou quantidade de cards acima do limite termina de
+    forma diagnosticável antes de alterar o membro.
+15. A atualização de `linked_actuator`/vigência e a construção da intenção de
+    ciclo ficam no mesmo savepoint. Falha ao formar a identidade Supplier V2
+    reverte o marcador e a vigência, sem deixar estado parcial. A semântica
+    contextual existente permanece: `channel` preserva o membro da sessão e
+    `person` exige a escolha prévia de canal de voz.
 
 O modo BOT pode reutilizar o consumo já existente de `flow_uuid`, campanha e `runner_token`. O modo humano exige que o consumidor externo reconheça `answer_action.type=human`, use `queue_voice_uuid` e não exija token Runner. Enquanto essa adaptação e um canário PBX não existirem, o envelope humano é contrato preparado, não entrega homologada.
 

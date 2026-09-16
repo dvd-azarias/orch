@@ -145,6 +145,10 @@ class Settings:
     dialer_supplier_v2_reconcile_interval_seconds: int
     dialer_supplier_v2_reconcile_batch_size: int
     dialer_supplier_v2_registration_lease_seconds: int
+    orch_dialer_multilane_v2_enabled: bool
+    orch_dialer_multilane_v2_flow_uuids: tuple[str, ...]
+    orch_dialer_multilane_v2_max_lanes_per_flow: int
+    orch_dialer_multilane_v2_max_execution_groups_per_flow: int
     restriction_list_check_http_timeout_seconds: float
     restriction_list_check_max_attempts: int
     restriction_list_check_retry_backoff_seconds: float
@@ -682,6 +686,24 @@ def get_settings() -> Settings:
             minimum=30,
             maximum=3600,
         ),
+        orch_dialer_multilane_v2_enabled=_read_env_bool(
+            "ORCH_DIALER_MULTILANE_V2_ENABLED", False
+        ),
+        orch_dialer_multilane_v2_flow_uuids=_read_env_csv(
+            "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS", ()
+        ),
+        orch_dialer_multilane_v2_max_lanes_per_flow=_read_env_int_range(
+            "ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW",
+            1,
+            minimum=1,
+            maximum=16,
+        ),
+        orch_dialer_multilane_v2_max_execution_groups_per_flow=_read_env_int_range(
+            "ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW",
+            1,
+            minimum=1,
+            maximum=16,
+        ),
         restriction_list_check_http_timeout_seconds=max(
             1.0,
             float(
@@ -778,5 +800,54 @@ def get_settings() -> Settings:
             raise ValueError(
                 "TARGET_CORE_API_BEARER_TOKEN é obrigatória quando "
                 "DIALER_SUPPLIER_V2_ENABLED=true."
+            )
+    if settings.orch_dialer_multilane_v2_enabled:
+        if not settings.dialer_supplier_v2_enabled:
+            raise ValueError(
+                "DIALER_SUPPLIER_V2_ENABLED=true é obrigatório quando "
+                "ORCH_DIALER_MULTILANE_V2_ENABLED=true."
+            )
+        if not settings.orch_dialer_multilane_v2_flow_uuids:
+            raise ValueError(
+                "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS é obrigatória quando "
+                "ORCH_DIALER_MULTILANE_V2_ENABLED=true."
+            )
+        try:
+            multilane_flows = {
+                str(UUID(flow_uuid))
+                for flow_uuid in settings.orch_dialer_multilane_v2_flow_uuids
+                if UUID(flow_uuid).int != 0
+            }
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS contém UUID inválido."
+            ) from exc
+        if len(multilane_flows) != len(
+            settings.orch_dialer_multilane_v2_flow_uuids
+        ):
+            raise ValueError(
+                "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS contém UUID inválido ou duplicado."
+            )
+        supplier_flows = {
+            str(UUID(flow_uuid))
+            for flow_uuid in settings.dialer_supplier_v2_flow_allowlist
+        }
+        if not multilane_flows.issubset(supplier_flows):
+            raise ValueError(
+                "Todo flow multilane do ORCH deve também estar em "
+                "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST."
+            )
+        if settings.orch_dialer_multilane_v2_max_lanes_per_flow < 2:
+            raise ValueError(
+                "ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW deve ser pelo menos 2 "
+                "quando o multilane estiver habilitado."
+            )
+        if (
+            settings.orch_dialer_multilane_v2_max_execution_groups_per_flow
+            > settings.orch_dialer_multilane_v2_max_lanes_per_flow
+        ):
+            raise ValueError(
+                "ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW não pode "
+                "exceder ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW."
             )
     return settings

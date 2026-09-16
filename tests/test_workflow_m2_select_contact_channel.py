@@ -19,6 +19,7 @@ SELECT_REF = "11111111-1111-1111-1111-111111111111"
 SELECTED_REF = "22222222-2222-2222-2222-222222222222"
 NOT_FOUND_REF = "33333333-3333-3333-3333-333333333333"
 EXCEPTION_REF = "44444444-4444-4444-4444-444444444444"
+SECOND_DIALER_REF = "55555555-5555-4555-8555-555555555555"
 
 
 class _Transaction:
@@ -563,6 +564,19 @@ async def test_person_selection_unlocks_new_dialer_with_selected_member(
             "flow": {"id": "ffffffff-ffff-ffff-ffff-ffffffffffff", "name": "BOT"},
         },
     }
+    definition["components"].append(
+        {
+            "ref_id": SECOND_DIALER_REF,
+            "component_id": "send_with_dialer_handoff",
+            "parameters": {
+                "answer_action": "bot",
+                "flow": {
+                    "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "name": "BOT 2",
+                },
+            },
+        }
+    )
     _configure_execution(
         monkeypatch,
         runtime=runtime,
@@ -611,6 +625,74 @@ async def test_person_selection_unlocks_new_dialer_with_selected_member(
     assert prepare_dialer.await_args.kwargs["component"]["component_id"] == (
         "send_with_dialer_handoff"
     )
+    assert prepare_dialer.await_args.kwargs["dialer_handoff_component_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_channel_scope_multilane_passes_contextual_member_and_component_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(session_scope="channel")
+    monkeypatch.setattr(
+        workflow,
+        "_read_contextual_member_routing_enabled",
+        lambda _settings: True,
+    )
+    definition = {
+        "components": [
+            {
+                "ref_id": SELECT_REF,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": {
+                        "id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                        "name": "BOT 1",
+                    },
+                },
+            },
+            {
+                "ref_id": SECOND_DIALER_REF,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {
+                    "answer_action": "bot",
+                    "flow": {
+                        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "name": "BOT 2",
+                    },
+                },
+            },
+        ],
+        "branches": [],
+    }
+    _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        definition=definition,
+        contact_row=_contact_row(),
+    )
+    prepare_dialer = AsyncMock(
+        return_value={
+            "contact_list_member_id": 77,
+            "ani": "1147371485",
+            "linked_actuator": "dialer",
+        }
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_prepare_send_with_dialer_handoff_contact_member",
+        prepare_dialer,
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_send_with_dialer_handoff"
+    assert prepare_dialer.await_args.kwargs["contact_list_member_id"] == 77
+    assert prepare_dialer.await_args.kwargs["dialer_handoff_component_count"] == 2
 
 
 @pytest.mark.asyncio

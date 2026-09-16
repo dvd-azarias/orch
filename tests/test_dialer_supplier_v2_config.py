@@ -30,6 +30,10 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "CELERY_BEAT_DIALER_SUPPLIER_V2_RECONCILE_ENABLED",
         "TARGET_CORE_SUPPLIER_API_BASE_URL",
         "TARGET_CORE_API_BEARER_TOKEN",
+        "ORCH_DIALER_MULTILANE_V2_ENABLED",
+        "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS",
+        "ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW",
+        "ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW",
     ):
         monkeypatch.delenv(key, raising=False)
     config.get_settings.cache_clear()
@@ -46,6 +50,74 @@ def test_supplier_v2_is_disabled_and_isolated_by_default(
     assert settings.dialer_supplier_v2_flow_allowlist == ()
     assert settings.celery_dialer_supplier_v2_queue == "orch_dialer_supplier_v2"
     assert settings.celery_beat_dialer_supplier_v2_reconcile_enabled is False
+    assert settings.orch_dialer_multilane_v2_enabled is False
+    assert settings.orch_dialer_multilane_v2_flow_uuids == ()
+    assert settings.orch_dialer_multilane_v2_max_lanes_per_flow == 1
+    assert settings.orch_dialer_multilane_v2_max_execution_groups_per_flow == 1
+    config.get_settings.cache_clear()
+
+
+def _enable_supplier_v2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CELERY_ENABLED", "true")
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_ENABLED", "true")
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST", WORKSPACE_UUID)
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_FLOW_ALLOWLIST", FLOW_UUID)
+    monkeypatch.setenv(
+        "TARGET_CORE_SUPPLIER_API_BASE_URL",
+        "https://supplier.internal",
+    )
+    monkeypatch.setenv("TARGET_CORE_API_BEARER_TOKEN", "internal-token")
+
+
+def test_multilane_requires_supplier_v2_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_ENABLED", "true")
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS", FLOW_UUID)
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW", "2")
+
+    with pytest.raises(ValueError, match="DIALER_SUPPLIER_V2_ENABLED=true"):
+        config.get_settings()
+    config.get_settings.cache_clear()
+
+
+def test_multilane_requires_flow_in_supplier_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    _enable_supplier_v2(monkeypatch)
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_ENABLED", "true")
+    monkeypatch.setenv(
+        "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS",
+        "8b81e493-b39c-4829-8b1e-5bafd00aeb7c",
+    )
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW", "2")
+
+    with pytest.raises(ValueError, match="DIALER_SUPPLIER_V2_FLOW_ALLOWLIST"):
+        config.get_settings()
+    config.get_settings.cache_clear()
+
+
+def test_multilane_accepts_explicit_intersection_and_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    _enable_supplier_v2(monkeypatch)
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_ENABLED", "true")
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS", FLOW_UUID)
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW", "2")
+    monkeypatch.setenv(
+        "ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW",
+        "2",
+    )
+
+    settings = config.get_settings()
+
+    assert settings.orch_dialer_multilane_v2_enabled is True
+    assert settings.orch_dialer_multilane_v2_flow_uuids == (FLOW_UUID,)
+    assert settings.orch_dialer_multilane_v2_max_lanes_per_flow == 2
+    assert settings.orch_dialer_multilane_v2_max_execution_groups_per_flow == 2
     config.get_settings.cache_clear()
 
 
