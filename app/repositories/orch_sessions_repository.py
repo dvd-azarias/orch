@@ -1674,26 +1674,41 @@ async def apply_dialer_supplier_v2_terminal_callback(
     if not isinstance(runtime_variables, dict):
         return {"status": "invalid_registration", "session_id": int(row["id"])}
     workflow_meta = runtime_variables.get("workflow_v2")
-    registration = (
-        workflow_meta.get("dialer_supplier_v2")
-        if isinstance(workflow_meta, dict)
-        else None
-    )
-    if not isinstance(registration, dict):
+    if not isinstance(workflow_meta, dict):
+        return {"status": "invalid_registration", "session_id": int(row["id"])}
+    active_registration = workflow_meta.get("dialer_supplier_v2")
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(active_registration, dict):
+        candidates.append(("active", active_registration))
+    history = workflow_meta.get("dialer_supplier_v2_history")
+    if isinstance(history, dict):
+        candidates.extend(
+            ("history", registration)
+            for registration in history.values()
+            if isinstance(registration, dict)
+        )
+    if not candidates:
         return {"status": "invalid_registration", "session_id": int(row["id"])}
 
-    identity_matches = all(
-        str(registration.get(registration_field) or "").strip()
-        == str(callback_payload.get(payload_field) or "").strip()
-        for registration_field, payload_field in (
-            ("cycle_id", "cycle_id"),
-            ("session_uuid", "session_uuid"),
-            ("flow_uuid", "flow_uuid"),
-            ("flow_revision_id", "flow_revision_id"),
-            ("component_ref_id", "component_ref_id"),
+    registration_source: str | None = None
+    registration: dict[str, Any] | None = None
+    for candidate_source, candidate_registration in candidates:
+        identity_matches = all(
+            str(candidate_registration.get(registration_field) or "").strip()
+            == str(callback_payload.get(payload_field) or "").strip()
+            for registration_field, payload_field in (
+                ("cycle_id", "cycle_id"),
+                ("session_uuid", "session_uuid"),
+                ("flow_uuid", "flow_uuid"),
+                ("flow_revision_id", "flow_revision_id"),
+                ("component_ref_id", "component_ref_id"),
+            )
         )
-    )
-    if not identity_matches:
+        if identity_matches:
+            registration_source = candidate_source
+            registration = candidate_registration
+            break
+    if registration is None:
         return {"status": "identity_mismatch", "session_id": int(row["id"])}
 
     previous = registration.get("terminal_delivery")
@@ -1710,6 +1725,7 @@ async def apply_dialer_supplier_v2_terminal_callback(
             "session_uuid": str(row["uuid"]),
             "idempotent": same_delivery,
             "accepted": same_delivery,
+            "resume_required": False,
         }
 
     if row.get("unassigned_at") is not None or row.get("ended_at") is not None:
@@ -1719,6 +1735,7 @@ async def apply_dialer_supplier_v2_terminal_callback(
             "session_uuid": str(row["uuid"]),
             "idempotent": False,
             "accepted": False,
+            "resume_required": False,
         }
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1747,6 +1764,7 @@ async def apply_dialer_supplier_v2_terminal_callback(
         "session_uuid": str(row["uuid"]),
         "idempotent": False,
         "accepted": True,
+        "resume_required": registration_source == "active",
     }
 
 

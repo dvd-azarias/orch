@@ -858,3 +858,42 @@ limpar `linked_actuator` em massa e não redirecionar silenciosamente para V1.
 
 `V2`: outbox/inbox transacional dedicado, estado tipado de ciclo e gestão de
 segredos por capability sem trânsito pelo orquestrador.
+
+## R41 — Callback tardio de uma lane pode retomar o card Dialer errado
+
+`STATUS`: MITIGATED IN O1 / INTEGRATED CANARY PENDING
+
+`IMPACT`: critical no caminho multilane; nenhum impacto esperado no card único
+ou no Dialer/Supplier V1 com as flags desligadas
+
+`PROBABILITY`: high sem identidade por card e histórico; low com o Gate O1 e
+correlação integral
+
+`AFFECTED AREA`: `send_with_dialer_handoff` / runtime da sessão / callback
+Supplier V2 / cursor do workflow
+
+`DESCRIPTION`: uma mesma sessão pode alcançar o card A e, depois de sua decisão
+terminal, bloquear no card B. Replay ou callback tardio de A não pode ser
+interpretado como decisão de B nem reenfileirar a sessão ativa. Também não é
+seguro sobrescrever A antes de sua terminalização ou deixar o marcador Dialer
+gravado quando a intenção B é inválida.
+
+`MITIGATION`: manter somente um ciclo corrente compatível com o caminho de
+card único e arquivar ciclos anteriores por impressão da chave idempotente;
+correlacionar ciclo, sessão, flow, revisão e card; retornar
+`resume_required=false` para qualquer correspondência histórica; rejeitar o
+segundo card se o ciclo anterior não for terminal; limitar N cards sob flag e
+allowlist próprias; agrupar atualização do membro e construção da intenção em
+savepoint.
+
+`DETECTION`: conferir `workflow_v2.dialer_supplier_v2` e
+`dialer_supplier_v2_history`, logs do callback com `resume_required`, ausência
+de enqueue para histórico, alarmes `*_multilane_*` e
+`*_previous_cycle_not_terminal`.
+
+`ROLLBACK`: retirar o flow de `ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS` ou desligar
+`ORCH_DIALER_MULTILANE_V2_ENABLED`, reiniciar API/workers e preservar o runtime
+e os ciclos para auditoria. Não redirecionar para Supplier V1.
+
+`V2`: entidade própria por ciclo/lane e inbox transacional de callback, sem
+estado histórico embutido no JSON da sessão.

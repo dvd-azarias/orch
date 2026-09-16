@@ -108,6 +108,19 @@ Defaults importantes:
   `CELERY_DIALER_SUPPLIER_V2_QUEUE`. Habilitar
   `CELERY_BEAT_DIALER_SUPPLIER_V2_RECONCILE_ENABLED=true` em exatamente um Beat
   do ambiente; manter `false` nos demais.
+- Múltiplos cards do novo Dialer no mesmo flow permanecem fail-closed por
+  padrão. O ORCH exige simultaneamente o Gate Supplier V2 acima e
+  `ORCH_DIALER_MULTILANE_V2_ENABLED=true`, além de o flow constar tanto em
+  `ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS` quanto em
+  `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST`. UUID ausente, inválido, duplicado ou
+  fora da interseção impede a inicialização. Os limites locais usam
+  `ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW` e
+  `ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW`; com o Gate ligado,
+  o primeiro deve ser pelo menos `2` e o segundo não pode excedê-lo. Os
+  defaults `false`, lista vazia e limites `1` preservam integralmente flows de
+  card único e o Dialer legado. Não habilitar essas flags em produção antes
+  dos gates de Kerberos e `service_dialer` e do canário controlado definidos em
+  `MULTI_DIALER_EXECUTION_PLAN.md`.
 - `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 

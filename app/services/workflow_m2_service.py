@@ -15,6 +15,7 @@ import subprocess
 import textwrap
 import time
 import unicodedata
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -80,6 +81,7 @@ from app.services.dialer_supplier_v2_service import (
     DialerSupplierV2RegistrationError,
     build_dialer_cycle_intent,
     dialer_supplier_v2_enabled_for_context,
+    dialer_supplier_v2_multilane_enabled_for_context,
 )
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.identidade_person_service import (
@@ -236,9 +238,12 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "send_with_dialer_handoff_invalid_list_validity_days",
     "send_with_dialer_handoff_invalid_list_validity_mode",
     "send_with_dialer_handoff_list_validity_update_failed",
+    "send_with_dialer_handoff_multilane_disabled",
+    "send_with_dialer_handoff_multilane_limit_exceeded",
     "send_with_dialer_handoff_missing_flow",
     "send_with_dialer_handoff_missing_live_channel",
     "send_with_dialer_handoff_missing_target_queue",
+    "send_with_dialer_handoff_previous_cycle_not_terminal",
     "split_random_invalid_branches",
     "split_random_invalid_output_var",
     "split_random_invalid_percentage",
@@ -1466,6 +1471,11 @@ def _resolve_send_with_dialer_branch_label(
             and terminal_delivery.get("terminal") is True
             else None
         )
+    elif (
+        component_kind(component) == "send_with_dialer_handoff"
+        and _has_active_dialer_supplier_v2_registration(runtime_variables)
+    ):
+        status = None
     else:
         status = _extract_dialer_status_from_runtime(runtime_variables)
     if status is None:
@@ -1491,23 +1501,42 @@ def _dialer_supplier_v2_registration_for_handoff(
         if component_kind != "send_with_dialer_handoff":
             return None
     workflow_meta = runtime_variables.get("workflow_v2")
-    registration = (
-        workflow_meta.get("dialer_supplier_v2")
-        if isinstance(workflow_meta, dict)
-        else None
+    if not isinstance(workflow_meta, dict):
+        return None
+    candidates: list[dict[str, Any]] = []
+    active = workflow_meta.get("dialer_supplier_v2")
+    if isinstance(active, dict):
+        candidates.append(active)
+    if component is not None:
+        history = workflow_meta.get("dialer_supplier_v2_history")
+        if isinstance(history, dict):
+            candidates.extend(
+                registration
+                for registration in history.values()
+                if isinstance(registration, dict)
+            )
+    for registration in candidates:
+        if not str(registration.get("cycle_id") or "").strip():
+            continue
+        status = str(registration.get("status") or "").strip().lower()
+        if status not in {"ready", "terminal_received"}:
+            continue
+        if component is not None and str(
+            registration.get("component_ref_id") or ""
+        ) != str(component.get("ref_id") or ""):
+            continue
+        return registration
+    return None
+
+
+def _has_active_dialer_supplier_v2_registration(
+    runtime_variables: dict[str, Any],
+) -> bool:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    return bool(
+        isinstance(workflow_meta, dict)
+        and isinstance(workflow_meta.get("dialer_supplier_v2"), dict)
     )
-    if not isinstance(registration, dict):
-        return None
-    if not str(registration.get("cycle_id") or "").strip():
-        return None
-    status = str(registration.get("status") or "").strip().lower()
-    if status not in {"ready", "terminal_received"}:
-        return None
-    if component is not None and str(registration.get("component_ref_id") or "") != str(
-        component.get("ref_id") or ""
-    ):
-        return None
-    return registration
 
 
 def _run_run_flow(
@@ -2389,6 +2418,65 @@ def _send_with_dialer_handoff_dial_profile_id(
     return str(profile_id)
 
 
+def _dialer_supplier_v2_registration_is_terminal(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return (
+        str(value.get("status") or "").strip().lower() == "terminal_received"
+        or isinstance(value.get("terminal_delivery"), dict)
+    )
+
+
+def _dialer_supplier_v2_registration_matches_card(
+    value: Any,
+    *,
+    session_uuid: str,
+    flow_revision_id: str,
+    component_ref_id: str,
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return all(
+        str(value.get(field) or "").strip() == str(expected or "").strip()
+        for field, expected in (
+            ("session_uuid", session_uuid),
+            ("flow_revision_id", flow_revision_id),
+            ("component_ref_id", component_ref_id),
+        )
+    )
+
+
+def _dialer_supplier_v2_history_key(registration: dict[str, Any]) -> str:
+    raw_key = str(registration.get("idempotency_key") or "").strip()
+    fingerprint = raw_key.rsplit(":", 1)[-1]
+    if re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return fingerprint
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _archive_dialer_supplier_v2_registration(
+    workflow_meta: dict[str, Any],
+    registration: dict[str, Any],
+) -> None:
+    history = workflow_meta.get("dialer_supplier_v2_history")
+    if not isinstance(history, dict):
+        history = {}
+        workflow_meta["dialer_supplier_v2_history"] = history
+    history[_dialer_supplier_v2_history_key(registration)] = copy.deepcopy(
+        registration
+    )
+
+
+@asynccontextmanager
+async def _dialer_handoff_atomic_scope(db_session: AsyncSession | None):
+    begin_nested = getattr(db_session, "begin_nested", None)
+    if not callable(begin_nested):
+        yield
+        return
+    async with begin_nested():
+        yield
+
+
 async def _prepare_send_with_dialer_handoff_contact_member(
     *,
     db_session: AsyncSession,
@@ -2400,17 +2488,106 @@ async def _prepare_send_with_dialer_handoff_contact_member(
     workspace_uuid: str | None = None,
     session_uuid: str | None = None,
     flow_revision_id: str | None = None,
+    dialer_handoff_component_count: int = 1,
 ) -> dict[str, Any] | None:
     answer_action = _send_with_dialer_handoff_config(component)
     list_validity = _send_with_dialer_handoff_list_validity_config(component)
-    assignment = await assign_dialer_handoff_routing_for_session(
-        db_session,
+    settings = get_settings()
+    supplier_v2_enabled = dialer_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid=str(workspace_uuid or ""),
         flow_uuid=flow_uuid,
-        session_id=session_id,
-        list_validity_mode=str(list_validity["mode"]),
-        list_validity_days=int(list_validity["days"] or 0),
-        contact_list_member_id=contact_list_member_id,
     )
+    component_count = max(1, int(dialer_handoff_component_count or 1))
+    multilane_requested = component_count > 1
+    multilane_enabled = dialer_supplier_v2_multilane_enabled_for_context(
+        settings=settings,
+        workspace_uuid=str(workspace_uuid or ""),
+        flow_uuid=flow_uuid,
+    )
+    if multilane_requested and not multilane_enabled:
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_multilane_disabled",
+            "O flow possui múltiplos discadores, mas o runtime multilane não está autorizado.",
+        )
+    if multilane_requested and component_count > int(
+        getattr(settings, "orch_dialer_multilane_v2_max_lanes_per_flow", 1)
+    ):
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_multilane_limit_exceeded",
+            "O flow excede o limite seguro de unidades de discagem do ORCH.",
+        )
+
+    profile_id: str | None = None
+    workflow_meta: dict[str, Any] | None = None
+    existing_intent: dict[str, Any] | None = None
+    current_registration: dict[str, Any] | None = None
+    component_ref_id = str(component.get("ref_id") or "").strip()
+    if supplier_v2_enabled:
+        profile_id = _send_with_dialer_handoff_dial_profile_id(component)
+        workflow_meta = _ensure_workflow_meta(runtime_variables)
+        current_value = workflow_meta.get("dialer_supplier_v2")
+        current_registration = (
+            current_value if isinstance(current_value, dict) else None
+        )
+        if _dialer_supplier_v2_registration_matches_card(
+            current_registration,
+            session_uuid=str(session_uuid or ""),
+            flow_revision_id=str(flow_revision_id or ""),
+            component_ref_id=component_ref_id,
+        ):
+            existing_intent = current_registration
+        elif (
+            multilane_requested
+            and current_registration is not None
+            and not _dialer_supplier_v2_registration_is_terminal(
+                current_registration
+            )
+        ):
+            raise WorkflowExecutionError(
+                "send_with_dialer_handoff_previous_cycle_not_terminal",
+                "O discador anterior ainda não possui decisão terminal para esta sessão.",
+            )
+
+    assignment: dict[str, Any] | None = None
+    prepared_intent: dict[str, Any] | None = None
+    async with _dialer_handoff_atomic_scope(db_session):
+        assignment = await assign_dialer_handoff_routing_for_session(
+            db_session,
+            flow_uuid=flow_uuid,
+            session_id=session_id,
+            list_validity_mode=str(list_validity["mode"]),
+            list_validity_days=int(list_validity["days"] or 0),
+            contact_list_member_id=contact_list_member_id,
+        )
+        if assignment is None:
+            raise WorkflowExecutionError(
+                "send_with_dialer_handoff_list_validity_update_failed",
+                (
+                    "O membro contextual ou o vínculo ativo da lista deixou de estar "
+                    "disponível antes do roteamento Dialer."
+                ),
+            )
+        if supplier_v2_enabled:
+            try:
+                prepared_intent = build_dialer_cycle_intent(
+                    session_uuid=str(session_uuid or ""),
+                    flow_uuid=flow_uuid,
+                    flow_revision_id=str(flow_revision_id or ""),
+                    component_ref_id=component_ref_id,
+                    contact_list_id=str(assignment.get("contact_list_id") or ""),
+                    contact_list_member_id=int(
+                        assignment.get("contact_list_member_id") or 0
+                    ),
+                    dial_profile_id=str(profile_id or ""),
+                    existing=existing_intent,
+                )
+            except DialerSupplierV2RegistrationError as exc:
+                raise WorkflowExecutionError(
+                    "send_with_dialer_handoff_cycle_intent_invalid",
+                    exc.message,
+                ) from exc
+
     prepared_at = datetime.now(timezone.utc)
     runtime_variables["send_with_dialer_handoff_routing"] = {
         "answer_action": answer_action,
@@ -2419,45 +2596,17 @@ async def _prepare_send_with_dialer_handoff_contact_member(
         "prepared_at": prepared_at.isoformat(),
         "updated_at": prepared_at.isoformat(),
     }
-    if assignment is None:
-        raise WorkflowExecutionError(
-            "send_with_dialer_handoff_list_validity_update_failed",
-            (
-                "O membro contextual ou o vínculo ativo da lista deixou de estar "
-                "disponível antes do roteamento Dialer."
-            ),
-        )
-    settings = get_settings()
-    if dialer_supplier_v2_enabled_for_context(
-        settings=settings,
-        workspace_uuid=str(workspace_uuid or ""),
-        flow_uuid=flow_uuid,
-    ):
-        profile_id = _send_with_dialer_handoff_dial_profile_id(component)
-        workflow_meta = _ensure_workflow_meta(runtime_variables)
-        existing_intent = workflow_meta.get("dialer_supplier_v2")
-        try:
-            workflow_meta["dialer_supplier_v2"] = build_dialer_cycle_intent(
-                session_uuid=str(session_uuid or ""),
-                flow_uuid=flow_uuid,
-                flow_revision_id=str(flow_revision_id or ""),
-                component_ref_id=str(component.get("ref_id") or ""),
-                contact_list_id=str(assignment.get("contact_list_id") or ""),
-                contact_list_member_id=int(
-                    assignment.get("contact_list_member_id") or 0
-                ),
-                dial_profile_id=profile_id,
-                existing=(
-                    existing_intent
-                    if isinstance(existing_intent, dict)
-                    else None
-                ),
+    if workflow_meta is not None and prepared_intent is not None:
+        if (
+            multilane_requested
+            and current_registration is not None
+            and current_registration is not existing_intent
+        ):
+            _archive_dialer_supplier_v2_registration(
+                workflow_meta,
+                current_registration,
             )
-        except DialerSupplierV2RegistrationError as exc:
-            raise WorkflowExecutionError(
-                "send_with_dialer_handoff_cycle_intent_invalid",
-                exc.message,
-            ) from exc
+        workflow_meta["dialer_supplier_v2"] = prepared_intent
     runtime_variables.pop("send_with_dialer_handoff_last_error", None)
     return assignment
 
@@ -2829,6 +2978,8 @@ def _should_resume_dialer_blocking_execution(runtime_variables: dict[str, Any]) 
                 and str(terminal_delivery.get("outcome") or "")
                 in DIALER_RESPONSE_BRANCH_BY_STATUS
             )
+        if _has_active_dialer_supplier_v2_registration(runtime_variables):
+            return False
     return _extract_dialer_status_from_runtime(runtime_variables) is not None
 
 
@@ -7675,8 +7826,7 @@ async def execute_workflow_m2_for_session(
         blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
         if (
             blocking_stop_reason == "blocked_send_with_dialer_handoff"
-            and _dialer_supplier_v2_registration_for_handoff(runtime_variables)
-            is not None
+            and _has_active_dialer_supplier_v2_registration(runtime_variables)
         ):
             discarded_raw_callbacks = await discard_pending_channel_events(
                 db_session,
@@ -7848,6 +7998,11 @@ async def execute_workflow_m2_for_session(
             return await _finalize(WorkflowExecutionResult(True, 0, "no_next_card", session_state.get("last_card_uuid"), None))
 
         components = index_components(definition)
+        dialer_handoff_component_count = sum(
+            1
+            for indexed_component in components.values()
+            if component_kind(indexed_component) == "send_with_dialer_handoff"
+        )
         executed_steps = 0
         last_card_uuid = session_state.get("last_card_uuid")
         next_card_uuid = current_card_uuid
@@ -8813,6 +8968,9 @@ async def execute_workflow_m2_for_session(
                                     workspace_uuid=get_current_workspace_uuid(),
                                     session_uuid=str(session_uuid_for_metrics or ""),
                                     flow_revision_id=str(revision_id_for_metrics or ""),
+                                    dialer_handoff_component_count=(
+                                        dialer_handoff_component_count
+                                    ),
                                 )
                             else:
                                 should_block_execution = False

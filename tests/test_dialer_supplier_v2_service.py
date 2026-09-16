@@ -120,6 +120,34 @@ def test_feature_flag_requires_workspace_and_flow_allowlists() -> None:
     )
 
 
+def test_multilane_gate_requires_supplier_and_dedicated_flow_allowlist() -> None:
+    enabled = _settings(
+        orch_dialer_multilane_v2_enabled=True,
+        orch_dialer_multilane_v2_flow_uuids=(FLOW_UUID,),
+    )
+    assert service.dialer_supplier_v2_multilane_enabled_for_context(
+        settings=enabled,
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+    )
+    assert not service.dialer_supplier_v2_multilane_enabled_for_context(
+        settings=_settings(
+            orch_dialer_multilane_v2_enabled=False,
+            orch_dialer_multilane_v2_flow_uuids=(FLOW_UUID,),
+        ),
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+    )
+    assert not service.dialer_supplier_v2_multilane_enabled_for_context(
+        settings=_settings(
+            orch_dialer_multilane_v2_enabled=True,
+            orch_dialer_multilane_v2_flow_uuids=(),
+        ),
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+    )
+
+
 def test_intent_key_is_deterministic_and_existing_ready_state_is_preserved() -> None:
     first = _intent()
     second = _intent()

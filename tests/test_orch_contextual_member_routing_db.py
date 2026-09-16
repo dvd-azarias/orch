@@ -683,3 +683,129 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
             ]
             assert terminal["event_id"] == event_uuid
             assert terminal["outcome"] == "answered"
+
+
+@pytest.mark.asyncio
+async def test_supplier_v2_archived_callback_never_resumes_active_second_card() -> None:
+    flow_uuid = str(uuid4())
+    session_uuid = str(uuid4())
+    revision_uuid = str(uuid4())
+    card_a = str(uuid4())
+    card_b = str(uuid4())
+    cycle_a = str(uuid4())
+    cycle_b = str(uuid4())
+    session_factory = get_session_factory()
+
+    registration_a = {
+        "status": "ready",
+        "cycle_id": cycle_a,
+        "session_uuid": session_uuid,
+        "flow_uuid": flow_uuid,
+        "flow_revision_id": revision_uuid,
+        "component_ref_id": card_a,
+    }
+    registration_b = {
+        "status": "ready",
+        "cycle_id": cycle_b,
+        "session_uuid": session_uuid,
+        "flow_uuid": flow_uuid,
+        "flow_revision_id": revision_uuid,
+        "component_ref_id": card_b,
+    }
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE orch_sessions (
+                        id BIGINT PRIMARY KEY,
+                        uuid UUID NOT NULL,
+                        flow_uuid UUID NOT NULL,
+                        state INTEGER NOT NULL,
+                        ended_at TIMESTAMPTZ NULL,
+                        unassigned_at TIMESTAMPTZ NULL,
+                        runtime_variables JSONB NOT NULL,
+                        last_card_uuid UUID NULL,
+                        next_card_uuid UUID NULL,
+                        frozen_until TIMESTAMPTZ NULL,
+                        updated_at TIMESTAMPTZ NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO orch_sessions (
+                        id, uuid, flow_uuid, state, runtime_variables,
+                        last_card_uuid, next_card_uuid
+                    ) VALUES (
+                        9102, CAST(:session_uuid AS uuid), CAST(:flow_uuid AS uuid), 1,
+                        CAST(:runtime_variables AS jsonb),
+                        CAST(:card_b AS uuid), CAST(:card_b AS uuid)
+                    )
+                    """
+                ),
+                {
+                    "session_uuid": session_uuid,
+                    "flow_uuid": flow_uuid,
+                    "card_b": card_b,
+                    "runtime_variables": json.dumps(
+                        {
+                            "workflow_v2": {
+                                "blocking_execution": True,
+                                "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+                                "dialer_supplier_v2": registration_b,
+                                "dialer_supplier_v2_history": {
+                                    "a" * 64: registration_a,
+                                },
+                            }
+                        }
+                    ),
+                },
+            )
+
+            callback_a = {
+                "event_id": str(uuid4()),
+                "cycle_id": cycle_a,
+                "attempt_id": str(uuid4()),
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+                "flow_revision_id": revision_uuid,
+                "component_ref_id": card_a,
+                "outcome": "busy",
+                "terminal": True,
+                "terminal_reason": "busy",
+                "occurred_at": "2026-09-15T13:03:13+00:00",
+            }
+            archived = await apply_dialer_supplier_v2_terminal_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload=callback_a,
+            )
+            runtime = (
+                await db_session.execute(
+                    text(
+                        "SELECT runtime_variables FROM orch_sessions WHERE id = 9102"
+                    )
+                )
+            ).scalar_one()
+
+            assert archived is not None
+            assert archived["accepted"] is True
+            assert archived["idempotent"] is False
+            assert archived["resume_required"] is False
+            assert (
+                runtime["workflow_v2"]["dialer_supplier_v2"]["cycle_id"]
+                == cycle_b
+            )
+            archived_cycle = next(
+                iter(
+                    runtime["workflow_v2"][
+                        "dialer_supplier_v2_history"
+                    ].values()
+                )
+            )
+            assert archived_cycle["status"] == "terminal_received"
+            assert archived_cycle["terminal_delivery"]["cycle_id"] == cycle_a

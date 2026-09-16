@@ -86,6 +86,34 @@ def dialer_supplier_v2_enabled_for_context(
     return normalized_workspace in allowed_workspaces and normalized in allowed_flows
 
 
+def dialer_supplier_v2_multilane_enabled_for_context(
+    *, settings: Settings, workspace_uuid: str, flow_uuid: str
+) -> bool:
+    """Require the existing Supplier V2 gate plus the dedicated multilane gate."""
+
+    if not dialer_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+    ):
+        return False
+    if not bool(getattr(settings, "orch_dialer_multilane_v2_enabled", False)):
+        return False
+    try:
+        normalized = str(UUID(str(flow_uuid)))
+        allowed_flows = {
+            str(UUID(str(item)))
+            for item in getattr(
+                settings,
+                "orch_dialer_multilane_v2_flow_uuids",
+                (),
+            )
+        }
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return normalized in allowed_flows
+
+
 def build_dialer_cycle_intent(
     *,
     session_uuid: str,
@@ -391,6 +419,7 @@ __all__ = [
     "DialerSupplierV2RegistrationError",
     "build_dialer_cycle_intent",
     "dialer_supplier_v2_enabled_for_context",
+    "dialer_supplier_v2_multilane_enabled_for_context",
     "parse_dialer_cycle_intent",
     "register_dialer_cycle",
 ]

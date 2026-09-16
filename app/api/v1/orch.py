@@ -892,7 +892,8 @@ async def callback_dialer_supplier_v2_by_workspace(
 
     accepted = bool(persisted.get("accepted"))
     idempotent = bool(persisted.get("idempotent"))
-    if accepted and not idempotent:
+    resume_required = bool(persisted.get("resume_required", accepted))
+    if accepted and not idempotent and resume_required:
         settings = get_settings()
         await asyncio.wait_for(
             asyncio.to_thread(
@@ -923,6 +924,7 @@ async def callback_dialer_supplier_v2_by_workspace(
             "outcome": request.outcome,
             "accepted": accepted,
             "idempotent": idempotent,
+            "resume_required": resume_required,
             "reason": None if accepted else result_status,
         },
     )

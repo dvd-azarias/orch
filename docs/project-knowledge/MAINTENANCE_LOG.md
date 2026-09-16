@@ -1,5 +1,38 @@
 # Maintenance Log
 
+## 2026-09-15 — Gate O1: intenção e retomada por card no Dialer multilane
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`GOAL`: permitir, sob feature flag e allowlist exclusivas, que uma sessão
+alcance sequencialmente mais de um `send_with_dialer_handoff`, mantendo ciclo,
+branch e callback identificados por card sem alterar o card legado ou o caminho
+single-card Supplier V2.
+
+`MINIMUM SAFE CHANGE`: conservar `workflow_v2.dialer_supplier_v2` como ciclo
+corrente; arquivar apenas ciclos terminais em
+`workflow_v2.dialer_supplier_v2_history`; criar a próxima intenção com a chave
+idempotente existente; impedir avanço quando o callback corresponde ao
+histórico; validar quantidade de cards antes da escrita; envolver marcador e
+construção da intenção em savepoint.
+
+`CONTRACTS PRESERVED`: `linked_actuator` continua sendo `dialer`; Supplier V1 e
+`send_with_dialer` não foram alterados; o endpoint e o formato público do
+callback Supplier V2 permanecem iguais; card único usa o mesmo campo corrente e
+o mesmo enqueue; defaults desligados e limites `1` mantêm o comportamento
+anterior.
+
+`VALIDATION`: `214 passed` nos testes focados de configuração, serviço, engine,
+escopos `channel`/`person`, dispatcher e endpoint; `7 passed` em PostgreSQL real
+para callback corrente/histórico e regressão das tasks. A stack local completa
+subiu com filas `f5_local`, confirmou readiness de DB/schema e aceitou cinco
+eventos em cada flow do smoke encadeado, com tasks de avanço concluídas. O
+canário integrado permanece bloqueado até Kerberos K1 e `service_dialer` D1.
+
+`ROLLBACK`: desligar `ORCH_DIALER_MULTILANE_V2_ENABLED` ou retirar o flow da
+allowlist, reiniciar API/workers e preservar runtime/ciclos para auditoria. Não
+habilitar fallback V1.
+
 ## 2026-09-15 — Corrida registro/terminal no Supplier V2
 
 ### REQUEST / CLASSIFICATION
