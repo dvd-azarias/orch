@@ -655,6 +655,7 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
                 "decision": "finish_person",
                 "decision_source": "telephone_outcome",
                 "decision_effective_until": None,
+                "release_mapping_version": "pdial_v1",
                 "occurred_at": "2026-09-15T13:03:13+00:00",
             }
 
@@ -667,6 +668,11 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
                 db_session,
                 flow_uuid=flow_uuid,
                 callback_payload=payload,
+            )
+            mapping_conflict = await apply_dialer_supplier_v2_terminal_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload={**payload, "release_mapping_version": None},
             )
             conflict = await apply_dialer_supplier_v2_terminal_callback(
                 db_session,
@@ -684,6 +690,8 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
             assert first is not None and first["accepted"] is True
             assert first["idempotent"] is False
             assert replay is not None and replay["idempotent"] is True
+            assert mapping_conflict is not None
+            assert mapping_conflict["status"] == "terminal_conflict"
             assert conflict is not None and conflict["status"] == "terminal_conflict"
             terminal = runtime["workflow_v2"]["dialer_supplier_v2"][
                 "terminal_delivery"
@@ -693,6 +701,7 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
             assert terminal["decision"] == "finish_person"
             assert terminal["decision_source"] == "telephone_outcome"
             assert terminal["contact_list_member_id"] == 123
+            assert terminal["release_mapping_version"] == "pdial_v1"
 
 
 @pytest.mark.asyncio

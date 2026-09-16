@@ -1,5 +1,27 @@
 # Maintenance Log
 
+## 2026-09-16 — Contrato da versão do mapa PDIAL no terminal Supplier V2
+
+Classificação: `ALPHA_FIX_REQUIRED`.
+
+- o produtor Target Core passou a enviar
+  `release_mapping_version=pdial_v1`, mas o schema estrito do ORCH recusou o
+  terminal canário com HTTP 422;
+- o campo agora é opcional para preservar envelopes anteriores e restrito ao
+  único valor conhecido `pdial_v1`; versões desconhecidas continuam falhando
+  fechadas;
+- a versão é persistida em `terminal_delivery` e participa da comparação de
+  replay, impedindo que o mesmo evento seja aceito sob semânticas divergentes;
+- Supplier V1, callback bruto do PBX, card legado e seleção de branch não foram
+  alterados;
+- validação: `24 passed` no conjunto schema/endpoint/mapeador (incluindo os
+  `8` testes do endpoint terminal) e suíte PostgreSQL contextual completa
+  `6 passed`, incluindo persistência, replay e conflito.
+
+Rollout: implantar este consumidor antes do produtor Target Core corrigido. O
+evento canário já persistido com outcome incorreto não deve ser reprocessado;
+usar novo ciclo. Rollback é de código/restart e não possui migration.
+
 ## 2026-09-16 — Gate 3B2/3C: seletor harmonizado com Supplier V2
 
 Classificação: `ALPHA_FIX_REQUIRED`.
