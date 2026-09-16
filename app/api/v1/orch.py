@@ -922,6 +922,8 @@ async def callback_dialer_supplier_v2_by_workspace(
             "cycle_id": str(request.cycle_id),
             "event_id": str(request.event_id),
             "outcome": request.outcome,
+            "decision": request.decision,
+            "decision_source": request.decision_source,
             "accepted": accepted,
             "idempotent": idempotent,
             "resume_required": resume_required,

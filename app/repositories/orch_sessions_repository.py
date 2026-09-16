@@ -1718,6 +1718,12 @@ async def apply_dialer_supplier_v2_terminal_callback(
             and str(previous.get("cycle_id") or "") == cycle_id
             and str(previous.get("outcome") or "")
             == str(callback_payload.get("outcome") or "")
+            and str(previous.get("decision") or "")
+            == str(callback_payload.get("decision") or "")
+            and str(previous.get("decision_source") or "")
+            == str(callback_payload.get("decision_source") or "")
+            and str(previous.get("decision_effective_until") or "")
+            == str(callback_payload.get("decision_effective_until") or "")
         )
         return {
             "status": "accepted" if same_delivery else "terminal_conflict",
@@ -1744,6 +1750,19 @@ async def apply_dialer_supplier_v2_terminal_callback(
         "cycle_id": cycle_id,
         "attempt_id": str(callback_payload.get("attempt_id") or ""),
         "outcome": str(callback_payload.get("outcome") or ""),
+        "decision": callback_payload.get("decision"),
+        "decision_source": callback_payload.get("decision_source"),
+        "decision_effective_until": callback_payload.get(
+            "decision_effective_until"
+        ),
+        "contact_list_member_id": callback_payload.get(
+            "contact_list_member_id"
+        ),
+        "dial_profile_id": callback_payload.get("dial_profile_id"),
+        "dial_profile_revision_id": callback_payload.get(
+            "dial_profile_revision_id"
+        ),
+        "attempt_policy_id": callback_payload.get("attempt_policy_id"),
         "terminal": True,
         "terminal_reason": callback_payload.get("terminal_reason"),
         "occurred_at": callback_payload.get("occurred_at"),

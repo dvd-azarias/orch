@@ -1,5 +1,31 @@
 # Maintenance Log
 
+## 2026-09-16 — Compatibilidade ORCH com decisão terminal Supplier V2
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`GOAL`: preparar o consumidor antes de o Target Core enriquecer o outbox
+terminal, preservando o callback implantado e sem executar ainda a troca de
+telefone.
+
+`MINIMUM SAFE CHANGE`: o schema estrito continua aceitando o envelope antigo e
+passa a validar o contrato novo com decisão, origem, vigência, membro e contexto
+do Perfil. Contratos novos parciais falham; `pause_person` exige vigência. A
+sessão persiste o envelope enriquecido e inclui esses campos na verificação de
+replay/conflito.
+
+`CONTRACTS PRESERVED`: o canvas continua escolhendo branch exclusivamente por
+`outcome`; `machine + next_phone` percorre `machine`. A decisão operacional será
+consumida pelo seletor posterior. Callback V1, card legado e raw PBX não foram
+alterados.
+
+`VALIDATION`: `194 passed` na regressão focada de API, workflow e persistência.
+Ordem segura: implantar este consumidor, validar o envelope antigo e somente
+então implantar o produtor Target Core da Gate 3B1.
+
+`ROLLBACK`: manter esta compatibilidade enquanto existirem outboxes
+enriquecidos. Em rollback conjunto, reverter primeiro o produtor Target Core.
+
 ## 2026-09-15 — Gate O1: intenção e retomada por card no Dialer multilane
 
 `CLASSIFICATION`: `ALPHA_FIX_REQUIRED`

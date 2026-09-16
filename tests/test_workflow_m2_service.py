@@ -1013,6 +1013,43 @@ def test_supplier_v2_handoff_routes_only_pinned_terminal_decision() -> None:
     )
 
 
+def test_supplier_v2_keeps_telephone_branch_separate_from_operational_decision() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_dialer_handoff",
+            "dialer_supplier_v2": {
+                "status": "terminal_received",
+                "cycle_id": "11111111-1111-4111-8111-111111111111",
+                "component_ref_id": "dialer-handoff-1",
+                "terminal_delivery": {
+                    "terminal": True,
+                    "outcome": "machine",
+                    "decision": "next_phone",
+                    "decision_source": "dial_profile",
+                },
+            },
+        }
+    }
+    component = {
+        "component_id": "send_with_dialer_handoff",
+        "ref_id": "dialer-handoff-1",
+    }
+
+    assert (
+        _resolve_send_with_dialer_branch_label(
+            component=component,
+            runtime_variables=runtime_variables,
+        )
+        == "machine"
+    )
+    assert runtime_variables["dialer_last_response"] == {
+        "component_ref_id": "dialer-handoff-1",
+        "status": "machine",
+        "branch": "machine",
+    }
+
+
 def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -> None:
     component = {
         "parameters": {

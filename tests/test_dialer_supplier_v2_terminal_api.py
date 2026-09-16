@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from app.api.v1 import orch as orch_api
 from app.schemas.orch import OrchDialerSupplierV2TerminalRequest
@@ -58,6 +59,78 @@ def _request() -> OrchDialerSupplierV2TerminalRequest:
         terminal_reason="answered",
         occurred_at=datetime.now(timezone.utc),
     )
+
+
+def test_terminal_request_accepts_legacy_and_enriched_contracts() -> None:
+    legacy = _request()
+    payload = legacy.model_dump()
+    payload.update(
+        {
+            "outcome": "machine",
+            "contact_list_member_id": 123,
+            "dial_profile_id": UUID("77777777-7777-4777-8777-777777777777"),
+            "dial_profile_revision_id": UUID(
+                "88888888-8888-4888-8888-888888888888"
+            ),
+            "attempt_policy_id": UUID("99999999-9999-4999-8999-999999999999"),
+            "decision": "next_phone",
+            "decision_source": "dial_profile",
+        }
+    )
+    enriched = OrchDialerSupplierV2TerminalRequest(**payload)
+
+    assert legacy.decision is None
+    assert enriched.decision == "next_phone"
+    assert enriched.outcome == "machine"
+
+
+def test_terminal_request_rejects_partial_operational_contract() -> None:
+    payload = _request().model_dump()
+    payload.update(
+        {
+            "decision": "next_phone",
+            "decision_source": "dial_profile",
+        }
+    )
+    with pytest.raises(ValidationError):
+        OrchDialerSupplierV2TerminalRequest(**payload)
+
+
+def test_pause_person_requires_effective_until() -> None:
+    payload = _request().model_dump()
+    payload.update(
+        {
+            "contact_list_member_id": 123,
+            "dial_profile_id": UUID("77777777-7777-4777-8777-777777777777"),
+            "dial_profile_revision_id": UUID(
+                "88888888-8888-4888-8888-888888888888"
+            ),
+            "attempt_policy_id": UUID("99999999-9999-4999-8999-999999999999"),
+            "decision": "pause_person",
+            "decision_source": "dial_profile",
+        }
+    )
+    with pytest.raises(ValidationError):
+        OrchDialerSupplierV2TerminalRequest(**payload)
+
+
+def test_answered_rejects_a_decision_that_would_redial_the_person() -> None:
+    payload = _request().model_dump()
+    payload.update(
+        {
+            "contact_list_member_id": 123,
+            "dial_profile_id": UUID("77777777-7777-4777-8777-777777777777"),
+            "dial_profile_revision_id": UUID(
+                "88888888-8888-4888-8888-888888888888"
+            ),
+            "attempt_policy_id": UUID("99999999-9999-4999-8999-999999999999"),
+            "decision": "next_phone",
+            "decision_source": "dial_profile",
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        OrchDialerSupplierV2TerminalRequest(**payload)
 
 
 @pytest.mark.asyncio
