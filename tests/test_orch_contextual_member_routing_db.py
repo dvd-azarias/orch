@@ -648,6 +648,13 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
                 "outcome": "answered",
                 "terminal": True,
                 "terminal_reason": "answered",
+                "contact_list_member_id": 123,
+                "dial_profile_id": str(uuid4()),
+                "dial_profile_revision_id": str(uuid4()),
+                "attempt_policy_id": str(uuid4()),
+                "decision": "finish_person",
+                "decision_source": "telephone_outcome",
+                "decision_effective_until": None,
                 "occurred_at": "2026-09-15T13:03:13+00:00",
             }
 
@@ -683,6 +690,9 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
             ]
             assert terminal["event_id"] == event_uuid
             assert terminal["outcome"] == "answered"
+            assert terminal["decision"] == "finish_person"
+            assert terminal["decision_source"] == "telephone_outcome"
+            assert terminal["contact_list_member_id"] == 123
 
 
 @pytest.mark.asyncio

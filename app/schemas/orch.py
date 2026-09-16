@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SessionExtraction(BaseModel):
@@ -166,7 +166,65 @@ class OrchDialerSupplierV2TerminalRequest(BaseModel):
     ]
     terminal: Literal[True]
     terminal_reason: str | None = Field(default=None, max_length=255)
+    contact_list_member_id: int | None = Field(default=None, gt=0)
+    dial_profile_id: UUID | None = None
+    dial_profile_revision_id: UUID | None = None
+    attempt_policy_id: UUID | None = None
+    decision: Literal[
+        "next_phone",
+        "finish_person",
+        "pause_person",
+        "block_phone",
+    ] | None = None
+    decision_source: Literal[
+        "telephone_outcome",
+        "shared_limit",
+        "dial_profile",
+        "safety_default",
+    ] | None = None
+    decision_effective_until: datetime | None = None
     occurred_at: datetime
+
+    @model_validator(mode="after")
+    def validate_operational_decision_contract(
+        self,
+    ) -> "OrchDialerSupplierV2TerminalRequest":
+        identity_fields = (
+            self.contact_list_member_id,
+            self.dial_profile_id,
+            self.dial_profile_revision_id,
+            self.attempt_policy_id,
+        )
+        if self.decision is None:
+            if (
+                self.decision_source is not None
+                or self.decision_effective_until is not None
+                or any(value is not None for value in identity_fields)
+            ):
+                raise ValueError(
+                    "decision é obrigatória quando o contrato operacional V2 é enviado."
+                )
+            return self
+        if self.decision_source is None or any(
+            value is None for value in identity_fields
+        ):
+            raise ValueError(
+                "A decisão operacional V2 exige origem, membro e revisões do Perfil."
+            )
+        if self.decision == "pause_person" and self.decision_effective_until is None:
+            raise ValueError(
+                "pause_person exige decision_effective_until."
+            )
+        if (
+            self.decision not in {"pause_person", "block_phone"}
+            and self.decision_effective_until is not None
+        ):
+            raise ValueError(
+                "A decisão informada não aceita decision_effective_until."
+            )
+        if self.outcome == "answered" and self.decision != "finish_person":
+            raise ValueError("answered exige a decisão finish_person.")
+        return self
 
 
 class OrchDialerSupplierV2TerminalResponse(BaseModel):
