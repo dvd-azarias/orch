@@ -12,6 +12,11 @@ Toda retomada do trabalho deve começar pela leitura de:
 3. `Checklist mestre`;
 4. `Registro de evidências`.
 
+Durante os Gates 3A–3C, ler também integralmente
+`docs/project-knowledge/FLOW_SESSION_SCOPE_CONTRACT.md`, que contém a matriz
+normativa dos modos, cards e decisões de discagem. O presente documento continua
+sendo a fonte única de progresso e do ponto obrigatório de retorno.
+
 Não considerar uma etapa concluída somente porque houve implementação, commit,
 merge ou deploy. Uma etapa termina apenas quando seu gate de saída possui
 evidência executável registrada neste documento.
@@ -40,18 +45,20 @@ de registrar a decisão explícita de mudança de prioridade.
 
 ## Estado atual
 
-- **Data do checkpoint:** 2026-09-15.
+- **Data do checkpoint:** 2026-09-16.
 - **Classificação:** `ALPHA_FIX_REQUIRED`, por remover uma limitação que impede
   a execução de um cenário real de cliente.
-- **Status:** Gates 0, 1/T1-T2 e 2/T3 concluídos. O Target Core está implantado
-  em `10.1.20.239` e `10.1.20.249`; T3 chegou pelo commit `7b12424`, com
-  `60/60` workspaces no head `20260915_0002_lane_snapshot`, Supplier saudável e
-  flags desligadas. O Gate 3/O1 está implementado e validado localmente no
-  branch isolado `feat/multi-dialer-v2-cycle-intent`, criado de
-  `origin/main@eac80d8`; ainda não possui commit/PR/deploy. Kerberos e
-  `service_dialer` permanecem inalterados. A capacidade multilane continua
-  desativada pelos defaults seguros (`enabled=false`, allowlist vazia e máximo
-  `1`).
+- **Status:** Gates 0 a 5 e entregas T1, T2, T3, O1, K1 e D1 concluídos. O O1
+  foi integrado pela PR ORCH `#177`, merge `11159c9`. Kerberos e
+  `service_dialer` multilane estão implantados sob gates fail-closed; somente o
+  canário está autorizado. A revisão publicada do canário possui dois cards e
+  duas lanes no mesmo Grupo de Execução. A primeira execução real revelou que
+  `session_mode=channel` preserva corretamente o membro âncora, mas não comprova
+  A→B com outro telefone. A revisão adversarial também comprovou que a Supplier
+  V2 ainda não transporta o `limit_action` terminal e que implementar apenas
+  `next_eligible` faria o ORCH ignorar o Perfil de Discagem. O Gate 3A–3C foi
+  inserido para harmonizar cards, `person`, `channel` e Dial Rule antes de
+  retomar o Gate 6. O mailing permanece desvinculado durante esse ajuste.
 - **Flow de desenvolvimento:**
   `8b81e493-b39c-4829-8b1e-5bafd00aeb7c`.
 - **Workspace de desenvolvimento:**
@@ -78,10 +85,10 @@ de registrar a decisão explícita de mudança de prioridade.
   - seleciona ciclos V2 somente por flow/lista, sem escopo de card.
 - T2 já remove localmente os três primeiros bloqueios sob flag+allowlist+limite,
   mantendo a seleção por lane para T3.
-- O Kerberos atualmente exige exatamente uma entrada de voz para resolver o
-  contrato Supplier.
-- O `service_dialer` atualmente possui um único `CampaignConfig`, `pool_uuid`,
-  estado preditivo, lista e contrato Supplier por processo.
+- O Kerberos K1 publica manifesto por lane com schema, instância, versão, TTL e
+  checksum. V1 e `single_v2` preservam o contrato escalar.
+- O `service_dialer` D1 supervisiona N lanes em M Grupos de Execução, com
+  capacidade global e identidade de ciclo/callback isoladas por card.
 
 ## Objetivo funcional
 
@@ -566,68 +573,127 @@ ativação continua bloqueada até O1, K1, D1 e canário integrado.**
 **Gate de saída:** uma sessão consegue bloquear e retomar em dois cards
 distintos, mantendo ciclos e branches independentes. **Comprovado localmente em
 teste encadeado da engine, teste PostgreSQL real de callback corrente/histórico
-e regressão da stack completa. O gate está pronto para revisão e PR; deploy
-deve manter todas as flags desligadas.**
+e regressão da stack completa. A PR ORCH `#177` foi integrada no merge
+`11159c9`; a ativação permanece restrita ao canário.**
+
+### Gate 3A — contrato de escopo dos cards
+
+Fonte normativa:
+`docs/project-knowledge/FLOW_SESSION_SCOPE_CONTRACT.md`.
+
+- [x] Revisar adversarialmente os novos cards e o plano multilane.
+- [x] Definir `channel` como sessão ancorada e `person` como sessão com seleção
+  explícita mutável.
+- [x] Classificar cards por cardinalidade, consumo de canal e correlação.
+- [x] Preservar o card de comunicação como autoridade de `linked_actuator`.
+- [x] Definir que o endereço representativo da sessão `person` não equivale a
+  canal selecionado.
+- [x] Definir análise de dominância por caminho para consumidores de canal.
+- [x] Auditar definições existentes e medir o impacto dos futuros `422`.
+- [ ] Implementar metadados/registro normativo no Target Core.
+- [ ] Proteger create, update, patch, publish e rollback no padrão `422`.
+- [ ] Manter guards fail-closed equivalentes no ORCH.
+
+**Gate de saída:** nenhuma definição nova consegue combinar modo e cards com
+cardinalidade ou contexto incompatíveis; flows publicados existentes foram
+auditados antes da ativação do bloqueio.
+
+### Gate 3B — decisão Dial Rule → Supplier V2 → ORCH
+
+- [x] Separar conceitualmente resultado telefônico de decisão operacional.
+- [x] Definir `respect_dial_rule` e `flow_override` sem permitir bypass de
+  limites rígidos.
+- [x] Confirmar o gap atual: `limit_action` existe no snapshot, mas não é
+  executado/transportado no feedback terminal.
+- [ ] Congelar a semântica durável de `pause_person` e `block_phone` no snapshot.
+- [ ] Transportar decisão, origem, Perfil/revisão, membro e motivo terminal no
+  outbox Supplier V2.
+- [ ] Fazer `next_phone` depender de autorização/eligibilidade Supplier V2.
+- [ ] Garantir consumo idempotente da decisão pelo ORCH.
+- [ ] Provar que V1 e V2 single-card não mudaram de comportamento.
+
+**Gate de saída:** o ORCH nunca deduz `next_phone` apenas pelo branch do evento;
+a decisão usada é explícita, auditável e corresponde ao Perfil/revisão do
+ciclo.
+
+### Gate 3C — seletor harmonizado
+
+- [ ] Adicionar `first_eligible|next_eligible`, com default retrocompatível
+  `first_eligible`.
+- [ ] Permitir `next_eligible` somente em `person`.
+- [ ] Adicionar `respect_dial_rule|flow_override` para próximo canal de voz.
+- [ ] Excluir o membro atual e limpar seleção em `not_found|exception`.
+- [ ] Adicionar branch `blocked_by_policy` sem retry técnico.
+- [ ] Invalidar seleção quando o membro contextual for desativado.
+- [ ] Cobrir o retorno ao mesmo card com nova geração de ciclo ou rejeição
+  explícita; nunca reutilizar ciclo terminal silenciosamente.
+- [ ] Testar PostgreSQL real, stack local completa e canários controlados.
+
+**Gate de saída:** o seletor troca de telefone somente em `person`, sob decisão
+e elegibilidade explícitas, sem alterar `linked_actuator` nem reinterpretar o
+grafo.
 
 ### Gate 4 — Kerberos: manifesto multilane
 
-- [ ] Revalidar o `main` do repositório `orchestrator`.
-- [ ] Consumir todas as entradas de voz do flow.
-- [ ] Preservar o contrato escalar legado.
-- [ ] Publicar `dialer_lanes` com versão/checksum.
-- [ ] Publicar `execution_group_checksum` sem replicar tokens no Redis.
-- [ ] Avaliar agenda e validade por unidade.
-- [ ] Não interromper unidades válidas por falha isolada de outra unidade.
-- [ ] Bloquear integralmente mistura V1/V2.
-- [ ] Reconciliar adição, alteração e remoção de unidade.
-- [ ] Manter um container por flow.
-- [ ] Testar manifesto stale, ausente, duplicado e divergente.
+- [x] Revalidar o `main` do repositório `orchestrator`.
+- [x] Consumir todas as entradas de voz do flow.
+- [x] Preservar o contrato escalar legado.
+- [x] Publicar `lanes[]` com versão/checksum.
+- [x] Publicar `execution_group_checksum` sem replicar tokens no Redis.
+- [x] Avaliar agenda e validade por unidade.
+- [x] Não interromper unidades válidas por indisponibilidade operacional de
+  outra unidade.
+- [x] Bloquear integralmente mistura V1/V2.
+- [x] Reconciliar adição, alteração e remoção de unidade.
+- [x] Manter um container por flow.
+- [x] Testar manifesto duplicado/divergente no publicador e stale/ausente no
+  consumidor.
 
 **Gate de saída:** Kerberos publica duas unidades independentes e continua
 gerenciando flows legados sem alteração observável.
 
 ### Gate 5 — `service_dialer`: supervisor de lanes e Grupos de Execução
 
-- [ ] Criar `DialerLaneSupervisor` em caminho opt-in.
-- [ ] Instanciar N lanes e agrupá-las conservadoramente em M grupos.
-- [ ] Comprovar N lanes → 1 grupo quando campanha final/configuração coincidem.
-- [ ] Comprovar N lanes → N grupos quando campanhas finais divergem.
-- [ ] Evitar compartilhamento acidental de ciclos, Supplier, agenda, Perfil,
+- [x] Criar `DialerLaneSupervisor` em caminho opt-in.
+- [x] Instanciar N lanes e agrupá-las conservadoramente em M grupos.
+- [x] Comprovar N lanes → 1 grupo quando campanha final/configuração coincidem.
+- [x] Comprovar N lanes → N grupos quando campanhas finais divergem.
+- [x] Evitar compartilhamento acidental de ciclos, Supplier, agenda, Perfil,
   métricas ou callbacks entre lanes.
-- [ ] Compartilhar `CampaignConfig`, Pool, agentes e preditivo somente dentro de
+- [x] Compartilhar `CampaignConfig`, Pool, agentes e preditivo somente dentro de
   um Grupo de Execução compatível.
-- [ ] Criar worker supervisionado por Grupo de Execução.
-- [ ] Limitar quantidade máxima de workers por flow.
-- [ ] Reiniciar somente o grupo que falhar, com backoff.
-- [ ] Implementar encerramento e drain controlados.
-- [ ] Implementar árbitro de capacidade global e limite por unidade.
-- [ ] Impedir oversubscription de PBX/tronco.
-- [ ] Selecionar Supplier V2 no escopo da unidade.
-- [ ] Usar campanha/fila correta no `makecall`.
-- [ ] Preservar callback V2 por tentativa.
-- [ ] Agregar heartbeat por flow sem perder métricas por unidade.
-- [ ] Acrescentar `component_ref_id`, fila e unidade ao PDIAL/diagnóstico.
-- [ ] Manter o entrypoint legado sem mudança funcional.
+- [x] Criar worker supervisionado por Grupo de Execução.
+- [x] Limitar quantidade máxima de workers por flow.
+- [x] Reiniciar somente o grupo que falhar, com backoff.
+- [x] Implementar encerramento e drain controlados.
+- [x] Implementar árbitro de capacidade global e limite por unidade.
+- [x] Impedir oversubscription de PBX/tronco.
+- [x] Selecionar Supplier V2 no escopo da unidade.
+- [x] Usar campanha/fila correta no `makecall`.
+- [x] Preservar callback V2 por tentativa.
+- [x] Agregar heartbeat por flow sem perder métricas por unidade.
+- [x] Acrescentar `component_ref_id`, fila e unidade ao PDIAL/diagnóstico.
+- [x] Manter o entrypoint legado sem mudança funcional.
 
 **Gate de saída:** duas lanes compartilham corretamente um grupo no cenário de
 mesma campanha; duas campanhas distintas operam em dois workers, uma pode
 falhar sem parar a outra e a capacidade total permanece dentro do teto.
+**Resultado: aprovado e implantado com ativação restrita; a prova E2E permanece
+no Gate 6.**
 
 ### Gate 6 — flow canário
 
-- [ ] Criar branch/PRs apenas após autorização explícita.
-- [ ] Desenhar no flow canário dois cards novos.
-- [ ] Configurar Discador A → fila A.
-- [ ] Configurar Discador B → fila B.
-- [ ] Rodada 1: apontar A e B para a mesma campanha final e comprovar um Grupo
-  de Execução com duas lanes isoladas.
-- [ ] Rodada 2: apontar A e B para campanhas finais distintas e comprovar dois
-  Grupos de Execução.
+- [x] Criar branch/PRs apenas após autorização explícita.
+- [x] Desenhar no flow canário dois cards novos.
+- [ ] Rodada 1: apontar A e B para a mesma campanha/fila final e comprovar um
+  Grupo de Execução com duas lanes isoladas.
+- [ ] Rodada 2: configurar Discador A → fila A e Discador B → fila B, com
+  campanhas finais distintas, e comprovar dois Grupos de Execução.
 - [ ] Usar roteamento determinístico para produzir ciclos em A e B.
 - [ ] Ligar um branch de falha de A à seleção de canal e depois a B.
 - [ ] Ligar `answered` de cada card ao braço correto.
-- [ ] Validar visualmente antes de publicar.
-- [ ] Publicar somente após validação estática e de contratos.
+- [x] Validar visualmente antes de publicar.
+- [x] Publicar somente após validação estática e de contratos.
 - [ ] Vincular mailing controlado somente quando solicitado.
 - [ ] Comprovar seleção, chamada, callback e retomada em A.
 - [ ] Comprovar seleção, chamada, callback e retomada em B.
@@ -690,6 +756,11 @@ externas explicitamente documentadas, sem pendência oculta da engine.
 - Perfil e rota usados são os fixados para o ciclo/revisão.
 - Métricas identificam flow e unidade.
 - Rollback interrompe novas seleções sem apagar auditoria.
+- `channel` nunca troca silenciosamente o membro âncora.
+- `person` nunca alcança consumidor de canal sem seleção explícita compatível.
+- `next_phone` nunca é inferido apenas pelo outcome; deve ser decisão Supplier
+  V2 ou override auditado do flow.
+- Override do flow nunca ultrapassa limite rígido, calendário, pausa ou bloqueio.
 - O trabalho retorna ao flow completo depois da homologação multilane.
 
 ## Estratégia de branches e PRs
@@ -859,6 +930,15 @@ Ao retomar:
 | 2026-09-15 | 3/O1 | PostgreSQL real | `7 passed` em callback ativo/histórico, roteamento contextual e tasks Supplier V2; callback histórico retornou `resume_required=false` e não alterou B | aprovado |
 | 2026-09-15 | 3/O1 | suíte completa | `759 passed`; 26 falhas permaneceram em testes antigos que chamam assinaturas legadas fora do diff O1, sobretudo `trigger_orch(flow_uuid=...)` | aprovado com ressalva de baseline documentada |
 | 2026-09-15 | 3/O1 | stack local completa `f5_local` | API, três workers e dois Beats ficaram `up`; `/health/ready` confirmou DB/schema; smoke real aceitou 5 eventos em cada flow A/B e tasks `advance_session` concluíram sem erro; stack foi encerrada sem órfãos | aprovado |
+| 2026-09-16 | 3/O1 | GitHub | PR ORCH `#177` mergeada em `11159c9`; ciclos e retomadas permanecem isolados por card | concluído |
+| 2026-09-16 | 4/K1 | `orchestrator`/GitHub/Kerberos | manifesto por lane, contrato escalar compatível, flags/allowlist/limites fail-closed; PR `#31` em `306abe9`; watchdog saudável | aprovado |
+| 2026-09-16 | 5/D1 | `orchestrator`, `.136` e `.143` | supervisor, grupos, capacidade e métricas implantados na imagem `v63`; 34/34 containers promovidos e controles multilane inicialmente fechados | aprovado |
+| 2026-09-16 | 6/publicação | flow canário v1 | dois cards publicados, dois bindings/lanes, checksums distintos e um Grupo de Execução; visual validado | aprovado |
+| 2026-09-16 | 6/segurança | Kerberos/runtime | allowlists e limites restritos ao canário; `single_v2` permaneceu fora do dispatch multilane | aprovado |
+| 2026-09-16 | 6/primeiro vínculo | Target/ORCH/Supplier V2 | primeiro vínculo encontrou gate ORCH fechado; falhou antes de criar chamada e foi corrigido sem fallback V1 | fail-closed confirmado |
+| 2026-09-16 | 6/gap A→B | código e definição | `channel` preserva o membro âncora; seletor atual em `person` escolhe apenas o primeiro ativo e não exclui o atual | gap confirmado |
+| 2026-09-16 | 3A–3C | revisão adversarial | catálogo valida campos, mas não compatibilidade modo/card ou dominância; callback genérico é ambíguo em `channel`; Supplier terminal não transporta `limit_action` | contrato corretivo aprovado |
+| 2026-09-16 | 3A/auditoria | Target DB, transação read-only | 60 workspaces, 667 flows e 142 orquestrações; modos `126 legacy_channel + 14 channel + 2 person`; seis incompatibilidades, todas publicadas no workspace DEV Highcomm; nenhum erro de leitura | impacto delimitado |
 
 ## Decisões e desvios
 
@@ -871,12 +951,17 @@ Ao retomar:
 | 2026-09-15 | Agrupamento é conservador | mesmo destino com parâmetros incompatíveis não pode compartilhar estado físico | checksum e campos operacionais devem coincidir; na dúvida, grupos separados |
 | 2026-09-15 | Primeira entrega usa drain antes do publish | impedir que ciclo antigo herde fila/Perfil da revisão nova | draft permitido; publish retorna 422 enquanto houver ciclo/tentativa não terminal |
 | 2026-09-15 | Supplier multilane usa rotas aditivas `/lanes/*` | manter card único V2 e V1 reversíveis | rotas atuais permanecem sem mudança semântica |
+| 2026-09-16 | `channel` permanece suportado e ancorado | há casos reais de execução por canal; troca silenciosa mudaria cardinalidade | próximo canal é proibido em `channel` |
+| 2026-09-16 | `person` começa sem canal selecionado | endereço representativo de bootstrap não é intenção de comunicação | consumidor exige seletor dominante em todos os caminhos |
+| 2026-09-16 | Dial Rule e flow têm autoridades distintas | Supplier conhece limites; ORCH conhece o grafo | `respect_dial_rule` ou `flow_override`, sempre sob limites rígidos |
+| 2026-09-16 | Revisão semântica vira Gate 3A–3C | impedir falso sucesso no canário e manter o norte do produto | concluir contrato antes de retomar o Gate 6; depois voltar ao flow completo |
 
 ## Próxima ação exata
 
-Revisar o diff O1 e, somente após autorização explícita, criar commit, push e PR
-do branch `feat/multi-dialer-v2-cycle-intent`. Depois do merge, promover o ORCH
-mantendo `ORCH_DIALER_MULTILANE_V2_ENABLED=false`, allowlist vazia e limites
-`1`, comprovar a regressão single-card e V1, e então iniciar K1 em branch
-isolada do repositório `orchestrator`. Não ativar o flow canário nem antecipar o
-supervisor D1 antes do manifesto Kerberos.
+Não vincular mailing ao canário. Com o relatório de impacto fechado, congelar a
+duração de `pause_person`/`block_phone` e implementar primeiro, em branch Target
+Core isolado, o contrato terminal Supplier V2 com `decision`,
+`decision_source`, Perfil/revisão e membro contextual. Não implementar
+`next_eligible` antes desse payload, não tocar Supplier V1 e não alterar
+Kerberos/`service_dialer` enquanto o contrato entre Supplier V2 e ORCH não
+estiver validado.
