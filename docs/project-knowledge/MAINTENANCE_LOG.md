@@ -1,5 +1,26 @@
 # Maintenance Log
 
+## 2026-09-16 — Gate 3B2/3C: seletor harmonizado com Supplier V2
+
+Classificação: `ALPHA_FIX_REQUIRED`.
+
+- `select_contact_channel` aceita `first_eligible|next_eligible`; o default
+  preserva o comportamento anterior e próximo canal falha fechado fora de
+  `person`;
+- próximo telefone de voz exige decisão terminal exata da Supplier V2 e usa
+  `respect_dial_rule|flow_override`; a resposta fica pinada ao membro autorizado;
+- consumo é auditável e idempotente por evento, seletor e modo; outro seletor
+  não reutiliza a mesma decisão;
+- `not_found`, `blocked_by_policy` e exceção limpam a seleção; inativar o membro
+  contextual por `source_list_membership` também a invalida;
+- o ORCH não deduz elegibilidade, não altera `linked_actuator` no seletor e não
+  consulta Supplier V1;
+- validação: `238 passed` na suíte afetada e `8 passed` em PostgreSQL para
+  seleção, roteamento contextual e membership.
+
+Rollout: implantar este consumidor antes do Target Core produtor. Rollback é de
+código/restart; não há migration nem dado V1 a compensar.
+
 ## 2026-09-16 — Compatibilidade ORCH com decisão terminal Supplier V2
 
 `CLASSIFICATION`: `ALPHA_FIX_REQUIRED`

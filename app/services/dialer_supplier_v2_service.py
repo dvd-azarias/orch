@@ -42,6 +42,22 @@ class DialerSupplierV2RegistrationError(RuntimeError):
         self.status_code = status_code
 
 
+class DialerSupplierV2EligibilityError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.status_code = status_code
+
+
 @dataclass(frozen=True)
 class DialerCycleRegistrationResult:
     cycle_id: str
@@ -63,6 +79,30 @@ class DialerCycleRegistrationResult:
             "attempt_limit_id": self.attempt_limit_id,
             "profile_snapshot_checksum": self.profile_snapshot_checksum,
             "ready_at": self.ready_at,
+        }
+
+
+@dataclass(frozen=True)
+class DialerNextChannelResult:
+    decision: str
+    reason: str
+    candidate: dict[str, Any] | None
+    source: dict[str, Any]
+    authorization: dict[str, Any] | None
+    selector_component_ref_id: str
+    evaluated_at: str
+
+    def runtime_payload(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "reason": self.reason,
+            "candidate": dict(self.candidate) if self.candidate else None,
+            "source": dict(self.source),
+            "authorization": (
+                dict(self.authorization) if self.authorization else None
+            ),
+            "selector_component_ref_id": self.selector_component_ref_id,
+            "evaluated_at": self.evaluated_at,
         }
 
 
@@ -347,6 +387,272 @@ def _parse_cycle_response(
     )
 
 
+def resolve_next_dialer_channel(
+    *,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_uuid: str,
+    flow_revision_id: str,
+    source_component_ref_id: str,
+    selector_component_ref_id: str,
+    cycle_id: str,
+    event_id: str,
+    current_contact_list_member_id: int,
+    mode: str,
+    channel_label: str | None = None,
+    settings: Settings | None = None,
+) -> DialerNextChannelResult:
+    resolved_settings = settings or get_settings()
+    request_payload = {
+        "session_uuid": _eligibility_uuid(session_uuid, "session_uuid"),
+        "flow_uuid": _eligibility_uuid(flow_uuid, "flow_uuid"),
+        "flow_revision_id": _eligibility_uuid(
+            flow_revision_id, "flow_revision_id"
+        ),
+        "source_component_ref_id": _eligibility_component_ref(
+            source_component_ref_id, "source_component_ref_id"
+        ),
+        "selector_component_ref_id": _eligibility_component_ref(
+            selector_component_ref_id, "selector_component_ref_id"
+        ),
+        "cycle_id": _eligibility_uuid(cycle_id, "cycle_id"),
+        "event_id": _eligibility_uuid(event_id, "event_id"),
+        "current_contact_list_member_id": _eligibility_member_id(
+            current_contact_list_member_id
+        ),
+        "mode": str(mode or "").strip().lower(),
+        "channel_label": str(channel_label).strip() if channel_label else None,
+    }
+    if request_payload["mode"] not in {"respect_dial_rule", "flow_override"}:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_mode_invalid",
+            "O modo da seleção de próximo telefone é inválido.",
+            retryable=False,
+        )
+    if request_payload["channel_label"] and len(
+        str(request_payload["channel_label"])
+    ) > 128:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_label_invalid",
+            "A label da seleção de próximo telefone é inválida.",
+            retryable=False,
+        )
+
+    base_url = str(
+        resolved_settings.target_core_supplier_api_base_url or ""
+    ).strip().rstrip("/")
+    bearer = str(resolved_settings.target_core_api_bearer_token or "").strip()
+    if not base_url or not bearer:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_configuration_missing",
+            "A integração da Supplier V2 não está configurada.",
+            retryable=False,
+        )
+
+    req = request.Request(
+        url=f"{base_url}/v2/contact-supplier/dialer-next-channel/resolve",
+        method="POST",
+        data=json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", f"Bearer {bearer}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-WORKSPACE-UUID", workspace_uuid)
+
+    status_code = 599
+    response_body = b""
+    try:
+        with request.urlopen(
+            req,
+            timeout=float(resolved_settings.dialer_supplier_v2_http_timeout_seconds),
+        ) as response:  # noqa: S310
+            status_code = int(response.status)
+            response_body = response.read(_MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        status_code = int(exc.code)
+        response_body = exc.read(_MAX_RESPONSE_BYTES + 1)
+    except (URLError, TimeoutError, OSError) as exc:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_unavailable",
+            "A Supplier V2 está indisponível para avaliar o próximo telefone.",
+            retryable=True,
+        ) from exc
+    if len(response_body) > _MAX_RESPONSE_BYTES:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_response_too_large",
+            "A resposta da Supplier V2 excedeu o limite seguro.",
+            retryable=True,
+            status_code=status_code,
+        )
+    if status_code != 200:
+        raise DialerSupplierV2EligibilityError(
+            _extract_error_code(response_body)
+            or "dialer_supplier_v2_next_channel_http_error",
+            "A Supplier V2 recusou a avaliação do próximo telefone.",
+            retryable=status_code in _RETRYABLE_STATUS_CODES,
+            status_code=status_code,
+        )
+    return _parse_next_channel_response(
+        response_body,
+        requested=request_payload,
+    )
+
+
+def _parse_next_channel_response(
+    response_body: bytes,
+    *,
+    requested: Mapping[str, Any],
+) -> DialerNextChannelResult:
+    try:
+        payload = json.loads(response_body.decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            raise ValueError("missing data")
+        if data.get("supplier_contract") != "v2":
+            raise ValueError("supplier contract mismatch")
+        decision = str(data.get("decision") or "").strip().lower()
+        if decision not in {"selected", "not_found", "blocked_by_policy"}:
+            raise ValueError("invalid decision")
+        reason = str(data.get("reason") or "").strip()
+        selector_ref = str(data.get("selector_component_ref_id") or "").strip()
+        if selector_ref != requested["selector_component_ref_id"] or not reason:
+            raise ValueError("identity mismatch")
+        source = data.get("source")
+        if not isinstance(source, Mapping) or any(
+            str(source.get(field) or "").strip() != str(expected).strip()
+            for field, expected in (
+                ("cycle_id", requested["cycle_id"]),
+                ("event_id", requested["event_id"]),
+                ("component_ref_id", requested["source_component_ref_id"]),
+            )
+        ):
+            raise ValueError("source mismatch")
+        evaluated_at = _required_iso_datetime(
+            data.get("evaluated_at"), "evaluated_at"
+        )
+        candidate_raw = data.get("candidate")
+        authorization_raw = data.get("authorization")
+        candidate: dict[str, Any] | None = None
+        authorization: dict[str, Any] | None = None
+        if decision == "selected":
+            if not isinstance(candidate_raw, Mapping):
+                raise ValueError("candidate missing")
+            candidate = {
+                "contact_list_member_id": _eligibility_member_id(
+                    candidate_raw.get("contact_list_member_id")
+                ),
+                "contact_list_id": _eligibility_uuid(
+                    candidate_raw.get("contact_list_id"), "contact_list_id"
+                ),
+                "mailing_id": _eligibility_member_id(
+                    candidate_raw.get("mailing_id")
+                ),
+                "person_uuid": _eligibility_uuid(
+                    candidate_raw.get("person_uuid"), "person_uuid"
+                ),
+                "channel_type": str(
+                    candidate_raw.get("channel_type") or ""
+                ).strip().lower(),
+                "channel_label": candidate_raw.get("channel_label"),
+                "channel_address": str(
+                    candidate_raw.get("channel_address") or ""
+                ).strip(),
+                "is_primary": candidate_raw.get("is_primary") is True,
+            }
+            if (
+                candidate["channel_type"] != "voice"
+                or not candidate["channel_address"]
+                or candidate["contact_list_member_id"]
+                == requested["current_contact_list_member_id"]
+            ):
+                raise ValueError("candidate invalid")
+            if not isinstance(authorization_raw, Mapping):
+                raise ValueError("authorization missing")
+            authorization = dict(authorization_raw)
+            if str(authorization.get("mode") or "") != requested["mode"]:
+                raise ValueError("authorization mismatch")
+        elif candidate_raw is not None:
+            raise ValueError("unexpected candidate")
+    except (
+        AttributeError,
+        DialerSupplierV2EligibilityError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        if isinstance(exc, DialerSupplierV2EligibilityError):
+            raise
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_invalid_response",
+            "A Supplier V2 devolveu uma decisão de próximo telefone inválida.",
+            retryable=True,
+        ) from exc
+    return DialerNextChannelResult(
+        decision=decision,
+        reason=reason,
+        candidate=candidate,
+        source=dict(source),
+        authorization=authorization,
+        selector_component_ref_id=selector_ref,
+        evaluated_at=evaluated_at,
+    )
+
+
+def _eligibility_uuid(value: Any, field: str) -> str:
+    try:
+        parsed = UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise DialerSupplierV2EligibilityError(
+            f"dialer_supplier_v2_next_channel_{field}_invalid",
+            f"A seleção possui {field} inválido.",
+            retryable=False,
+        ) from exc
+    if parsed.int == 0:
+        raise DialerSupplierV2EligibilityError(
+            f"dialer_supplier_v2_next_channel_{field}_invalid",
+            f"A seleção possui {field} inválido.",
+            retryable=False,
+        )
+    return str(parsed)
+
+
+def _eligibility_component_ref(value: Any, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or len(normalized) > 255:
+        raise DialerSupplierV2EligibilityError(
+            f"dialer_supplier_v2_next_channel_{field}_invalid",
+            f"A seleção possui {field} inválido.",
+            retryable=False,
+        )
+    return normalized
+
+
+def _eligibility_member_id(value: Any) -> int:
+    if isinstance(value, bool):
+        value = None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_member_invalid",
+            "A seleção possui referência de membro inválida.",
+            retryable=False,
+        ) from exc
+    if parsed < 1:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_next_channel_member_invalid",
+            "A seleção possui referência de membro inválida.",
+            retryable=False,
+        )
+    return parsed
+
+
 def _extract_error_code(response_body: bytes) -> str | None:
     try:
         payload = json.loads(response_body.decode("utf-8"))
@@ -416,10 +722,13 @@ def _required_iso_datetime(value: Any, field: str) -> str:
 
 __all__ = [
     "DialerCycleRegistrationResult",
+    "DialerNextChannelResult",
+    "DialerSupplierV2EligibilityError",
     "DialerSupplierV2RegistrationError",
     "build_dialer_cycle_intent",
     "dialer_supplier_v2_enabled_for_context",
     "dialer_supplier_v2_multilane_enabled_for_context",
     "parse_dialer_cycle_intent",
     "register_dialer_cycle",
+    "resolve_next_dialer_channel",
 ]

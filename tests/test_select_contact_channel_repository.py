@@ -99,6 +99,25 @@ async def test_person_candidate_can_change_member_but_preserves_person_list_and_
 
 
 @pytest.mark.asyncio
+async def test_person_next_candidate_is_pinned_to_supplier_authorization() -> None:
+    session = _RecordingSession({"contact_list_member_id": 88})
+
+    row = await fetch_select_contact_channel_candidate(
+        session,  # type: ignore[arg-type]
+        session_scope="person",
+        excluded_contact_list_member_id=77,
+        authorized_contact_list_member_id=88,
+        **BASE,
+    )
+
+    assert row == {"contact_list_member_id": 88}
+    assert "clm.id <> CAST(:excluded_contact_list_member_id AS bigint)" in session.statement
+    assert "clm.id = CAST(:authorized_contact_list_member_id AS bigint)" in session.statement
+    assert session.parameters["excluded_contact_list_member_id"] == 77
+    assert session.parameters["authorized_contact_list_member_id"] == 88
+
+
+@pytest.mark.asyncio
 async def test_sms_candidate_accepts_phone_source_without_reclassifying_it() -> None:
     session = _RecordingSession(
         {

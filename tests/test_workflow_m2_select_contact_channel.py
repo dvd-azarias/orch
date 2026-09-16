@@ -20,6 +20,9 @@ SELECTED_REF = "22222222-2222-2222-2222-222222222222"
 NOT_FOUND_REF = "33333333-3333-3333-3333-333333333333"
 EXCEPTION_REF = "44444444-4444-4444-4444-444444444444"
 SECOND_DIALER_REF = "55555555-5555-4555-8555-555555555555"
+SOURCE_DIALER_REF = "66666666-6666-4666-8666-666666666666"
+EVENT_UUID = "77777777-7777-4777-8777-777777777777"
+CYCLE_UUID = "88888888-8888-4888-8888-888888888888"
 
 
 class _Transaction:
@@ -54,6 +57,8 @@ def _component(**parameters: object) -> dict:
         "channel_type": "voice",
         "channel_label": None,
         "output_var": "selected_channel",
+        "selection_strategy": "first_eligible",
+        "dial_rule_mode": "respect_dial_rule",
     }
     defaults.update(parameters)
     return {
@@ -103,6 +108,55 @@ def _runtime(*, session_scope: str = "channel") -> dict:
         },
         "variables": {"payload": {}, "customs": {}},
     }
+
+
+def _next_runtime(*, decision: str = "next_phone") -> dict:
+    runtime = _runtime(session_scope="person")
+    runtime["workflow_v2"]["selected_contact_channel"] = {
+        "component_ref_id": "initial-selector",
+        "selected": True,
+        "branch": "selected",
+        "session_scope": "person",
+        "contact_list_member_id": 77,
+        "contact_list_id": CONTACT_LIST_UUID,
+        "mailing_id": 1140,
+        "person_uuid": PERSON_UUID,
+        "type": "voice",
+        "label": "telefone_1",
+        "address": "5511999990001",
+    }
+    runtime["workflow_v2"]["dialer_supplier_v2"] = {
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "component_ref_id": SOURCE_DIALER_REF,
+        "cycle_id": CYCLE_UUID,
+        "status": "terminal_received",
+        "terminal_delivery": {
+            "event_id": EVENT_UUID,
+            "cycle_id": CYCLE_UUID,
+            "contact_list_member_id": 77,
+            "outcome": "machine",
+            "decision": decision,
+            "decision_source": "dial_profile",
+            "terminal": True,
+            "terminal_reason": "outcome_attempt_limit_reached",
+        },
+    }
+    runtime["dialer_last_response"] = {
+        "component_ref_id": SOURCE_DIALER_REF,
+        "status": "machine",
+        "branch": "machine",
+    }
+    return runtime
+
+
+class _EligibilityResult:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def runtime_payload(self) -> dict:
+        return self.payload
 
 
 def _definition(*, component: dict | None = None) -> dict:
@@ -186,6 +240,8 @@ def test_select_contact_channel_accepts_catalog_serialization() -> None:
         "whatsapp",
         "celular",
         "canal_escolhido",
+        "first_eligible",
+        None,
     )
 
 
@@ -194,6 +250,8 @@ def test_select_contact_channel_accepts_rcs_type() -> None:
         "rcs",
         None,
         "selected_channel",
+        "first_eligible",
+        None,
     )
 
 
@@ -298,6 +356,227 @@ async def test_person_scope_selects_another_member_and_rebinds_session(
     assert selection["contact_list_member_id"] == 88
     assert selection["type"] == "whatsapp"
     assert selection["address"] == "5511988880002"
+
+
+@pytest.mark.parametrize(
+    "dial_rule_mode", ["respect_dial_rule", "flow_override"]
+)
+@pytest.mark.asyncio
+async def test_next_voice_uses_supplier_authorization_and_consumes_decision_once(
+    monkeypatch: pytest.MonkeyPatch,
+    dial_rule_mode: str,
+) -> None:
+    candidate = _contact_row(
+        member_id=88,
+        channel_label="telefone_2",
+        address="5511988880002",
+        is_primary=False,
+    )
+    fetch_candidate = AsyncMock(return_value=candidate)
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+    monkeypatch.setattr(
+        workflow,
+        "rebind_person_session_to_contact_channel",
+        AsyncMock(return_value=True),
+    )
+    resolution = {
+        "decision": "selected",
+        "reason": "eligible",
+        "candidate": {
+            "contact_list_member_id": 88,
+            "contact_list_id": CONTACT_LIST_UUID,
+            "mailing_id": 1140,
+            "person_uuid": PERSON_UUID,
+            "channel_type": "voice",
+            "channel_label": "telefone_2",
+            "channel_address": "5511988880002",
+            "is_primary": False,
+        },
+        "source": {
+            "cycle_id": CYCLE_UUID,
+            "event_id": EVENT_UUID,
+            "component_ref_id": SOURCE_DIALER_REF,
+            "decision": "next_phone",
+            "decision_source": "dial_profile",
+        },
+        "authorization": {
+            "mode": dial_rule_mode,
+            "decision_source": (
+                "flow_override"
+                if dial_rule_mode == "flow_override"
+                else "dial_profile"
+            ),
+        },
+        "selector_component_ref_id": SELECT_REF,
+        "evaluated_at": "2026-09-16T13:00:00+00:00",
+    }
+    resolved_calls: list[dict] = []
+
+    def _resolve(**kwargs):  # noqa: ANN003
+        resolved_calls.append(kwargs)
+        return _EligibilityResult(resolution)
+
+    monkeypatch.setattr(workflow, "resolve_next_dialer_channel", _resolve)
+    monkeypatch.setattr(workflow, "get_current_workspace_uuid", lambda: "workspace-1")
+    runtime = _next_runtime()
+
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode=dial_rule_mode,
+        ),
+        runtime_variables=runtime,
+        contact_row=_contact_row(),
+        now=datetime(2026, 9, 16, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert execution.branch_label == "selected"
+    assert fetch_candidate.await_args.kwargs["excluded_contact_list_member_id"] == 77
+    assert fetch_candidate.await_args.kwargs["authorized_contact_list_member_id"] == 88
+    assert resolved_calls[0]["current_contact_list_member_id"] == 77
+    assert resolved_calls[0]["mode"] == dial_rule_mode
+    terminal = runtime["workflow_v2"]["dialer_supplier_v2"]["terminal_delivery"]
+    assert terminal["next_channel_consumption"]["event_id"] == EVENT_UUID
+    assert terminal["next_channel_consumption"]["selector_component_ref_id"] == SELECT_REF
+    assert terminal["next_channel_consumption"]["mode"] == dial_rule_mode
+    assert runtime["workflow_v2"]["selected_contact_channel"][
+        "contact_list_member_id"
+    ] == 88
+
+    replay = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode=dial_rule_mode,
+        ),
+        runtime_variables=runtime,
+        contact_row=candidate,
+        now=datetime(2026, 9, 16, 13, 1, tzinfo=timezone.utc),
+    )
+
+    assert replay.branch_label == "selected"
+    assert len(resolved_calls) == 1
+    assert fetch_candidate.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_next_voice_routes_policy_denial_without_local_candidate_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetch_candidate = AsyncMock()
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_next_dialer_channel",
+        lambda **_kwargs: _EligibilityResult(
+            {
+                "decision": "blocked_by_policy",
+                "reason": "calendar_closed",
+                "candidate": None,
+                "source": {
+                    "cycle_id": CYCLE_UUID,
+                    "event_id": EVENT_UUID,
+                    "component_ref_id": SOURCE_DIALER_REF,
+                    "decision": "next_phone",
+                },
+                "authorization": None,
+                "selector_component_ref_id": SELECT_REF,
+                "evaluated_at": "2026-09-16T13:00:00+00:00",
+            }
+        ),
+    )
+    monkeypatch.setattr(workflow, "get_current_workspace_uuid", lambda: "workspace-1")
+    runtime = _next_runtime()
+
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode="respect_dial_rule",
+        ),
+        runtime_variables=runtime,
+        contact_row=_contact_row(),
+    )
+
+    assert execution.branch_label == "blocked_by_policy"
+    assert execution.contact_row is None
+    fetch_candidate.assert_not_awaited()
+    assert "selected_contact_channel" not in runtime["workflow_v2"]
+    assert runtime["variables"]["customs"]["selected_channel"] is None
+
+
+@pytest.mark.asyncio
+async def test_next_eligible_is_fail_closed_in_channel_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetch_candidate = AsyncMock()
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow._run_select_contact_channel(
+            db_session=_Session(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            session_id=123,
+            session_scope="channel",
+            component=_component(
+                selection_strategy="next_eligible",
+                dial_rule_mode="respect_dial_rule",
+            ),
+            runtime_variables=_runtime(session_scope="channel"),
+            contact_row=_contact_row(),
+        )
+
+    assert exc_info.value.code == "select_contact_channel_next_requires_person"
+    fetch_candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminal_decision_cannot_be_consumed_by_another_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _next_runtime()
+    runtime["workflow_v2"]["dialer_supplier_v2"]["terminal_delivery"][
+        "next_channel_consumption"
+    ] = {
+        "event_id": EVENT_UUID,
+        "selector_component_ref_id": "another-selector",
+        "resolution": {"decision": "not_found"},
+    }
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", AsyncMock()
+    )
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow._run_select_contact_channel(
+            db_session=_Session(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            session_id=123,
+            session_scope="person",
+            component=_component(
+                selection_strategy="next_eligible",
+                dial_rule_mode="respect_dial_rule",
+            ),
+            runtime_variables=runtime,
+            contact_row=_contact_row(),
+        )
+
+    assert exc_info.value.code == "select_contact_channel_next_source_consumed"
 
 
 @pytest.mark.asyncio
