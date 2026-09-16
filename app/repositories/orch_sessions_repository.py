@@ -1724,6 +1724,8 @@ async def apply_dialer_supplier_v2_terminal_callback(
             == str(callback_payload.get("decision_source") or "")
             and str(previous.get("decision_effective_until") or "")
             == str(callback_payload.get("decision_effective_until") or "")
+            and str(previous.get("release_mapping_version") or "")
+            == str(callback_payload.get("release_mapping_version") or "")
         )
         return {
             "status": "accepted" if same_delivery else "terminal_conflict",
@@ -1754,6 +1756,9 @@ async def apply_dialer_supplier_v2_terminal_callback(
         "decision_source": callback_payload.get("decision_source"),
         "decision_effective_until": callback_payload.get(
             "decision_effective_until"
+        ),
+        "release_mapping_version": callback_payload.get(
+            "release_mapping_version"
         ),
         "contact_list_member_id": callback_payload.get(
             "contact_list_member_id"

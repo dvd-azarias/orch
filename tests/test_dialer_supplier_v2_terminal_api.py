@@ -84,6 +84,23 @@ def test_terminal_request_accepts_legacy_and_enriched_contracts() -> None:
     assert enriched.outcome == "machine"
 
 
+def test_terminal_request_accepts_the_pinned_pdial_release_mapping() -> None:
+    payload = _request().model_dump()
+    payload["release_mapping_version"] = "pdial_v1"
+
+    request = OrchDialerSupplierV2TerminalRequest(**payload)
+
+    assert request.release_mapping_version == "pdial_v1"
+
+
+def test_terminal_request_rejects_an_unknown_release_mapping() -> None:
+    payload = _request().model_dump()
+    payload["release_mapping_version"] = "unknown"
+
+    with pytest.raises(ValidationError):
+        OrchDialerSupplierV2TerminalRequest(**payload)
+
+
 def test_terminal_request_rejects_partial_operational_contract() -> None:
     payload = _request().model_dump()
     payload.update(
@@ -202,6 +219,7 @@ async def test_active_terminal_callback_keeps_existing_resume_contract(
 ) -> None:
     db_session = _DbSession()
     enqueued: list[dict] = []
+    persisted_payloads: list[dict] = []
     queue = "orch_execute_test"
 
     monkeypatch.setattr(
@@ -218,7 +236,8 @@ async def test_active_terminal_callback_keeps_existing_resume_contract(
     async def ensure_workspace(*_args: object, **_kwargs: object) -> None:
         return None
 
-    async def persist_callback(*_args: object, **_kwargs: object) -> dict:
+    async def persist_callback(*_args: object, **kwargs: object) -> dict:
+        persisted_payloads.append(dict(kwargs["callback_payload"]))
         return {
             "status": "accepted",
             "accepted": True,
@@ -245,16 +264,20 @@ async def test_active_terminal_callback_keeps_existing_resume_contract(
         lambda: SimpleNamespace(celery_execute_queue=queue),
     )
 
+    request = _request().model_copy(
+        update={"release_mapping_version": "pdial_v1"}
+    )
     response = await orch_api.callback_dialer_supplier_v2_by_workspace(
         workspace_uuid=WORKSPACE_UUID,
         flow_uuid=FLOW_UUID,
-        request=_request(),
+        request=request,
         x_client_id="client",
         x_client_secret="secret",
         db_session=db_session,  # type: ignore[arg-type]
     )
 
     assert response.accepted is True
+    assert persisted_payloads[0]["release_mapping_version"] == "pdial_v1"
     assert enqueued == [
         {
             "kwargs": {

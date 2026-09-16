@@ -200,12 +200,17 @@ O payload mínimo é:
   "outcome": "machine",
   "decision": "next_phone",
   "decision_source": "dial_profile",
+  "release_mapping_version": "pdial_v1",
   "terminal": true,
   "terminal_reason": "outcome_attempt_limit_reached",
   "dial_profile_revision_id": "uuid",
   "occurred_at": "2026-09-16T12:00:00Z"
 }
 ```
+
+`release_mapping_version` é opcional para compatibilidade com entregas
+anteriores, mas, quando presente, precisa ser uma versão explicitamente
+conhecida pelo ORCH. A versão integra a identidade idempotente do terminal.
 
 O estado atual não satisfaz esse contrato: a Supplier devolve
 `retry_same_phone` enquanto a tentativa não é terminal e, na terminalização,

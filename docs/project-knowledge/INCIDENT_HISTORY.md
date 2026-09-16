@@ -1,5 +1,46 @@
 # Historico de Incidentes
 
+## 2026-09-16 — Terminal Supplier V2 recusado por versão de mapa desconhecida
+
+`STATUS`: FIX VALIDATED LOCALLY / PRODUCTION ROLLOUT PENDING
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `ba7eb0ec-e565-447c-8c11-8f870cf72a60`
+
+`FLOW`: `8b81e493-b39c-4829-8b1e-5bafd00aeb7c`
+
+### Evidencia e causa
+
+- O ciclo `8983897e-2d27-46b2-8295-59eb79c553a5` gerou a tentativa
+  `62901b75-12c8-426d-ac3f-ead02fea5731` com release `16` e
+  `kcpa_Human`.
+- O Target Core a classificou incorretamente como `technical_failure` e criou
+  o outbox `e11dda50-24ef-4769-959d-9508b291c651`.
+- A única entrega recebeu HTTP 422: o produtor já enviava
+  `release_mapping_version=pdial_v1`, mas o schema ORCH com `extra=forbid`
+  ainda não conhecia o campo.
+- O mailing foi desvinculado e o evento histórico não será reprocessado.
+
+### Correcao e seguranca
+
+- O ORCH aceita opcionalmente somente `pdial_v1`, preservando o contrato
+  anterior e recusando versões desconhecidas.
+- A versão é persistida e participa da idempotência do terminal.
+- O Target Core corrige separadamente o mapa para espelhar literalmente o
+  PDIAL. O rollout deve instalar primeiro este consumidor.
+- Supplier V1, card legado e callbacks legados não foram modificados.
+
+### Validacao e pendencias
+
+- Schema/endpoint/mapeador: `24 passed`.
+- PostgreSQL real: suíte contextual completa `6 passed`, incluindo
+  persistência, replay idempotente e conflito por versão.
+- Após os dois deploys, vincular pessoa nova e confirmar `16 -> answered`,
+  outbox `delivered` e avanço pelo branch `answered`.
+
 ## 2026-09-15 — Task de registro Supplier V2 sobrescreveu terminal concorrente
 
 `STATUS`: FIX VALIDATED LOCALLY / PRODUCTION ROLLOUT PENDING

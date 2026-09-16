@@ -183,6 +183,7 @@ class OrchDialerSupplierV2TerminalRequest(BaseModel):
         "safety_default",
     ] | None = None
     decision_effective_until: datetime | None = None
+    release_mapping_version: Literal["pdial_v1"] | None = None
     occurred_at: datetime
 
     @model_validator(mode="after")
