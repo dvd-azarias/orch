@@ -44,6 +44,7 @@ from app.repositories.identidade_person_repository import (
     fetch_person_by_identifier_for_update,
     fetch_person_by_uuid_for_update,
     insert_person_if_missing,
+    resolve_source_list_from_session_origin,
     resolve_source_list_by_public_id,
     set_person_materialized_membership_state,
     update_person_from_payload,
@@ -6553,6 +6554,7 @@ async def _run_create_contact(
 
 
 SOURCE_LIST_MEMBERSHIP_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+SOURCE_LIST_MEMBERSHIP_MAILING_SOURCES = {"session_origin", "selected"}
 
 
 def _source_list_membership_parameters(component: dict[str, Any]) -> dict[str, Any]:
@@ -6617,6 +6619,44 @@ def _source_list_membership_mailing_public_id(value: Any) -> str:
         ) from exc
 
 
+def _source_list_membership_mailing_source(params: dict[str, Any]) -> str:
+    if "mailing_source" not in params:
+        # Definições anteriores ao seletor sempre usavam uma lista explícita.
+        return "selected"
+    normalized = str(
+        _catalog_parameter_scalar(
+            params.get("mailing_source"),
+            preferred_keys=("mailing_source", "id", "value"),
+        )
+        or ""
+    ).strip().lower()
+    if normalized not in SOURCE_LIST_MEMBERSHIP_MAILING_SOURCES:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_mailing_source",
+            "O campo mailing_source deve selecionar a lista de origem da sessão ou uma lista específica.",
+        )
+    return normalized
+
+
+def _source_list_membership_session_mailing_id(
+    runtime_variables: dict[str, Any],
+) -> int:
+    input_payload = runtime_variables.get("input_payload")
+    raw_value = input_payload.get("mailing_id") if isinstance(input_payload, dict) else None
+    if isinstance(raw_value, bool):
+        raw_value = None
+    try:
+        source_list_id = int(raw_value)
+    except (TypeError, ValueError):
+        source_list_id = 0
+    if source_list_id <= 0 or source_list_id > POSTGRES_BIGINT_MAX:
+        raise WorkflowExecutionError(
+            "source_list_membership_missing_session_mailing_id",
+            "A sessão não possui uma lista de origem válida.",
+        )
+    return source_list_id
+
+
 def _source_list_membership_output_var(value: Any) -> str:
     normalized = str(_catalog_parameter_scalar(value) or "source_list_membership").strip()
     if (
@@ -6679,7 +6719,17 @@ async def _run_source_list_membership(
 ) -> str:
     params = _source_list_membership_parameters(component)
     output_var = _source_list_membership_output_var(params.get("output_var"))
-    mailing_public_id = _source_list_membership_mailing_public_id(params.get("mailing_id"))
+    mailing_source = _source_list_membership_mailing_source(params)
+    session_source_list_id = (
+        _source_list_membership_session_mailing_id(runtime_variables)
+        if mailing_source == "session_origin"
+        else None
+    )
+    mailing_public_id: str | None = (
+        _source_list_membership_mailing_public_id(params.get("mailing_id"))
+        if mailing_source == "selected"
+        else None
+    )
     desired_state = _source_list_membership_state(params.get("membership_state"))
     variables = _ensure_variables(runtime_variables)
     resolution_scope = _build_runtime_resolution_scope(
@@ -6711,7 +6761,9 @@ async def _run_source_list_membership(
             "flow_uuid": flow_uuid,
             "component_ref_id": component_ref_id,
             "person_uuid": person_uuid,
+            "mailing_source": mailing_source,
             "mailing_id": mailing_public_id,
+            "source_list_id": session_source_list_id,
             "desired_state": desired_state,
         },
     )
@@ -6728,13 +6780,26 @@ async def _run_source_list_membership(
                 if person is None:
                     missing = "person"
                 else:
-                    source_list = await resolve_source_list_by_public_id(
-                        db_session,
-                        public_id=mailing_public_id,
-                    )
+                    if mailing_source == "session_origin":
+                        source_list = await resolve_source_list_from_session_origin(
+                            db_session,
+                            flow_uuid=flow_uuid,
+                            session_id=session_id,
+                            source_list_id=int(session_source_list_id),
+                            person_uuid=person_uuid,
+                        )
+                    else:
+                        source_list = await resolve_source_list_by_public_id(
+                            db_session,
+                            public_id=str(mailing_public_id),
+                        )
                     if source_list is None:
                         missing = "mailing"
                     else:
+                        mailing_public_id = (
+                            str(source_list.get("public_id") or "").strip()
+                            or mailing_public_id
+                        )
                         source_status = str(source_list.get("status") or "").strip().upper()
                         if (
                             desired_state == "active"
@@ -6866,6 +6931,7 @@ async def _run_source_list_membership(
             "flow_uuid": flow_uuid,
             "component_ref_id": component_ref_id,
             "person_uuid": person_uuid,
+            "mailing_source": mailing_source,
             "mailing_id": mailing_public_id,
             "desired_state": desired_state,
             "result_action": branch,

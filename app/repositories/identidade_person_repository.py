@@ -288,6 +288,54 @@ async def resolve_source_list_by_public_id(
     return dict(row) if row is not None else None
 
 
+async def resolve_source_list_from_session_origin(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    session_id: int,
+    source_list_id: int,
+    person_uuid: str,
+) -> dict[str, Any] | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT
+                sl.id,
+                sl.public_id::text AS public_id,
+                sl.name,
+                sl.status,
+                sl.origin
+            FROM orch_sessions os
+            JOIN contact_list_members clm
+              ON clm.id::text = os.runtime_variables #>> '{input_payload,contact_list_member_id}'
+             AND clm.mailing_id = :source_list_id
+             AND clm.contact_list_id::text = os.runtime_variables #>> '{input_payload,contact_list_id}'
+             AND clm.person_uuid = CAST(:person_uuid AS uuid)
+             AND clm.deleted_at IS NULL
+            JOIN flow_mailing_links fml
+              ON fml.flow_id = os.flow_uuid
+             AND fml.mailing_id = clm.mailing_id
+             AND fml.contact_list_id = clm.contact_list_id
+             AND fml.unlinked_at IS NULL
+            JOIN source_lists sl ON sl.id = clm.mailing_id
+            WHERE os.id = :session_id
+              AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+              AND os.runtime_variables #>> '{input_payload,mailing_id}' = CAST(:source_list_id AS text)
+            LIMIT 1
+            FOR UPDATE OF sl
+            """
+        ),
+        {
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+            "source_list_id": source_list_id,
+            "person_uuid": person_uuid,
+        },
+    )
+    row = result.mappings().first()
+    return dict(row) if row is not None else None
+
+
 async def ensure_person_in_source_list(
     db_session: AsyncSession,
     *,

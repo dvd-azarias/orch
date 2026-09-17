@@ -6,6 +6,9 @@ import pytest
 from sqlalchemy import text
 
 from app.core.database import get_session_factory
+from app.repositories.identidade_person_repository import (
+    resolve_source_list_from_session_origin,
+)
 from app.services.workflow_m2_service import _run_source_list_membership
 
 
@@ -244,3 +247,142 @@ async def test_membership_is_idempotent_in_real_postgres_without_shared_residue(
             assert runtime["variables"]["customs"]["membership_result"]["action"] == (
                 "unchanged"
             )
+
+
+@pytest.mark.asyncio
+async def test_session_origin_resolves_only_the_active_materialized_source_list() -> None:
+    flow_uuid = str(uuid4())
+    person_uuid = str(uuid4())
+    mailing_uuid = str(uuid4())
+    contact_list_id = str(uuid4())
+    session_factory = get_session_factory()
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            ddl_statements = (
+                """
+                    CREATE TEMP TABLE source_lists (
+                        id bigint PRIMARY KEY,
+                        public_id uuid NOT NULL UNIQUE,
+                        name text,
+                        status text,
+                        origin text
+                    ) ON COMMIT DROP
+                """,
+                """
+                    CREATE TEMP TABLE orch_sessions (
+                        id bigint PRIMARY KEY,
+                        flow_uuid uuid NOT NULL,
+                        runtime_variables jsonb NOT NULL
+                    ) ON COMMIT DROP
+                """,
+                """
+                    CREATE TEMP TABLE contact_list_members (
+                        id bigint PRIMARY KEY,
+                        mailing_id bigint NOT NULL,
+                        contact_list_id uuid NOT NULL,
+                        person_uuid uuid NOT NULL,
+                        deleted_at timestamptz
+                    ) ON COMMIT DROP
+                """,
+                """
+                    CREATE TEMP TABLE flow_mailing_links (
+                        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                        flow_id uuid NOT NULL,
+                        mailing_id bigint NOT NULL,
+                        contact_list_id uuid NOT NULL,
+                        unlinked_at timestamptz
+                    ) ON COMMIT DROP
+                """,
+            )
+            for ddl_statement in ddl_statements:
+                await db_session.execute(text(ddl_statement))
+
+            insert_parameters = {
+                "flow_uuid": flow_uuid,
+                "person_uuid": person_uuid,
+                "mailing_uuid": mailing_uuid,
+                "contact_list_id": contact_list_id,
+            }
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO source_lists (id, public_id, name, status, origin)
+                    VALUES (1139, CAST(:mailing_uuid AS uuid), 'Lista de origem', 'PROCESSED', 'api')
+                    """
+                ),
+                insert_parameters,
+            )
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO contact_list_members (
+                        id, mailing_id, contact_list_id, person_uuid
+                    ) VALUES (
+                        77, 1139, CAST(:contact_list_id AS uuid), CAST(:person_uuid AS uuid)
+                    )
+                    """
+                ),
+                insert_parameters,
+            )
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO flow_mailing_links (
+                        flow_id, mailing_id, contact_list_id
+                    ) VALUES (
+                        CAST(:flow_uuid AS uuid), 1139, CAST(:contact_list_id AS uuid)
+                    )
+                    """
+                ),
+                insert_parameters,
+            )
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO orch_sessions (id, flow_uuid, runtime_variables)
+                    VALUES (
+                        123,
+                        CAST(:flow_uuid AS uuid),
+                        jsonb_build_object(
+                            'input_payload',
+                            jsonb_build_object(
+                                'contact_list_member_id', 77,
+                                'contact_list_id', CAST(:contact_list_id AS text),
+                                'mailing_id', 1139,
+                                'session_scope', 'person'
+                            )
+                        )
+                    )
+                    """
+                ),
+                insert_parameters,
+            )
+
+            resolved = await resolve_source_list_from_session_origin(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=123,
+                source_list_id=1139,
+                person_uuid=person_uuid,
+            )
+
+            assert resolved == {
+                "id": 1139,
+                "public_id": mailing_uuid,
+                "name": "Lista de origem",
+                "status": "PROCESSED",
+                "origin": "api",
+            }
+
+            await db_session.execute(
+                text("UPDATE flow_mailing_links SET unlinked_at = NOW()")
+            )
+            blocked = await resolve_source_list_from_session_origin(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=123,
+                source_list_id=1139,
+                person_uuid=person_uuid,
+            )
+            assert blocked is None

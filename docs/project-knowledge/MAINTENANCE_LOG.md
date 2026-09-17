@@ -1,5 +1,22 @@
 # Maintenance Log
 
+## 2026-09-17 — Lista de origem da sessão no `source_list_membership`
+
+Classificação: `ALPHA_FIX_OPTIONAL`, aditiva e sem migration.
+
+- o card passa a aceitar `mailing_source=session_origin|selected`;
+- definições antigas sem o campo continuam usando a lista pública explícita;
+- `session_origin` resolve a lista pelo `orch_session`, membro materializado,
+  pessoa, flow, `contact_list_id` e vínculo mailing→flow ainda ativo;
+- um `mailing_id` isolado no payload nunca basta para atingir outra lista;
+- a proteção que restringe o card a flows `person` permanece inalterada;
+- Supplier V1, criação de sessões e vínculo de mailings não foram alterados;
+- regressão local: 220 testes de workflow/seleção/espera/lista, incluindo prova
+  transacional em PostgreSQL para vínculo ativo e lista desvinculada.
+
+Rollback: retirar `mailing_source=session_origin` das definições novas ou
+reverter o patch. Definições com lista específica preservam o contrato anterior.
+
 ## 2026-09-17 — Gate 1 de envio real SMS/RCS exclusivamente pela Supplier V2
 
 Classificação: `ALPHA_FIX_OPTIONAL`, opt-in e canária.
