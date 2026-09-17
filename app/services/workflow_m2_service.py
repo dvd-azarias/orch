@@ -315,6 +315,7 @@ class _WaitForEventExecution:
 class _SelectContactChannelExecution:
     branch_label: str
     contact_row: dict[str, Any] | None
+    deferred_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -4458,6 +4459,7 @@ def _store_select_contact_channel_result(
     output_var: str,
     result: dict[str, Any],
     selected: bool,
+    preserve_selected_channel: bool = False,
 ) -> None:
     variables = _ensure_variables(runtime_variables)
     customs = variables.get("customs")
@@ -4470,7 +4472,7 @@ def _store_select_contact_channel_result(
     workflow_meta = _ensure_workflow_meta(runtime_variables)
     if selected:
         workflow_meta["selected_contact_channel"] = dict(result)
-    else:
+    elif not preserve_selected_channel:
         workflow_meta.pop("selected_contact_channel", None)
 
 
@@ -4746,6 +4748,45 @@ async def _run_select_contact_channel(
                         "select_contact_channel_supplier_eligibility_failed",
                         "A Supplier V2 devolveu um candidato inválido.",
                     ) from exc
+            elif supplier_decision == "deferred":
+                raw_next_eligible_at = supplier_resolution.get(
+                    "next_eligible_at"
+                )
+                deferred_until = _parse_iso_datetime(raw_next_eligible_at)
+                if (
+                    deferred_until is None
+                    or deferred_until <= evaluated_at
+                ):
+                    raise WorkflowExecutionError(
+                        "select_contact_channel_supplier_eligibility_failed",
+                        "A Supplier V2 devolveu um adiamento inválido.",
+                    )
+                result = {
+                    "component_ref_id": component.get("ref_id"),
+                    "selected": False,
+                    "branch": "deferred",
+                    "session_scope": session_scope,
+                    "selection_strategy": selection_strategy,
+                    "dial_rule_mode": dial_rule_mode,
+                    "requested_type": channel_type,
+                    "requested_label": channel_label,
+                    "output_var": output_var,
+                    "supplier_eligibility": copy.deepcopy(supplier_resolution),
+                    "next_eligible_at": deferred_until.isoformat(),
+                    "updated_at": evaluated_at.isoformat(),
+                }
+                _store_select_contact_channel_result(
+                    runtime_variables=runtime_variables,
+                    output_var=output_var,
+                    result=result,
+                    selected=False,
+                    preserve_selected_channel=True,
+                )
+                return _SelectContactChannelExecution(
+                    "deferred",
+                    None,
+                    deferred_until,
+                )
             elif supplier_decision in {"not_found", "blocked_by_policy"}:
                 if not decision_was_already_consumed:
                     _consume_next_voice_channel_decision(
@@ -8617,6 +8658,78 @@ async def execute_workflow_m2_for_session(
                         branch_label = exception_branch
                     else:
                         branch_label = channel_execution.branch_label
+                        if channel_execution.deferred_until is not None:
+                            last_card_uuid = next_card_uuid
+                            next_card_uuid = last_card_uuid
+                            executed_steps += 1
+                            _set_cursors(
+                                runtime_variables,
+                                last_cursor=last_card_uuid,
+                                next_cursor=next_card_uuid,
+                            )
+                            _reset_loop_guard_counter(runtime_variables)
+                            await replace_session_workflow_state(
+                                db_session,
+                                session_id=session_id,
+                                runtime_variables=runtime_variables,
+                                last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                                next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                                frozen_until=channel_execution.deferred_until,
+                            )
+                            step_finished_at = datetime.now(timezone.utc)
+                            _append_metric(
+                                metric_type="card",
+                                status="success",
+                                started_at=step_started_at,
+                                finished_at=step_finished_at,
+                                latency_ms=(
+                                    time.perf_counter() - step_started_perf
+                                )
+                                * 1000,
+                                stopped_reason="scheduled_wait",
+                                step_index=executed_steps,
+                                card_cursor=last_card_uuid,
+                                component_kind_value=kind,
+                                details={
+                                    "next_card_uuid": next_card_uuid,
+                                    "reason": "calendar_closed",
+                                    "next_eligible_at": (
+                                        channel_execution.deferred_until.isoformat()
+                                    ),
+                                },
+                            )
+                            logger.info(
+                                "workflow m2 select contact channel deferred",
+                                extra={
+                                    "event": (
+                                        "orch.workflow.m2.select_contact_channel.deferred"
+                                    ),
+                                    "flow_uuid": flow_uuid,
+                                    "session_id": session_id,
+                                    "session_uuid": session_uuid_for_metrics,
+                                    "revision_id": revision_id_for_metrics,
+                                    "component_ref_id": component.get("ref_id"),
+                                    "session_scope": session_scope,
+                                    "next_eligible_at": (
+                                        channel_execution.deferred_until.isoformat()
+                                    ),
+                                    "stopped_reason": "scheduled_wait",
+                                },
+                            )
+                            return await _finalize(
+                                WorkflowExecutionResult(
+                                    True,
+                                    executed_steps,
+                                    "scheduled_wait",
+                                    last_card_uuid,
+                                    next_card_uuid,
+                                )
+                            )
+                        if isinstance(session_state.get("frozen_until"), datetime):
+                            await clear_session_frozen_until(
+                                db_session,
+                                session_id=session_id,
+                            )
                         selected_contact_channel = None
                         if channel_execution.contact_row is not None:
                             contact_runtime_context = channel_execution.contact_row

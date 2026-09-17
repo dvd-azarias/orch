@@ -520,6 +520,66 @@ async def test_next_voice_routes_policy_denial_without_local_candidate_lookup(
 
 
 @pytest.mark.asyncio
+async def test_next_voice_calendar_defer_preserves_source_selection_and_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetch_candidate = AsyncMock()
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_next_dialer_channel",
+        lambda **_kwargs: _EligibilityResult(
+            {
+                "decision": "deferred",
+                "reason": "calendar_closed",
+                "next_eligible_at": "2026-09-17T12:00:00+00:00",
+                "candidate": None,
+                "source": {
+                    "cycle_id": CYCLE_UUID,
+                    "event_id": EVENT_UUID,
+                    "component_ref_id": SOURCE_DIALER_REF,
+                    "decision": "next_phone",
+                },
+                "authorization": None,
+                "selector_component_ref_id": SELECT_REF,
+                "evaluated_at": "2026-09-16T13:00:00+00:00",
+            }
+        ),
+    )
+    monkeypatch.setattr(workflow, "get_current_workspace_uuid", lambda: "workspace-1")
+    runtime = _next_runtime()
+
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode="respect_dial_rule",
+        ),
+        runtime_variables=runtime,
+        contact_row=_contact_row(),
+        now=datetime(2026, 9, 16, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert execution.branch_label == "deferred"
+    assert execution.contact_row is None
+    assert execution.deferred_until == datetime(
+        2026, 9, 17, 12, 0, tzinfo=timezone.utc
+    )
+    fetch_candidate.assert_not_awaited()
+    terminal = runtime["workflow_v2"]["dialer_supplier_v2"]["terminal_delivery"]
+    assert "next_channel_consumption" not in terminal
+    assert runtime["workflow_v2"]["selected_contact_channel"][
+        "contact_list_member_id"
+    ] == 77
+    assert runtime["select_contact_channel_last_result"]["branch"] == "deferred"
+
+
+@pytest.mark.asyncio
 async def test_next_eligible_is_fail_closed_in_channel_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -769,6 +829,68 @@ async def test_executor_dispatches_person_selection_and_follows_selected_branch(
     )
     assert any(item.get("next_card_uuid") == SELECTED_REF for item in persisted)
     rebind.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_executor_schedules_selector_retry_when_calendar_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _next_runtime()
+    definition = _definition(
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode="respect_dial_rule",
+        )
+    )
+    persisted = _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        definition=definition,
+        contact_row=_contact_row(),
+    )
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", AsyncMock()
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_next_dialer_channel",
+        lambda **_kwargs: _EligibilityResult(
+            {
+                "decision": "deferred",
+                "reason": "calendar_closed",
+                "next_eligible_at": "2099-09-17T12:00:00+00:00",
+                "candidate": None,
+                "source": {
+                    "cycle_id": CYCLE_UUID,
+                    "event_id": EVENT_UUID,
+                    "component_ref_id": SOURCE_DIALER_REF,
+                    "decision": "next_phone",
+                },
+                "authorization": None,
+                "selector_component_ref_id": SELECT_REF,
+                "evaluated_at": "2099-09-16T13:00:00+00:00",
+            }
+        ),
+    )
+    monkeypatch.setattr(workflow, "get_current_workspace_uuid", lambda: "workspace-1")
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "scheduled_wait"
+    assert result.last_card_uuid == SELECT_REF
+    assert result.next_card_uuid == SELECT_REF
+    assert persisted[-1]["frozen_until"] == datetime(
+        2099, 9, 17, 12, 0, tzinfo=timezone.utc
+    )
+    terminal = runtime["workflow_v2"]["dialer_supplier_v2"]["terminal_delivery"]
+    assert "next_channel_consumption" not in terminal
+    assert runtime["workflow_v2"]["selected_contact_channel"][
+        "contact_list_member_id"
+    ] == 77
 
 
 @pytest.mark.asyncio

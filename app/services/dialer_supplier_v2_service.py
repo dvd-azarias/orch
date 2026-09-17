@@ -86,6 +86,7 @@ class DialerCycleRegistrationResult:
 class DialerNextChannelResult:
     decision: str
     reason: str
+    next_eligible_at: str | None
     candidate: dict[str, Any] | None
     source: dict[str, Any]
     authorization: dict[str, Any] | None
@@ -96,6 +97,7 @@ class DialerNextChannelResult:
         return {
             "decision": self.decision,
             "reason": self.reason,
+            "next_eligible_at": self.next_eligible_at,
             "candidate": dict(self.candidate) if self.candidate else None,
             "source": dict(self.source),
             "authorization": (
@@ -515,7 +517,12 @@ def _parse_next_channel_response(
         if data.get("supplier_contract") != "v2":
             raise ValueError("supplier contract mismatch")
         decision = str(data.get("decision") or "").strip().lower()
-        if decision not in {"selected", "not_found", "blocked_by_policy"}:
+        if decision not in {
+            "selected",
+            "not_found",
+            "blocked_by_policy",
+            "deferred",
+        }:
             raise ValueError("invalid decision")
         reason = str(data.get("reason") or "").strip()
         selector_ref = str(data.get("selector_component_ref_id") or "").strip()
@@ -534,6 +541,19 @@ def _parse_next_channel_response(
         evaluated_at = _required_iso_datetime(
             data.get("evaluated_at"), "evaluated_at"
         )
+        next_eligible_at: str | None = None
+        if decision == "deferred":
+            if reason != "calendar_closed":
+                raise ValueError("unsupported deferred reason")
+            next_eligible_at = _required_iso_datetime(
+                data.get("next_eligible_at"), "next_eligible_at"
+            )
+            if datetime.fromisoformat(
+                next_eligible_at.replace("Z", "+00:00")
+            ) <= datetime.fromisoformat(evaluated_at.replace("Z", "+00:00")):
+                raise ValueError("deferred deadline invalid")
+        elif data.get("next_eligible_at") not in (None, ""):
+            raise ValueError("unexpected deferred deadline")
         candidate_raw = data.get("candidate")
         authorization_raw = data.get("authorization")
         candidate: dict[str, Any] | None = None
@@ -596,6 +616,7 @@ def _parse_next_channel_response(
     return DialerNextChannelResult(
         decision=decision,
         reason=reason,
+        next_eligible_at=next_eligible_at,
         candidate=candidate,
         source=dict(source),
         authorization=authorization,

@@ -14,8 +14,9 @@ discagem. O contrato é uma precondição do canário multilane
 
 Classificação: `ALPHA_FIX_REQUIRED`.
 
-Estado: contrato aprovado; implementação validada nas PRs Target Core `#513`/
-`#514` e ORCH `#179`/`#180`, ainda pendente de merge e rollout coordenado.
+Estado: contrato base implementado e exercitado no canário. A fronteira de
+calendário entre dois telefones acrescenta uma espera sistêmica interna,
+documentada abaixo, sem criar branch novo no canvas.
 
 ## Invariantes
 
@@ -238,6 +239,15 @@ snapshot antes de habilitar esses dois comportamentos em produção.
 - `not_found`: não existe outro canal elegível;
 - `blocked_by_policy`: existe canal ativo, mas a política não autoriza a troca;
 - `exception`: falha técnica ou contrato inconsistente.
+
+`deferred` é uma decisão de transporte da Supplier V2, não uma saída visual do
+card. Quando todos os candidatos aplicáveis estão fora do calendário e existe
+uma próxima abertura calculável, a Supplier devolve `reason=calendar_closed` e
+`next_eligible_at`. O ORCH preserva a seleção corrente e a decisão terminal
+ainda não consumida, mantém o cursor no próprio seletor, grava `frozen_until` e
+retoma a mesma resolução somente depois desse instante. Portanto, calendário
+fechado não percorre `blocked_by_policy`, `not_found` ou `exception`, não exige
+um card `Wait` e não encerra a sessão.
 
 `blocked_by_policy` é decisão de negócio e não deve gerar retry técnico.
 
