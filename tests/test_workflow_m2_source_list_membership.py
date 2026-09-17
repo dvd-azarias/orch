@@ -48,6 +48,17 @@ def _runtime() -> dict:
     }
 
 
+def _runtime_with_session_origin() -> dict:
+    runtime = _runtime()
+    runtime["input_payload"] = {
+        "session_scope": "person",
+        "mailing_id": 1139,
+        "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "contact_list_member_id": 77,
+    }
+    return runtime
+
+
 def _person() -> dict:
     return {
         "id": 1,
@@ -186,6 +197,109 @@ async def test_membership_is_idempotent_and_accepts_serialized_parameters(monkey
     assert runtime["variables"]["customs"]["source_list_membership"]["action"] == (
         "unchanged"
     )
+
+
+@pytest.mark.asyncio
+async def test_membership_resolves_source_list_from_immutable_session_origin(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    resolve_from_origin = AsyncMock(
+        return_value={
+            "id": 1139,
+            "public_id": MAILING_UUID,
+            "status": "PROCESSED",
+        }
+    )
+    resolve_by_public_id = AsyncMock()
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_from_session_origin",
+        resolve_from_origin,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        resolve_by_public_id,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_active_flow_mailing_link",
+        AsyncMock(
+            return_value={
+                "mailing_id": 1139,
+                "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            }
+        ),
+    )
+    set_state = AsyncMock(
+        return_value={
+            "contact_list_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "previous_state": "active",
+            "matched_members": 1,
+            "members_changed": 1,
+            "sessions_stopped": 0,
+        }
+    )
+    monkeypatch.setattr(workflow, "set_person_materialized_membership_state", set_state)
+    runtime = _runtime_with_session_origin()
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(
+            mailing_source="session_origin",
+            mailing_id=None,
+            membership_state="inactive",
+        ),
+        runtime_variables=runtime,
+    )
+
+    assert branch == "changed"
+    resolve_from_origin.assert_awaited_once_with(
+        ANY,
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        source_list_id=1139,
+        person_uuid=PERSON_UUID,
+    )
+    resolve_by_public_id.assert_not_awaited()
+    assert runtime["variables"]["customs"]["source_list_membership"]["mailing_id"] == (
+        MAILING_UUID
+    )
+    set_state.assert_awaited_once_with(
+        ANY,
+        flow_uuid=FLOW_UUID,
+        current_session_id=123,
+        source_list_id=1139,
+        contact_list_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+        person_uuid=PERSON_UUID,
+        contact_draft_id=None,
+        identifier="12345678901",
+        desired_state="inactive",
+    )
+
+
+@pytest.mark.asyncio
+async def test_membership_session_origin_requires_session_mailing_id() -> None:
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow._run_source_list_membership(
+            db_session=_NestedSession(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            session_id=123,
+            component=_component(
+                mailing_source="session_origin",
+                mailing_id=None,
+            ),
+            runtime_variables=_runtime(),
+        )
+
+    assert exc_info.value.code == "source_list_membership_missing_session_mailing_id"
 
 
 @pytest.mark.asyncio
@@ -573,6 +687,10 @@ async def test_membership_rejects_person_without_identifier(monkeypatch) -> None
     ("parameters", "error_code"),
     [
         ({"person_uuid": "person-invalid"}, "source_list_membership_invalid_person_uuid"),
+        (
+            {"mailing_source": "current"},
+            "source_list_membership_invalid_mailing_source",
+        ),
         ({"mailing_id": "mailing-invalid"}, "source_list_membership_invalid_mailing_id"),
         ({"mailing_id": None}, "source_list_membership_missing_mailing_id"),
         ({"membership_state": None}, "source_list_membership_missing_state"),
