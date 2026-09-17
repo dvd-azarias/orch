@@ -125,6 +125,11 @@ class Settings:
     billing_metric_code: str
     billing_admin_client_id: str | None
     billing_admin_client_secret: str | None
+    orch_observability_client_id: str | None
+    orch_observability_client_secret: str | None
+    orch_observability_max_window_hours: int
+    orch_observability_statement_timeout_ms: int
+    orch_observability_max_trace_steps: int
     celery_billing_queue: str
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
@@ -643,6 +648,17 @@ def get_settings() -> Settings:
         billing_metric_code=_read_env_optional("BILLING_METRIC_CODE", "service-orch") or "service-orch",
         billing_admin_client_id=_read_env_optional("ORCH_BILLING_ADMIN_CLIENT_ID"),
         billing_admin_client_secret=_read_env_optional("ORCH_BILLING_ADMIN_CLIENT_SECRET"),
+        orch_observability_client_id=_read_env_optional("ORCH_OBSERVABILITY_CLIENT_ID"),
+        orch_observability_client_secret=_read_env_optional("ORCH_OBSERVABILITY_CLIENT_SECRET"),
+        orch_observability_max_window_hours=_read_env_int_range(
+            "ORCH_OBSERVABILITY_MAX_WINDOW_HOURS", 168, minimum=1, maximum=744
+        ),
+        orch_observability_statement_timeout_ms=_read_env_int_range(
+            "ORCH_OBSERVABILITY_STATEMENT_TIMEOUT_MS", 5000, minimum=250, maximum=30000
+        ),
+        orch_observability_max_trace_steps=_read_env_int_range(
+            "ORCH_OBSERVABILITY_MAX_TRACE_STEPS", 2000, minimum=100, maximum=10000
+        ),
         celery_billing_queue=(
             _read_env_optional("CELERY_BILLING_QUEUE", _default_queue_by_profile(queue_profile, "billing"))
             or _default_queue_by_profile(queue_profile, "billing")
