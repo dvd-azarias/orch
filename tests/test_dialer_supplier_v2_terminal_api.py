@@ -93,6 +93,51 @@ def test_terminal_request_accepts_the_pinned_pdial_release_mapping() -> None:
     assert request.release_mapping_version == "pdial_v1"
 
 
+def test_next_phone_accepts_effective_until_from_dial_profile() -> None:
+    effective_until = datetime(2026, 9, 16, 22, 14, 49, tzinfo=timezone.utc)
+    payload = _request().model_dump()
+    payload.update(
+        {
+            "outcome": "machine",
+            "contact_list_member_id": 11008,
+            "dial_profile_id": UUID("77777777-7777-4777-8777-777777777777"),
+            "dial_profile_revision_id": UUID(
+                "88888888-8888-4888-8888-888888888888"
+            ),
+            "attempt_policy_id": UUID("99999999-9999-4999-8999-999999999999"),
+            "decision": "next_phone",
+            "decision_source": "dial_profile",
+            "decision_effective_until": "2026-09-16T22:14:49+00:00",
+            "release_mapping_version": "pdial_v1",
+        }
+    )
+
+    request = OrchDialerSupplierV2TerminalRequest(**payload)
+
+    assert request.decision == "next_phone"
+    assert request.decision_effective_until == effective_until
+
+
+def test_finish_person_rejects_effective_until() -> None:
+    payload = _request().model_dump()
+    payload.update(
+        {
+            "contact_list_member_id": 11008,
+            "dial_profile_id": UUID("77777777-7777-4777-8777-777777777777"),
+            "dial_profile_revision_id": UUID(
+                "88888888-8888-4888-8888-888888888888"
+            ),
+            "attempt_policy_id": UUID("99999999-9999-4999-8999-999999999999"),
+            "decision": "finish_person",
+            "decision_source": "dial_profile",
+            "decision_effective_until": "2026-09-16T22:14:49+00:00",
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        OrchDialerSupplierV2TerminalRequest(**payload)
+
+
 def test_terminal_request_rejects_an_unknown_release_mapping() -> None:
     payload = _request().model_dump()
     payload["release_mapping_version"] = "unknown"

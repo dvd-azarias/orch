@@ -217,7 +217,8 @@ class OrchDialerSupplierV2TerminalRequest(BaseModel):
                 "pause_person exige decision_effective_until."
             )
         if (
-            self.decision not in {"pause_person", "block_phone"}
+            self.decision
+            not in {"next_phone", "pause_person", "block_phone"}
             and self.decision_effective_until is not None
         ):
             raise ValueError(
