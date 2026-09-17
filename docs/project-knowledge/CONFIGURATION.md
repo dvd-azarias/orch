@@ -53,6 +53,7 @@ As flags legada e nova sao mutuamente exclusivas. Detalhes: `docs/BILLING_BATCH_
 | execute | `orch_execute` | `orch_execute_launchd_local` | `orch_execute_f5_local` |
 | switch BOT flow | `orch_switch_bot_flow` | `orch_switch_bot_flow_launchd_local` | `orch_switch_bot_flow_f5_local` |
 | Supplier V2 Dialer | `orch_dialer_supplier_v2` | `orch_dialer_supplier_v2_launchd_local` | `orch_dialer_supplier_v2_f5_local` |
+| Supplier V2 SMS/RCS | `orch_channel_supplier_v2` | `orch_channel_supplier_v2_launchd_local` | `orch_channel_supplier_v2_f5_local` |
 | heartbeat | `orch_heartbeat` | `orch_heartbeat_launchd_local` | `orch_heartbeat_f5_local` |
 | FileApp ingest | `orch_fileapp_ingest_events` | `orch_fileapp_ingest_launchd_local` | `orch_fileapp_ingest_f5_local` |
 | FileApp process | `orch_fileapp_source_list_ingest` | `orch_fileapp_source_list_launchd_local` | `orch_fileapp_source_list_f5_local` |
@@ -121,6 +122,21 @@ Defaults importantes:
   card único e o Dialer legado. Não habilitar essas flags em produção antes
   dos gates de Kerberos e `service_dialer` e do canário controlado definidos em
   `MULTI_DIALER_EXECUTION_PLAN.md`.
+- Dispatch SMS/RCS Supplier V2: `CHANNEL_SUPPLIER_V2_ENABLED=false` por padrão.
+  A ativação exige allowlists explícitas em
+  `CHANNEL_SUPPLIER_V2_WORKSPACE_ALLOWLIST` e
+  `CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST`, `CELERY_ENABLED=true`, URL/bearer do
+  perfil Supplier e uma chave Fernet exclusiva em
+  `CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY`. O identificador da chave usa
+  `CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY_ID`; a mesma chave/id deve existir no
+  Target Core. O registro pós-commit usa a fila exclusiva configurada em
+  `CELERY_CHANNEL_SUPPLIER_V2_QUEUE`. O reconciliador do gap commit -> enqueue
+  usa `CHANNEL_SUPPLIER_V2_RECONCILE_INTERVAL_SECONDS`,
+  `CHANNEL_SUPPLIER_V2_RECONCILE_BATCH_SIZE` e
+  `CHANNEL_SUPPLIER_V2_REGISTRATION_LEASE_SECONDS`; habilitar
+  `CELERY_BEAT_CHANNEL_SUPPLIER_V2_RECONCILE_ENABLED=true` em exatamente um
+  Beat do ambiente. Não habilitar antes da migration, do worker Supplier V2 e
+  do canário. Ver `CHANNEL_DISPATCH_V2_PLAN.md`.
 - `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 

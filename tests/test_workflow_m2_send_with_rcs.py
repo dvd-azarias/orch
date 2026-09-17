@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from cryptography.fernet import Fernet
 
 import app.services.workflow_m2_service as workflow
 from app.services import workflow_dispatcher_service
@@ -178,6 +180,81 @@ async def test_channel_rcs_marks_exact_member_and_blocks_without_http(
     assert runtime["workflow_v2"]["blocking_stop_reason"] == "blocked_send_with_rcs"
     assert runtime["send_with_rcs_routing"]["assignment"]["linked_actuator"] == "rcs"
     assert "Olá" not in str(runtime)
+
+
+@pytest.mark.asyncio
+async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    component = _component()
+    component["parameters"] = {
+        "authorization_token": "secret-rcs-token",
+        "broker_code": "rcs_trc_conv_brad_eavm",
+        "customer_code": "BRAD_EAVM_RCS",
+        "template_code": "4580",
+        "template_variables": {"nome": "{{contact.full_name}}"},
+    }
+    persisted = _configure_execution(
+        monkeypatch, runtime=runtime, contact_row=_contact_row()
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={
+                    "id": REVISION_UUID,
+                    "definition": {"components": [component], "branches": []},
+                },
+                source="pinned",
+                requested_revision_id=REVISION_UUID,
+                failure_reason=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "assign_rcs_routing_for_session",
+        AsyncMock(
+            return_value={
+                "contact_list_member_id": 77,
+                "linked_actuator": "rcs",
+                "mode": "marked",
+            }
+        ),
+    )
+    key = Fernet.generate_key().decode()
+    enabled_settings = replace(
+        workflow.get_settings(),
+        channel_supplier_v2_enabled=True,
+        channel_supplier_v2_workspace_allowlist=(
+            "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        ),
+        channel_supplier_v2_flow_allowlist=(FLOW_UUID,),
+        channel_supplier_v2_encryption_key=key,
+        channel_supplier_v2_encryption_key_id="v1",
+    )
+    monkeypatch.setattr(workflow, "get_settings", lambda: enabled_settings)
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_send_with_rcs"
+    intent = runtime["workflow_v2"]["channel_dispatch_v2"]
+    assert intent["status"] == "pending"
+    assert intent["channel"] == "rcs"
+    serialized = str(runtime)
+    assert "secret-rcs-token" not in serialized
+    assert "5511999990001" not in str(intent)
+    plaintext = Fernet(key.encode()).decrypt(intent["envelope_ciphertext"].encode())
+    assert b"secret-rcs-token" in plaintext
+    assert b"BRAD_EAVM_RCS" in plaintext
+    assert b"Contato de Teste" in plaintext
+    assert persisted[-1]["runtime_variables"] is runtime
 
 
 @pytest.mark.asyncio

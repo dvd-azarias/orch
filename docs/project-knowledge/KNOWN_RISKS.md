@@ -634,41 +634,41 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 ## R33 — `linked_actuator=sms` pode ser confundido com envelope pronto para envio
 
-`STATUS`: OPEN / FUTURE ACTIVATION GATE
+`STATUS`: GATE 1 MITIGATED / CALLBACK GATE 2 OPEN
 
 `IMPACT`: critical se o envio real for habilitado sem contrato materializado
 
-`PROBABILITY`: low enquanto a primeira entrega permanecer marker-only; high se um emissor selecionar apenas por `linked_actuator=sms`
+`PROBABILITY`: low com flag/allowlists e outbox V2; high se outro emissor selecionar apenas por `linked_actuator=sms`
 
 `AFFECTED AREA`: `send_with_sms` / Contact Supplier / dispatch SMS / callbacks DLR, MO e status
 
 `DESCRIPTION`: a marca `linked_actuator=sms` identifica a intenção e o membro escolhido, mas não transporta mensagem renderizada, revisão fixada do flow, configuração completa do provedor, callbacks, chave de idempotência ou credencial protegida. Um emissor que trate somente essa marca como item pronto teria de adivinhar dados ausentes ou carregar a definição corrente do flow. Além de poder enviar conteúdo vazio, incorreto ou duplicado, essa leitura quebraria o pin de revisão e faria Supplier/Target executar parte do grafo que pertence ao ORCH.
 
-`MITIGATION`: manter a primeira entrega estritamente sem POST externo. Antes de ativar envio real, materializar no ORCH um `outbound_sms` ou contrato equivalente, ligado a sessão/card/membro/revisão, com payload final, credencial protegida ou referência, idempotência e estados de entrega. O Supplier/emissor deve selecionar apenas envelopes completos; nunca deve interpretar o flow. Implementar também adaptador de callbacks com correlação inequívoca e teste E2E no provedor.
+`MITIGATION`: o Gate 1 materializa no ORCH uma intenção Fernet ligada a sessão/card/membro/revisão, registra pós-commit por chave idempotente e autoriza somente o outbox isolado da Supplier V2 após revalidar revisão, card, membro e marcador. Flag e allowlists falham fechadas; Supplier V1 permanece fora. Implementar no Gate 2 inbox/ledger de callbacks com correlação inequívoca antes de liberar branches.
 
 `DETECTION`: alertar qualquer tentativa de dispatch SMS sem envelope completo; consultas do Supplier/Target ao grafo do flow para montar SMS; SMS marcado sem payload materializado quando o modo de envio real estiver ativo; repetição da mesma chave de idempotência; callback sem correlação única; segredo ou mensagem expostos em log, alarme ou métrica.
 
-`EVIDENCE`: decisão arquitetural registrada antes da implementação do item 6. A implementação marker-only grava somente `linked_actuator=sms`, bloqueia a sessão e possui teste explícito que falharia se `_http_execute` fosse invocado. O teste PostgreSQL com tabelas temporárias também força uma exceção depois do marcador e confirma rollback para `NULL`; uma repetição válida retorna `already_marked`. A correção de 2026-09-08 comprovou ainda que membros telefônicos `voice` podem receber o marcador sem reclassificar o canal, enquanto `email` permanece inelegível. Ativação real continua proibida e os canários `channel`/`person` após a correção ainda estão pendentes.
+`EVIDENCE`: a fronteira marker-only continua coberta com o Gate desligado. No branch do Gate 1, testes comprovam envelope sem segredo/endereço em claro, fingerprint HMAC com chave derivada, idempotência determinística, replay estável e registro exclusivo na rota V2. PostgreSQL isolado comprovou o reconciliador pós-commit. Deploy e canário integrado ainda estão pendentes.
 
 `V2`: registry de conectores e credenciais, outbox transacional de comunicação, dispatch idempotente e inbox normalizado de callbacks como contratos nativos da plataforma.
 
 ## R34 — `linked_actuator=rcs` pode ser confundido com capacidade ou envelope de envio
 
-`STATUS`: OPEN / FUTURE ACTIVATION GATE
+`STATUS`: GATE 1 MITIGATED / CALLBACK GATE 2 OPEN
 
 `IMPACT`: critical se o envio real for habilitado ou se telefones genéricos forem promovidos para RCS
 
-`PROBABILITY`: low enquanto a primeira entrega permanecer marker-only e exigir tipo `rcs`; high se um emissor selecionar apenas pelo marcador
+`PROBABILITY`: low com tipo RCS estrito, flag/allowlists e outbox V2; high se outro emissor selecionar apenas pelo marcador
 
 `AFFECTED AREA`: `select_contact_channel` / `send_with_rcs` / Contact Supplier / futuro dispatch e callbacks RCS
 
 `DESCRIPTION`: nem todo telefone suporta RCS, e `linked_actuator=rcs` registra somente a intenção já decidida pelo ORCH. O marcador não contém mensagem materializada, revisão, contrato do provedor, credencial, idempotência nem correlação de callback. Inferir capacidade a partir de `voice/phone/sms` pode encaminhar contatos inelegíveis; fazer Supplier/Target carregar o flow para completar dados viola a autoridade do ORCH e o pin de revisão.
 
-`MITIGATION`: selecionar e marcar somente membro explicitamente tipado como `rcs`; manter a primeira entrega sem HTTP. Antes de ativar envio real, materializar sob autoridade do ORCH um envelope completo ligado a sessão/card/membro/revisão, com credencial protegida, idempotência e estados de entrega. O emissor deve reivindicar somente envelopes prontos e nunca interpretar o grafo.
+`MITIGATION`: selecionar e marcar somente membro explicitamente tipado como `rcs`. O Gate 1 cifra destino/template/variáveis/credencial sob autoridade do ORCH e a Supplier V2 revalida o contexto antes do claim; claim expirado ou transporte ambíguo vira `uncertain` e nunca é reenviado automaticamente. Gate 2 deve normalizar callbacks antes de qualquer retomada.
 
 `DETECTION`: alertar marcador RCS em membro não-RCS; tentativa de dispatch sem envelope completo; consulta do emissor à definição do flow; callback sem correlação única; mensagem, endereço ou segredo em logs, alarmes ou métricas.
 
-`EVIDENCE`: a engine possui guard SQL e guard de serviço por tipo exato, teste de reentrada `already_marked` e teste que falha se `_http_execute` for chamado. O teste PostgreSQL isolado foi preparado, mas a execução de 2026-09-08 não alcançou o banco por timeout de conectividade; não há ainda canário E2E.
+`EVIDENCE`: além dos guards por tipo exato e da regressão marker-only, o Gate 1 possui testes de materialização cifrada, registro idempotente, payload exato do provedor e classificação segura de respostas. O provedor real aceitou e entregou um smoke manual; o canário integrado ORCH -> Supplier V2 -> provedor ainda está pendente.
 
 `V2`: registry de conectores/capacidades, outbox RCS transacional e inbox normalizado de callbacks.
 

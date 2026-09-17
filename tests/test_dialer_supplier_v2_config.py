@@ -28,6 +28,7 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST",
         "CELERY_DIALER_SUPPLIER_V2_QUEUE",
         "CELERY_BEAT_DIALER_SUPPLIER_V2_RECONCILE_ENABLED",
+        "CELERY_BEAT_CHANNEL_SUPPLIER_V2_RECONCILE_ENABLED",
         "TARGET_CORE_SUPPLIER_API_BASE_URL",
         "TARGET_CORE_API_BEARER_TOKEN",
         "ORCH_DIALER_MULTILANE_V2_ENABLED",
@@ -50,6 +51,7 @@ def test_supplier_v2_is_disabled_and_isolated_by_default(
     assert settings.dialer_supplier_v2_flow_allowlist == ()
     assert settings.celery_dialer_supplier_v2_queue == "orch_dialer_supplier_v2"
     assert settings.celery_beat_dialer_supplier_v2_reconcile_enabled is False
+    assert settings.celery_beat_channel_supplier_v2_reconcile_enabled is False
     assert settings.orch_dialer_multilane_v2_enabled is False
     assert settings.orch_dialer_multilane_v2_flow_uuids == ()
     assert settings.orch_dialer_multilane_v2_max_lanes_per_flow == 1

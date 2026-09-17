@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from cryptography.fernet import Fernet
 
 import app.services.workflow_m2_service as workflow
 from app.services.orch_trigger_service import m2_alarm_from_stopped_reason
@@ -207,6 +209,84 @@ async def test_channel_sms_marks_exact_member_and_blocks_without_http(
     assert "must-never-be-materialized" not in serialized_runtime
     assert "Hello {{contact.name}}" not in serialized_runtime
     assert "callback.invalid" not in serialized_runtime
+
+
+@pytest.mark.asyncio
+async def test_enabled_supplier_v2_materializes_only_encrypted_sms_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    component = _component()
+    component["parameters"] = {
+        "basic_token": "secret-basic-token",
+        "message_template": "Olá {{contact.full_name}}",
+        "codigo_carteira": "comunicado_digital",
+        "codigo_fornecedor": "100",
+        "url_callback_dlr": "https://callback.invalid/dlr",
+        "url_callback_mo": "https://callback.invalid/mo",
+        "url_callback_status": "https://callback.invalid/status",
+    }
+    persisted = _configure_execution(
+        monkeypatch, runtime=runtime, contact_row=_contact_row()
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={
+                    "id": REVISION_UUID,
+                    "definition": {"components": [component], "branches": []},
+                },
+                source="pinned",
+                requested_revision_id=REVISION_UUID,
+                failure_reason=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "assign_sms_routing_for_session",
+        AsyncMock(
+            return_value={
+                "contact_list_member_id": 77,
+                "linked_actuator": "sms",
+                "mode": "marked",
+            }
+        ),
+    )
+    real_settings = workflow.get_settings()
+    key = Fernet.generate_key().decode()
+    enabled_settings = replace(
+        real_settings,
+        channel_supplier_v2_enabled=True,
+        channel_supplier_v2_workspace_allowlist=(
+            "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        ),
+        channel_supplier_v2_flow_allowlist=(FLOW_UUID,),
+        channel_supplier_v2_encryption_key=key,
+        channel_supplier_v2_encryption_key_id="v1",
+    )
+    monkeypatch.setattr(workflow, "get_settings", lambda: enabled_settings)
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_send_with_sms"
+    intent = runtime["workflow_v2"]["channel_dispatch_v2"]
+    assert intent["status"] == "pending"
+    assert intent["channel"] == "sms"
+    serialized = str(runtime)
+    assert "secret-basic-token" not in serialized
+    assert "Olá Contato de Teste" not in serialized
+    assert "5511999990001" not in str(intent)
+    plaintext = Fernet(key.encode()).decrypt(intent["envelope_ciphertext"].encode())
+    assert b"secret-basic-token" in plaintext
+    assert b"5511999990001" in plaintext
+    assert persisted[-1]["runtime_variables"] is runtime
 
 
 @pytest.mark.asyncio
