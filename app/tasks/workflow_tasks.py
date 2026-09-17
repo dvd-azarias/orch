@@ -18,6 +18,9 @@ from app.repositories.orch_sessions_repository import (
     replace_session_workflow_state,
 )
 from app.services.alarm_service import persist_alarm
+from app.services.channel_supplier_v2_service import (
+    channel_supplier_v2_enabled_for_context,
+)
 from app.services.dialer_supplier_v2_service import (
     dialer_supplier_v2_enabled_for_context,
 )
@@ -508,6 +511,27 @@ async def _advance_session_task(
             },
             queue=settings.celery_dialer_supplier_v2_queue,
             routing_key=settings.celery_dialer_supplier_v2_queue,
+        )
+    elif (
+        stopped_reason in {"blocked_send_with_sms", "blocked_send_with_rcs"}
+        and channel_supplier_v2_enabled_for_context(
+            settings=settings,
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+        )
+    ):
+        from app.tasks.channel_supplier_v2_tasks import (
+            register_channel_supplier_v2_dispatch_task,
+        )
+
+        register_channel_supplier_v2_dispatch_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_channel_supplier_v2_queue,
+            routing_key=settings.celery_channel_supplier_v2_queue,
         )
     logger.info(
         "workflow session advanced",

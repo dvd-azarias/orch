@@ -77,6 +77,11 @@ from app.repositories.send_with_rcs_repository import assign_rcs_routing_for_ses
 from app.repositories.send_with_sms_repository import assign_sms_routing_for_session
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
+from app.services.channel_supplier_v2_service import (
+    ChannelSupplierV2RegistrationError,
+    build_channel_dispatch_intent,
+    channel_supplier_v2_enabled_for_context,
+)
 from app.services.dialer_supplier_v2_service import (
     DialerSupplierV2EligibilityError,
     DialerSupplierV2RegistrationError,
@@ -2670,6 +2675,9 @@ async def _prepare_send_with_sms_contact_member(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
     contact_row: dict[str, Any] | None,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_revision_id: str,
 ) -> dict[str, Any]:
     if not isinstance(contact_row, dict):
         raise WorkflowExecutionError(
@@ -2731,6 +2739,16 @@ async def _prepare_send_with_sms_contact_member(
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    _materialize_channel_dispatch_v2_intent(
+        workspace_uuid=workspace_uuid,
+        session_uuid=session_uuid,
+        flow_uuid=flow_uuid,
+        flow_revision_id=flow_revision_id,
+        component=component,
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        channel="sms",
+    )
     runtime_variables.pop("send_with_sms_last_error", None)
     return assignment
 
@@ -2743,6 +2761,9 @@ async def _prepare_send_with_rcs_contact_member(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
     contact_row: dict[str, Any] | None,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_revision_id: str,
 ) -> dict[str, Any]:
     if not isinstance(contact_row, dict):
         raise WorkflowExecutionError(
@@ -2804,8 +2825,168 @@ async def _prepare_send_with_rcs_contact_member(
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    _materialize_channel_dispatch_v2_intent(
+        workspace_uuid=workspace_uuid,
+        session_uuid=session_uuid,
+        flow_uuid=flow_uuid,
+        flow_revision_id=flow_revision_id,
+        component=component,
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        channel="rcs",
+    )
     runtime_variables.pop("send_with_rcs_last_error", None)
     return assignment
+
+
+def _materialize_channel_dispatch_v2_intent(
+    *,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_uuid: str,
+    flow_revision_id: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any],
+    channel: str,
+) -> None:
+    settings = get_settings()
+    if not channel_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+    ):
+        return
+
+    params = (
+        component.get("parameters")
+        if isinstance(component.get("parameters"), dict)
+        else {}
+    )
+    variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
+    component_ref_id = str(component.get("ref_id") or "").strip()
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    existing = workflow_meta.get("channel_dispatch_v2")
+
+    try:
+        member_id = int(contact_row.get("contact_list_member_id"))
+        contact_list_id = str(UUID(str(contact_row.get("contact_list_id"))))
+        destination = str(contact_row.get("contact_channel_address") or "").strip()
+        existing_matches = (
+            isinstance(existing, dict)
+            and str(existing.get("session_uuid") or "") == session_uuid
+            and str(existing.get("flow_revision_id") or "") == flow_revision_id
+            and str(existing.get("component_ref_id") or "") == component_ref_id
+            and int(existing.get("contact_list_member_id") or 0) == member_id
+            and str(existing.get("channel") or "") == channel
+        )
+        if existing_matches:
+            sequence = int(existing.get("dispatch_sequence") or 1)
+        else:
+            history = workflow_meta.get("channel_dispatch_v2_history")
+            if not isinstance(history, list):
+                history = []
+            sequence = 1 + max(
+                [
+                    int(item.get("dispatch_sequence") or 0)
+                    for item in history
+                    if isinstance(item, dict)
+                    and str(item.get("component_ref_id") or "") == component_ref_id
+                ]
+                or [0]
+            )
+
+        if channel == "sms":
+            provider = {
+                "basic_token": str(
+                    _catalog_parameter_scalar(params.get("basic_token")) or ""
+                ).strip(),
+                "message": str(
+                    _render_value(params.get("message_template"), resolution_scope)
+                    or ""
+                ),
+                "codigo_carteira": str(
+                    _catalog_parameter_scalar(params.get("codigo_carteira")) or ""
+                ).strip(),
+                "codigo_fornecedor": str(
+                    _catalog_parameter_scalar(params.get("codigo_fornecedor")) or ""
+                ).strip(),
+                "callbacks": {
+                    "dlr": str(
+                        _render_value(params.get("url_callback_dlr"), resolution_scope)
+                        or ""
+                    ).strip(),
+                    "mo": str(
+                        _render_value(params.get("url_callback_mo"), resolution_scope)
+                        or ""
+                    ).strip(),
+                    "status": str(
+                        _render_value(
+                            params.get("url_callback_status"), resolution_scope
+                        )
+                        or ""
+                    ).strip(),
+                },
+            }
+        else:
+            raw_variables = _render_value(
+                params.get("template_variables") or {}, resolution_scope
+            )
+            if isinstance(raw_variables, str):
+                raw_variables = json.loads(raw_variables or "{}")
+            if not isinstance(raw_variables, dict):
+                raise ValueError("template_variables must be an object")
+            provider = {
+                "authorization_token": str(
+                    _catalog_parameter_scalar(params.get("authorization_token")) or ""
+                ).strip(),
+                "broker_code": str(
+                    _catalog_parameter_scalar(params.get("broker_code")) or ""
+                ).strip(),
+                "customer_code": str(
+                    _catalog_parameter_scalar(params.get("customer_code")) or ""
+                ).strip(),
+                "template_code": str(
+                    _catalog_parameter_scalar(params.get("template_code")) or ""
+                ).strip(),
+                "variables": raw_variables,
+            }
+        intent = build_channel_dispatch_intent(
+            session_uuid=session_uuid,
+            flow_uuid=flow_uuid,
+            flow_revision_id=flow_revision_id,
+            component_ref_id=component_ref_id,
+            contact_list_id=contact_list_id,
+            contact_list_member_id=member_id,
+            channel=channel,
+            dispatch_sequence=sequence,
+            destination=destination,
+            provider=provider,
+            settings=settings,
+            existing=existing if isinstance(existing, dict) else None,
+        )
+    except (ChannelSupplierV2RegistrationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        code = (
+            exc.code
+            if isinstance(exc, ChannelSupplierV2RegistrationError)
+            else "channel_supplier_v2_envelope_invalid"
+        )
+        raise WorkflowExecutionError(
+            code,
+            "Não foi possível materializar com segurança o envelope SMS/RCS V2.",
+        ) from exc
+
+    if isinstance(existing, dict) and not existing_matches:
+        history = workflow_meta.get("channel_dispatch_v2_history")
+        if not isinstance(history, list):
+            history = []
+            workflow_meta["channel_dispatch_v2_history"] = history
+        history.append(existing)
+    workflow_meta["channel_dispatch_v2"] = intent
 
 
 async def _prepare_send_with_email_contact_member(
@@ -9502,6 +9683,9 @@ async def execute_workflow_m2_for_session(
                             component=component,
                             runtime_variables=runtime_variables,
                             contact_row=contact_runtime_context,
+                            workspace_uuid=get_current_workspace_uuid(),
+                            session_uuid=str(session_uuid_for_metrics or ""),
+                            flow_revision_id=str(revision_id_for_metrics or ""),
                         )
                         logger.info(
                             "workflow m2 send with sms prepared",
@@ -9526,6 +9710,9 @@ async def execute_workflow_m2_for_session(
                             component=component,
                             runtime_variables=runtime_variables,
                             contact_row=contact_runtime_context,
+                            workspace_uuid=get_current_workspace_uuid(),
+                            session_uuid=str(session_uuid_for_metrics or ""),
+                            flow_revision_id=str(revision_id_for_metrics or ""),
                         )
                         logger.info(
                             "workflow m2 send with rcs prepared",

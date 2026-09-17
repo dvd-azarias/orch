@@ -1,5 +1,31 @@
 # Maintenance Log
 
+## 2026-09-17 — Gate 1 de envio real SMS/RCS exclusivamente pela Supplier V2
+
+Classificação: `ALPHA_FIX_OPTIONAL`, opt-in e canária.
+
+- `send_with_sms` e `send_with_rcs` preservam integralmente o comportamento
+  marker-only quando flag/allowlists estão desligadas;
+- com o Gate ativo, o mesmo commit do marcador persiste uma intenção cifrada e
+  pinada à sessão, revisão, card, lista, membro, canal e sequência;
+- o registro externo ocorre somente pós-commit em fila exclusiva; um
+  reconciliador escopado recupera `pending`, lease vencido e retry stale;
+- destino, conteúdo e credenciais não aparecem em claro no runtime ou logs;
+  fingerprint usa HMAC com chave derivada, e idempotência usa o hash do envelope
+  canônico antes da cifra;
+- Supplier V1 e gateways legados não foram alterados; o ORCH nunca chama o
+  provedor;
+- aceite do provedor mantém a sessão bloqueada. Callbacks e branches pertencem
+  ao Gate 2 e não são simulados por resposta HTTP imediata;
+- validação local: `38 passed` na regressão focada e `1 passed` no reconciliador
+  contra PostgreSQL isolado. Smokes diretos anteriores a partir da rede interna
+  receberam HTTP 200 e foram confirmados no aparelho para SMS e RCS; o canário
+  integrado permanece pendente de merge, migration, configuração e deploy.
+
+Rollback: desligar `CHANNEL_SUPPLIER_V2_ENABLED` ou retirar o flow da allowlist,
+drenar/parar a fila exclusiva e preservar os envelopes/outbox para auditoria.
+Não executar compensação automática nem tocar na Supplier V1.
+
 ## 2026-09-17 — Retry da retomada terminal Supplier V2 sob lock transitório
 
 Classificação: `ALPHA_FIX_REQUIRED`.

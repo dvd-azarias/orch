@@ -2688,6 +2688,41 @@ async def patch_session_dialer_supplier_v2_registration(
     return result.first() is not None
 
 
+async def patch_session_channel_supplier_v2_registration(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    idempotency_key: str,
+    registration: dict[str, Any],
+) -> bool:
+    """Patch the encrypted channel dispatch intent without changing cursors."""
+
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_sessions
+            SET
+                runtime_variables = jsonb_set(
+                    COALESCE(runtime_variables, '{}'::jsonb),
+                    '{workflow_v2,channel_dispatch_v2}',
+                    CAST(:registration AS jsonb),
+                    true
+                ),
+                updated_at = NOW()
+            WHERE id = :session_id
+              AND runtime_variables #>> '{workflow_v2,channel_dispatch_v2,idempotency_key}' = :idempotency_key
+            RETURNING id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "idempotency_key": idempotency_key,
+            "registration": json.dumps(registration, ensure_ascii=False),
+        },
+    )
+    return result.first() is not None
+
+
 async def fetch_contact_runtime_context_for_session(
     db_session: AsyncSession,
     *,

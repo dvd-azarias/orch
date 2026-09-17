@@ -271,9 +271,10 @@ Ao alcançar `send_with_whatsapp`, `send_whatsapp_interactive` ou `send_whatsapp
 
 O Target Core é consumidor desse estado: seu Contact Supplier seleciona somente linhas WhatsApp com HSM materializado e devolve o JSON sem carregar ou interpretar a definição do flow.
 
-## Handoff SMS marker-only e fronteira do envio real
+## Handoff SMS e dispatch opt-in pela Supplier V2
 
-Primeira entrega:
+Com `CHANNEL_SUPPLIER_V2_ENABLED=false` ou flow fora da allowlist, permanece a
+primeira entrega marker-only:
 
 ```text
 select_contact_channel(sms) seleciona um canal telefônico elegível
@@ -286,24 +287,34 @@ select_contact_channel(sms) seleciona um canal telefônico elegível
 
 O M2 implementa essa primeira entrega com um `UPDATE` protegido pela sessão ativa e pelo membro exato. Flow, sessão, identificador, endereço, lista, mailing, pessoa quando disponível e um tipo telefônico elegível (`sms`, `phone` ou `voice`) precisam coincidir. Em escopo `person`, o guard geral exige antes uma seleção ativa de `select_contact_channel`. A compatibilidade é uma regra de capacidade: ela não muda `contact_channel_type`, não escolhe e-mail/WhatsApp e não grava atuador durante a seleção. O marcador, o cursor bloqueado e a transição da sessão para `state=1` participam da mesma transação do dispatcher. Reentrada encontra `blocked_send_with_sms` e não repete o handoff.
 
-O `linked_actuator` informa qual atuador deve assumir o contato, mas não é um payload de dispatch. Diferentemente do caminho WhatsApp com `outbound_hsm`, a primeira entrega de SMS não lê nem materializa mensagem, configuração do provedor, callbacks, idempotência ou credencial segura. O runtime diagnóstico contém somente card, membro, resultado do marcador e instante; token, mensagem, callback e endereço não são copiados.
+O `linked_actuator` informa qual atuador deve assumir o contato, mas não é um
+payload de dispatch. Quando o Gate e as allowlists de workspace/flow estão
+ativos, o ORCH também renderiza o conteúdo da revisão fixada, cifra destino,
+mensagem, callbacks e credencial com Fernet e persiste a intenção em
+`runtime_variables.workflow_v2.channel_dispatch_v2` no mesmo commit do
+marcador/cursor. Logs, alarmes e colunas de auditoria não recebem esses valores
+em claro.
 
-Ativação futura obrigatória:
+Fluxo do Gate 1:
 
 ```text
 ORCH executa a revisão fixada e renderiza o card
-  -> materializa outbound_sms ou contrato equivalente
-     (sessão + card + membro + revisão + payload + idempotência + segredo protegido)
+  -> materializa envelope cifrado
+     (sessão + card + membro + revisão + payload + idempotência)
   -> grava linked_actuator=sms de forma consistente com o envelope
-  -> Supplier/emissor reivindica somente envelope completo
+  -> task pós-commit registra em POST /v2/contact-supplier/channel-dispatches
+  -> Supplier V2 revalida revisão/card/membro/marcador e persiste o outbox
   -> emissor realiza o POST ao provedor
-  -> adaptador correlaciona DLR/MO/status
-  -> ORCH retoma a mesma sessão pela branch correspondente
+  -> aceite explícito vira accepted; ambiguidade vira uncertain sem reenvio
+  -> sessão permanece bloqueada
 ```
 
-Supplier/Target não deve carregar a definição corrente do flow para reconstruir o SMS. O conteúdo final é responsabilidade da execução do ORCH e deve permanecer ligado à revisão fixada da sessão. Enquanto esse contrato e os callbacks não existirem e não forem comprovados E2E, envio real permanece fora do escopo do card.
+O Target consulta a revisão publicada somente para comprovar que os campos
+estáticos cifrados pertencem ao card pinado; ele não renderiza o grafo nem
+escolhe destinatário. DLR/MO/status, ledger externo e retomada da branch ainda
+pertencem ao Gate 2. Até lá, aceite HTTP nunca libera a sessão.
 
-## Handoff RCS marker-only e fronteira do envio real
+## Handoff RCS e dispatch opt-in pela Supplier V2
 
 ```text
 select_contact_channel(rcs) seleciona somente um membro explicitamente RCS
@@ -315,7 +326,12 @@ select_contact_channel(rcs) seleciona somente um membro explicitamente RCS
 
 RCS não é inferido de um número telefônico genérico. A Identidade materializa um canal `rcs` separado somente quando recebe `has_rcs=true` em telefone fora de “não perturbe”; o seletor usa correspondência exata e o repositório recusa `voice`, `phone`, `sms`, `whatsapp` e `email`. Em `person`, o card exige seleção explícita anterior; em `channel`, preserva o membro/endereço de origem. Marcador, cursor bloqueado e `state=1` pertencem à mesma transação, e a reentrada em `blocked_send_with_rcs` não repete o handoff.
 
-O runtime armazena apenas o card, o membro e o resultado `marked|already_marked`; a mensagem configurada não é materializada nem copiada. Antes do envio real, uma entrega separada deverá definir a API do provedor, credenciais protegidas, payload final ligado à revisão fixada, idempotência, claim/ACK/retry e callbacks inequívocos. `linked_actuator=rcs` isolado nunca autoriza dispatch.
+Com o Gate desligado, o runtime continua apenas marker-only. Com o Gate ativo,
+o ORCH cifra `authorization_token`, broker, cliente, template, variáveis
+renderizadas e destino; a Supplier V2 envia o template pela fila exclusiva.
+`status=V` com identificador confirma apenas aceite válido. Delivery, read,
+response, expired, timeout e retomada do canvas continuam pendentes no Gate 2.
+`linked_actuator=rcs` isolado nunca autoriza dispatch.
 
 ## Handoff de e-mail marker-only e fronteira do envio real
 

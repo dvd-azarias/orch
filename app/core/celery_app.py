@@ -59,6 +59,17 @@ if (
         ),
         "options": {"queue": settings.celery_dispatch_queue},
     }
+if (
+    settings.channel_supplier_v2_enabled
+    and settings.celery_beat_channel_supplier_v2_reconcile_enabled
+):
+    beat_schedule["orch-reconcile-channel-supplier-v2-dispatches"] = {
+        "task": "app.tasks.channel_supplier_v2.reconcile_pending_dispatches",
+        "schedule": max(
+            10, settings.channel_supplier_v2_reconcile_interval_seconds
+        ),
+        "options": {"queue": settings.celery_dispatch_queue},
+    }
 if settings.celery_beat_fileapp_post_process_reconcile_enabled:
     beat_schedule["orch-fileapp-reconcile-post-process"] = {
         "task": "app.tasks.fileapp.reconcile_post_process",
@@ -98,6 +109,7 @@ celery_app = Celery(
         "app.tasks.workflow_tasks",
         "app.tasks.switch_bot_flow_tasks",
         "app.tasks.dialer_supplier_v2_tasks",
+        "app.tasks.channel_supplier_v2_tasks",
         "app.tasks.generate_file_tasks",
         "app.tasks.fileapp_ingest_tasks",
         "app.tasks.billing_tasks",
@@ -120,6 +132,8 @@ celery_app.conf.update(
         "app.tasks.workflow.link_identidade_person_mailing": {"queue": settings.celery_execute_queue},
         "app.tasks.switch_bot_flow.process_handoff": {"queue": settings.celery_switch_bot_flow_queue},
         "app.tasks.dialer_supplier_v2.register_cycle": {"queue": settings.celery_dialer_supplier_v2_queue},
+        "app.tasks.channel_supplier_v2.register_dispatch": {"queue": settings.celery_channel_supplier_v2_queue},
+        "app.tasks.channel_supplier_v2.reconcile_pending_dispatches": {"queue": settings.celery_dispatch_queue},
         "app.tasks.dialer_supplier_v2.reconcile_pending_cycles": {"queue": settings.celery_dispatch_queue},
         "app.tasks.billing.publish_pending_snapshots": {"queue": settings.celery_dispatch_queue},
         "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},
