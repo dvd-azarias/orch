@@ -943,6 +943,7 @@ Ao retomar:
 | 2026-09-16 | 6/primeiro vínculo | Target/ORCH/Supplier V2 | primeiro vínculo encontrou gate ORCH fechado; falhou antes de criar chamada e foi corrigido sem fallback V1 | fail-closed confirmado |
 | 2026-09-16 | 6/gap A→B | código e definição | `channel` preserva o membro âncora; seletor atual em `person` escolhe apenas o primeiro ativo e não exclui o atual | gap confirmado |
 | 2026-09-16 | 3A–3C | revisão adversarial | catálogo valida campos, mas não compatibilidade modo/card ou dominância; callback genérico é ambíguo em `channel`; Supplier terminal não transporta `limit_action` | contrato corretivo aprovado |
+| 2026-09-17 | 6/callback terminal | ORCH local + canário | corrida confirmada: retomada terminal podia perder o advisory lock para o callback bruto; task exclusiva com retry limitado implementada, `218 passed`, stack completa/smoke sem erro | aprovado localmente; canário E2E pendente |
 | 2026-09-16 | 3A/auditoria | Target DB, transação read-only | 60 workspaces, 667 flows e 142 orquestrações; modos `126 legacy_channel + 14 channel + 2 person`; seis incompatibilidades, todas publicadas no workspace DEV Highcomm; nenhum erro de leitura | impacto delimitado |
 
 ## Decisões e desvios

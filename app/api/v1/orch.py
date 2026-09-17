@@ -96,7 +96,10 @@ from app.services.workspace_service import (
 )
 from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task, ingest_fileapp_tipo1_event_task
 from app.tasks.billing_batch_tasks import billing_reprocess_task
-from app.tasks.workflow_tasks import advance_session_task
+from app.tasks.workflow_tasks import (
+    advance_session_task,
+    resume_dialer_supplier_v2_terminal_task,
+)
 
 router = APIRouter(prefix="/v1/orch", tags=["orch"])
 logger = get_logger(__name__)
@@ -897,7 +900,7 @@ async def callback_dialer_supplier_v2_by_workspace(
         settings = get_settings()
         await asyncio.wait_for(
             asyncio.to_thread(
-                lambda: advance_session_task.apply_async(
+                lambda: resume_dialer_supplier_v2_terminal_task.apply_async(
                     kwargs={
                         "workspace_uuid": safe_workspace_uuid,
                         "flow_uuid": str(flow_uuid),

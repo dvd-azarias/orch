@@ -1,5 +1,31 @@
 # Maintenance Log
 
+## 2026-09-17 — Retry da retomada terminal Supplier V2 sob lock transitório
+
+Classificação: `ALPHA_FIX_REQUIRED`.
+
+- o canário multilane confirmou que o segundo telefone respeitou o intervalo
+  de um minuto e produziu `finish_person`, porém a sessão permaneceu antes de
+  `finish_flow`;
+- a causa foi uma corrida entre o avanço disparado pelo callback bruto e a
+  retomada terminal: o segundo worker encontrou `session_execution_locked` e a
+  task comum concluiu como no-op, sem retry;
+- o endpoint terminal Supplier V2 agora publica uma task dedicada, com sete
+  retries exponenciais limitados a 30 segundos, exclusivamente quando o motivo
+  retornado é `session_execution_locked`;
+- o executor M2 continua único e a task comum mantém a semântica anterior;
+  Supplier V1, callback bruto, card legado, schema e filas não foram alterados;
+- validação: `19 passed` nos testes direcionados, `218 passed` na regressão
+  ampliada, `compileall` e `git diff --check`; stack local completa com filas
+  dedicadas ficou `up`, registrou a nova task, aceitou os dois smokes canônicos
+  e não apresentou `ERROR`, `CRITICAL` ou `Traceback`; ao final ficou toda
+  `down`.
+
+Rollout: implantar API e workers da mesma revisão antes de repetir o canário.
+Rollback é somente de código/restart, sem migration. A sessão canário já
+afetada não deve ser alterada silenciosamente; qualquer retomada deve ser
+auditada.
+
 ## 2026-09-16 — Espera sistêmica no seletor quando o calendário fecha
 
 Classificação: `ALPHA_FIX_REQUIRED`.

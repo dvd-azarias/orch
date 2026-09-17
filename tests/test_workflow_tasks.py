@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from celery.exceptions import Retry
 
 from app.tasks import workflow_tasks
 
@@ -68,17 +69,69 @@ async def test_advance_session_commits_terminal_failure_alarm(
     monkeypatch.setattr(workflow_tasks, "persist_alarm", _persist_alarm)
     monkeypatch.setattr(workflow_tasks, "persist_session_metrics", _persist_metrics)
 
-    await workflow_tasks._advance_session_task(
+    result = await workflow_tasks._advance_session_task(
         workspace_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         flow_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         session_id=123,
     )
 
+    assert result == stopped_reason
     assert session_context.session.commits == 1
     assert len(alarms) == 1
     assert alarms[0]["code"] == alarm_code
     assert metrics[0][0]["status"] == "error"
     assert metrics[0][0]["stopped_reason"] == stopped_reason
+
+
+def test_supplier_v2_terminal_resume_retries_session_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _advance(**_kwargs) -> str:
+        return "session_execution_locked"
+
+    retry_calls: list[dict] = []
+
+    def _retry(**kwargs):
+        retry_calls.append(kwargs)
+        raise Retry()
+
+    task = workflow_tasks.resume_dialer_supplier_v2_terminal_task
+    monkeypatch.setattr(workflow_tasks, "_advance_session_task", _advance)
+    monkeypatch.setattr(task, "retry", _retry)
+
+    with pytest.raises(Retry):
+        task.run(
+            workspace_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            flow_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            session_id=123,
+        )
+
+    assert len(retry_calls) == 1
+    assert retry_calls[0]["countdown"] == 1
+    assert str(retry_calls[0]["exc"]) == (
+        "dialer_supplier_v2_terminal_session_locked"
+    )
+
+
+def test_supplier_v2_terminal_resume_does_not_retry_after_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _advance(**_kwargs) -> str:
+        return "finished_by_component"
+
+    task = workflow_tasks.resume_dialer_supplier_v2_terminal_task
+    monkeypatch.setattr(workflow_tasks, "_advance_session_task", _advance)
+
+    result = task.run(
+        workspace_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        flow_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        session_id=123,
+    )
+
+    assert result == {
+        "status": "completed",
+        "stopped_reason": "finished_by_component",
+    }
 
 
 @pytest.mark.asyncio

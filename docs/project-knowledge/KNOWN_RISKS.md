@@ -897,3 +897,43 @@ e os ciclos para auditoria. Não redirecionar para Supplier V1.
 
 `V2`: entidade própria por ciclo/lane e inbox transacional de callback, sem
 estado histórico embutido no JSON da sessão.
+
+## R42 — Retomada terminal Supplier V2 pode ser perdida por lock transitório
+
+`STATUS`: MITIGATED IN IMPLEMENTATION / CANARY E2E PENDING
+
+`IMPACT`: high no novo Dialer; a decisão terminal fica persistida, mas a sessão
+pode permanecer bloqueada antes do próximo card
+
+`PROBABILITY`: medium quando callback bruto e terminal chegam na mesma janela;
+low com a task terminal dedicada
+
+`AFFECTED AREA`: endpoint terminal Supplier V2 / Celery / advisory lock M2
+
+`DESCRIPTION`: o callback terminal é persistido antes do enqueue. Se o avanço
+do callback bruto ainda detiver o advisory lock da sessão, a retomada terminal
+encontrava `session_execution_locked`. A task comum trata esse motivo como
+parada normal e concluía com sucesso, portanto não havia nova tentativa mesmo
+com a decisão terminal pronta para consumo.
+
+`RUNTIME EVIDENCE`: em 2026-09-17, a sessão canário
+`c98a1545-0c6c-463e-8925-b80ca407332f` recebeu o terminal do segundo Dialer,
+persistiu `decision=finish_person` e `terminal_received`, mas permaneceu antes
+de `finish_flow`. Os logs mostraram o avanço bruto concluindo enquanto a task
+terminal recebeu `session_execution_locked` e terminou sem retry.
+
+`MITIGATION`: somente o endpoint terminal Supplier V2 publica a task
+`resume_dialer_supplier_v2_terminal`. Ela reutiliza exatamente o executor M2 e
+repete apenas `session_execution_locked`, com backoff limitado a 30 segundos e
+sete retries. Qualquer outro resultado conserva a semântica existente. A task
+comum, Supplier V1, callback bruto e card legado não foram alterados.
+
+`DETECTION`: evento `orch.dialer_supplier_v2.terminal_resume.retry`, falha da
+task após esgotar retries e sessão com `terminal_received` sem avanço do cursor.
+
+`ROLLBACK`: reverter o produtor do endpoint para `advance_session_task` e
+reiniciar API/workers. Não há migration nem dado a compensar; preservar o
+terminal persistido para diagnóstico ou retomada auditada.
+
+`V2`: inbox transacional com reconciliador explícito de terminais persistidos e
+não consumidos.
