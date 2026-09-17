@@ -1,5 +1,28 @@
 # Maintenance Log
 
+## 2026-09-16 — Espera sistêmica no seletor quando o calendário fecha
+
+Classificação: `ALPHA_FIX_REQUIRED`.
+
+- o canário chegou ao segundo telefone exatamente após o intervalo da Política,
+  mas o calendário já estava fechado; tratar esse estado como
+  `blocked_by_policy` encerrava o grafo apesar de existir abertura futura;
+- o ORCH agora aceita somente a decisão Supplier V2 `deferred` acompanhada de
+  `next_eligible_at` futuro, preserva o canal corrente e não consome a
+  autorização terminal de `next_phone`;
+- a sessão mantém `last_card_uuid` e `next_card_uuid` no seletor, persiste o
+  prazo em `frozen_until` e retorna `scheduled_wait`; o dispatcher existente só
+  volta a reclamá-la depois do prazo e então consulta novamente a Supplier;
+- `deferred` é estado operacional interno, não branch novo do canvas;
+- validação local: `240 passed` nas suítes de Supplier client, seletor,
+  workflow, espera, dispatcher e repositório de sessões;
+- Supplier V1, card legado, sessões `channel` e cards sem `next_eligible`
+  permanecem fora da mudança.
+
+Rollout: implantar primeiro o consumidor ORCH e somente depois o produtor
+Target Core. Rollback é de código/restart, sem migration; sessões já congeladas
+continuam compatíveis com o mecanismo geral de `frozen_until`.
+
 ## 2026-09-16 — Contrato da versão do mapa PDIAL no terminal Supplier V2
 
 Classificação: `ALPHA_FIX_REQUIRED`.

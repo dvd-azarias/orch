@@ -114,7 +114,7 @@ def _next_channel_response(*, decision: str = "selected") -> dict:
         if decision == "selected"
         else None
     )
-    return {
+    response = {
         "data": {
             "supplier_contract": "v2",
             "decision": decision,
@@ -140,6 +140,9 @@ def _next_channel_response(*, decision: str = "selected") -> dict:
             "evaluated_at": "2026-09-16T13:00:00+00:00",
         }
     }
+    if decision == "deferred":
+        response["data"]["next_eligible_at"] = "2026-09-17T12:00:00+00:00"
+    return response
 
 
 def _resolve_next_channel(**overrides: object):
@@ -343,6 +346,64 @@ def test_resolve_next_channel_accepts_business_outcomes_without_candidate(
 
     assert result.decision == decision
     assert result.candidate is None
+
+
+def test_resolve_next_channel_accepts_calendar_defer_with_future_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            _next_channel_response(decision="deferred"), status=200
+        ),
+    )
+
+    result = _resolve_next_channel()
+
+    assert result.decision == "deferred"
+    assert result.reason == "calendar_closed"
+    assert result.next_eligible_at == "2026-09-17T12:00:00+00:00"
+    assert result.candidate is None
+
+
+@pytest.mark.parametrize(
+    "next_eligible_at",
+    [None, "", "2026-09-16T12:59:59+00:00", "not-a-date"],
+)
+def test_resolve_next_channel_rejects_invalid_calendar_defer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    next_eligible_at: object,
+) -> None:
+    response = _next_channel_response(decision="deferred")
+    response["data"]["next_eligible_at"] = next_eligible_at
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(response, status=200),
+    )
+
+    with pytest.raises(service.DialerSupplierV2EligibilityError) as exc_info:
+        _resolve_next_channel()
+
+    assert exc_info.value.code == "dialer_supplier_v2_next_channel_invalid_response"
+
+
+def test_resolve_next_channel_rejects_unknown_defer_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _next_channel_response(decision="deferred")
+    response["data"]["reason"] = "provider_backpressure"
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(response, status=200),
+    )
+
+    with pytest.raises(service.DialerSupplierV2EligibilityError) as exc_info:
+        _resolve_next_channel()
+
+    assert exc_info.value.code == "dialer_supplier_v2_next_channel_invalid_response"
 
 
 def test_resolve_next_channel_rejects_response_identity_mismatch(
