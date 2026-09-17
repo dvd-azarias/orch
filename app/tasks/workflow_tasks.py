@@ -32,6 +32,7 @@ from app.services.workflow_dispatcher_service import (
 
 logger = get_logger(__name__)
 _IDENTIDADE_PERSON_FLOW_LINK_LOCK_CLASS_ID = 92022
+_DIALER_SUPPLIER_V2_TERMINAL_LOCK_RETRY_MAX_SECONDS = 30
 
 
 @celery_app.task(name="app.tasks.workflow.advance_session", ignore_result=True)
@@ -42,6 +43,56 @@ def advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_id: int
             flow_uuid=flow_uuid,
             session_id=session_id,
         )
+    )
+
+
+@celery_app.task(
+    name="app.tasks.workflow.resume_dialer_supplier_v2_terminal",
+    bind=True,
+    ignore_result=True,
+    max_retries=7,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def resume_dialer_supplier_v2_terminal_task(
+    self,
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    session_id: int,
+) -> dict[str, Any]:
+    """Resume one terminal Supplier V2 callback without losing lock contention."""
+
+    stopped_reason = asyncio.run(
+        _advance_session_task(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            session_id=session_id,
+        )
+    )
+    if stopped_reason != "session_execution_locked":
+        return {"status": "completed", "stopped_reason": stopped_reason}
+
+    retries = max(0, int(self.request.retries or 0))
+    countdown = min(
+        _DIALER_SUPPLIER_V2_TERMINAL_LOCK_RETRY_MAX_SECONDS,
+        2**retries,
+    )
+    logger.warning(
+        "dialer Supplier V2 terminal resume delayed by session lock",
+        extra={
+            "event": "orch.dialer_supplier_v2.terminal_resume.retry",
+            "supplier_version": "v2",
+            "workspace_uuid": workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+            "retry": retries + 1,
+            "countdown_seconds": countdown,
+        },
+    )
+    raise self.retry(
+        exc=RuntimeError("dialer_supplier_v2_terminal_session_locked"),
+        countdown=countdown,
     )
 
 
@@ -335,7 +386,9 @@ async def _reconcile_pending_channel_events_task() -> int:
     return total_enqueued
 
 
-async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_id: int) -> None:
+async def _advance_session_task(
+    *, workspace_uuid: str, flow_uuid: str, session_id: int
+) -> str | None:
     settings = get_settings()
     if not settings.celery_enabled:
         return
@@ -466,6 +519,7 @@ async def _advance_session_task(*, workspace_uuid: str, flow_uuid: str, session_
             "stopped_reason": stopped_reason,
         },
     )
+    return stopped_reason
 
 
 async def _link_identidade_person_mailing_task(

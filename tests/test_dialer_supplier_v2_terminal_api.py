@@ -233,7 +233,7 @@ async def test_archived_terminal_callback_is_accepted_without_resuming_active_ca
         persist_callback,
     )
     monkeypatch.setattr(
-        orch_api.advance_session_task,
+        orch_api.resume_dialer_supplier_v2_terminal_task,
         "apply_async",
         lambda **kwargs: enqueued.append(kwargs),
     )
@@ -299,7 +299,7 @@ async def test_active_terminal_callback_keeps_existing_resume_contract(
         persist_callback,
     )
     monkeypatch.setattr(
-        orch_api.advance_session_task,
+        orch_api.resume_dialer_supplier_v2_terminal_task,
         "apply_async",
         lambda **kwargs: enqueued.append(kwargs),
     )
