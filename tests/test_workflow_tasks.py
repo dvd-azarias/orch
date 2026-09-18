@@ -41,6 +41,10 @@ class _DummySessionContext:
         ("api_call_missing_url", "workflow_m2_api_call_missing_url"),
         ("contact_member_scope_not_found", "workflow_m2_contact_member_scope_not_found"),
         ("contact_member_routing_update_failed", "workflow_m2_contact_member_routing_update_failed"),
+        (
+            "identidade_person_invalid_document",
+            "workflow_m2_identidade_person_invalid_document",
+        ),
     ],
 )
 async def test_advance_session_commits_terminal_failure_alarm(

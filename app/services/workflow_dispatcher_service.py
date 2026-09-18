@@ -72,6 +72,15 @@ TERMINAL_FAILURE_STOP_REASONS = {
     "wait_for_event_invalid_output_var",
     "wait_for_event_state_mismatch",
 } | RESTRICTION_LIST_CHECK_ERROR_CODES
+
+
+def is_terminal_failure_stop_reason(stopped_reason: str) -> bool:
+    return (
+        stopped_reason in TERMINAL_FAILURE_STOP_REASONS
+        or stopped_reason.startswith("identidade_person_")
+    )
+
+
 FATAL_NON_RESUMABLE_STOP_REASONS = {
     "flow_not_found",
     "revision_not_found",
@@ -141,7 +150,7 @@ async def advance_session_once(
                 )
             return stopped_reason
 
-        if stopped_reason in TERMINAL_FAILURE_STOP_REASONS:
+        if is_terminal_failure_stop_reason(stopped_reason):
             await mark_session_finished(
                 db_session,
                 session_id=session_id,

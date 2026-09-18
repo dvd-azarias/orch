@@ -1,5 +1,28 @@
 # Maintenance Log
 
+## 2026-09-18 — Falha determinística do Identidade sem branch de exceção
+
+Classificação: `ALPHA_FIX_REQUIRED`, mudança cirúrgica e sem migration.
+
+- o canário publicado `f64891f1-5ac9-4b89-8312-f4c437e88ec2` confirmou consulta
+  externa, `upsert`, criação, enriquecimento, `not_found` e repetição sem
+  duplicar a pessoa local;
+- a prova negativa com documento inválido revelou que um
+  `WorkflowExecutionError` do `identidade_person` sem branch `exception`
+  escapava da task e deixava a sessão elegível para novo dispatch;
+- a sessão canária `8236` foi contida pelo endpoint oficial de `unassign`; o
+  contador estabilizou em 735 métricas de executor e não voltou a crescer;
+- a correção reconhece qualquer código `identidade_person_*` como terminal
+  depois das tentativas internas quando não existe branch e mantém intacto o
+  caminho explícito de exceção quando ele existe;
+- validação local: `175 passed` na regressão direcionada; a suíte completa do
+  branch obteve `849 passed, 27 failed`, enquanto o `origin/main` limpo obteve
+  `847 passed, 26 failed`; todas as falhas adicionais reproduzidas
+  isoladamente no baseline pertencem à instabilidade/baseline já existente.
+
+Rollout e canário pós-deploy permanecem pendentes. O rollback é a reversão
+deste patch; nenhuma estrutura de dados ou contrato de sucesso foi alterado.
+
 ## 2026-09-17 — Gate 2 de callbacks e retomada SMS/RCS pela Supplier V2
 
 Classificação: `ALPHA_FIX_OPTIONAL`, opt-in, alto risco e sem migration.

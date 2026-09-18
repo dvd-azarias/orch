@@ -28,9 +28,9 @@ from app.services.identidade_person_flow_link_service import link_identidade_mai
 from app.services.session_metrics_service import persist_session_metrics
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
 from app.services.workflow_dispatcher_service import (
-    TERMINAL_FAILURE_STOP_REASONS,
     advance_session_once,
     dispatch_pending_sessions,
+    is_terminal_failure_stop_reason,
 )
 
 logger = get_logger(__name__)
@@ -459,7 +459,7 @@ async def _advance_session_task(
                 session_id=session_id,
             )
             status = "success"
-            if stopped_reason in TERMINAL_FAILURE_STOP_REASONS:
+            if is_terminal_failure_stop_reason(stopped_reason):
                 status = "error"
                 await persist_alarm(
                     db_session,

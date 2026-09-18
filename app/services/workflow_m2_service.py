@@ -283,6 +283,12 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "wait_for_event_invalid_output_var",
     "wait_for_event_state_mismatch",
 }
+
+
+def _is_terminal_workflow_error_code(code: str) -> bool:
+    return code in TERMINAL_WORKFLOW_ERROR_CODES or code.startswith("identidade_person_")
+
+
 RESTRICTION_LIST_CHECK_ERROR_CODES = {
     code
     for code in TERMINAL_WORKFLOW_ERROR_CODES
@@ -10726,7 +10732,7 @@ async def execute_workflow_m2_for_session(
                 if (
                     branch_label is None
                     and isinstance(exc, WorkflowExecutionError)
-                    and exc.code in TERMINAL_WORKFLOW_ERROR_CODES
+                    and _is_terminal_workflow_error_code(exc.code)
                 ):
                     failed_at = datetime.now(timezone.utc)
                     failed_card_uuid = next_card_uuid
