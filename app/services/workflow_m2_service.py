@@ -9180,6 +9180,40 @@ async def execute_workflow_m2_for_session(
             component = components.get(next_card_uuid)
             if component is None:
                 step_finished_at = datetime.now(timezone.utc)
+                missing_component_ref_id = str(next_card_uuid)
+                workflow_meta = _ensure_workflow_meta(runtime_variables)
+                workflow_meta["terminal_failure"] = {
+                    "code": "component_not_found",
+                    "message": "A revisão da sessão aponta para um card inexistente.",
+                    "missing_component_ref_id": missing_component_ref_id,
+                    "failed_at": step_finished_at.isoformat(),
+                }
+                _set_cursors(
+                    runtime_variables,
+                    last_cursor=last_card_uuid,
+                    next_cursor=None,
+                )
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(last_card_uuid),
+                    next_card_uuid=None,
+                    ended_at=step_finished_at,
+                    state=3,
+                )
+                logger.error(
+                    "workflow m2 component referenced by revision was not found",
+                    extra={
+                        "event": "orch.workflow.m2.component_not_found",
+                        "flow_uuid": flow_uuid,
+                        "session_id": session_id,
+                        "session_uuid": session_uuid_for_metrics,
+                        "revision_id": str(selected_revision.get("id") or "") or None,
+                        "missing_component_ref_id": missing_component_ref_id,
+                        "last_card_uuid": last_card_uuid,
+                    },
+                )
                 _append_metric(
                     metric_type="card",
                     status="error",
@@ -9192,7 +9226,13 @@ async def execute_workflow_m2_for_session(
                     component_kind_value=None,
                 )
                 return await _finalize(
-                    WorkflowExecutionResult(True, executed_steps, "component_not_found", last_card_uuid, next_card_uuid)
+                    WorkflowExecutionResult(
+                        True,
+                        executed_steps,
+                        "component_not_found",
+                        last_card_uuid,
+                        None,
+                    )
                 )
 
             kind = component_kind(component)
