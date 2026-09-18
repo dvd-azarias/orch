@@ -261,6 +261,7 @@ def test_person_scope_rejects_outbound_channel_component() -> None:
 def test_contact_member_terminal_failures_have_inline_alarms() -> None:
     scope_alarm = m2_alarm_from_stopped_reason("contact_member_scope_not_found")
     update_alarm = m2_alarm_from_stopped_reason("contact_member_routing_update_failed")
+    identity_alarm = m2_alarm_from_stopped_reason("contact_person_identity_conflict")
     person_scope_alarm = m2_alarm_from_stopped_reason(
         "person_scope_channel_component_not_supported"
     )
@@ -277,6 +278,11 @@ def test_contact_member_terminal_failures_have_inline_alarms() -> None:
         "error",
         "workflow_m2_contact_member_routing_update_failed",
         "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
+    )
+    assert identity_alarm == (
+        "error",
+        "workflow_m2_contact_person_identity_conflict",
+        "Sessão encerrada porque um card retornou pessoa diferente da identidade já adotada.",
     )
     assert person_scope_alarm == (
         "error",

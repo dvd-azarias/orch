@@ -263,6 +263,12 @@ def m2_alarm_from_stopped_reason(stopped_reason: str) -> tuple[str, str, str] | 
             "workflow_m2_contact_member_routing_update_failed",
             "Sessão encerrada porque o membro contextual deixou de estar ativo durante o roteamento.",
         )
+    if stopped_reason == "contact_person_identity_conflict":
+        return (
+            "error",
+            "workflow_m2_contact_person_identity_conflict",
+            "Sessão encerrada porque um card retornou pessoa diferente da identidade já adotada.",
+        )
     if stopped_reason in {"pinned_revision_invalid", "pinned_revision_not_found"}:
         return (
             "error",

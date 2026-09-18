@@ -72,6 +72,33 @@ def _person(**overrides) -> dict:
     return person
 
 
+def test_person_adoption_rejects_identity_change_after_bootstrap() -> None:
+    runtime: dict = {"variables": {"customs": {}}}
+    workflow._adopt_person_runtime_scope(
+        runtime_variables=runtime,
+        person=_person(),
+        contact_row=None,
+        source_component_kind="create_contact",
+        source_component_ref_id="create-contact-1",
+    )
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        workflow._adopt_person_runtime_scope(
+            runtime_variables=runtime,
+            person=_person(
+                uuid="cccccccc-cccc-cccc-cccc-cccccccccccc",
+                identifier="10987654321",
+            ),
+            contact_row=None,
+            source_component_kind="identidade_person",
+            source_component_ref_id="identidade-person-1",
+        )
+
+    assert exc_info.value.code == "contact_person_identity_conflict"
+    assert runtime["workflow_v2"]["person_adoption"]["person_uuid"] == PERSON_UUID
+    assert runtime["variables"]["contact"]["identifier"] == "12345678901"
+
+
 def test_build_payload_renderiza_campos_e_extras_aninhados() -> None:
     payload, configured = workflow._build_create_contact_payload(
         mapping=[
@@ -275,6 +302,11 @@ async def test_upsert_cria_pessoa_sem_canal_lista_ou_sessao_filha(monkeypatch) -
         "full_name",
         "extra.segment",
     ]
+    assert runtime["variables"]["contact"]["person_uuid"] == PERSON_UUID
+    assert runtime["variables"]["contact"]["channel_address"] is None
+    assert runtime["workflow_v2"]["person_adoption"]["source_component_kind"] == (
+        "create_contact"
+    )
 
 
 @pytest.mark.asyncio
@@ -490,3 +522,362 @@ async def test_execute_workflow_routes_create_contact_by_new_branch(monkeypatch)
     assert result.last_card_uuid == finish_ref
     assert runtime["variables"]["customs"]["contact_action"]["action"] == "updated"
     assert any(item.get("next_card_uuid") == finish_ref for item in persisted)
+
+
+@pytest.mark.asyncio
+async def test_unbound_person_bootstrap_create_adopts_person_and_finishes(monkeypatch) -> None:
+    create_ref = "31111111-1111-1111-1111-111111111111"
+    finish_ref = "32222222-2222-2222-2222-222222222222"
+    definition = {
+        "components": [
+            {
+                **_component(identifier="{{payload.identifier}}"),
+                "ref_id": create_ref,
+            },
+            {"ref_id": finish_ref, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [{"from": create_ref, "to": finish_ref, "branch": "created"}],
+    }
+    runtime = {
+        "input_payload": {"session_scope": "person"},
+        "workflow_v2": {"flow_id": FLOW_UUID, "next_card_cursor": create_ref},
+        "variables": {
+            "payload": {
+                "identifier": "12345678901",
+                "name": "Nome Novo",
+                "segment": "premium",
+            },
+            "customs": {},
+        },
+    }
+    persisted: list[dict] = []
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        def begin_nested(self) -> _Transaction:
+            return _Transaction()
+
+        async def execute(self, *_args, **_kwargs) -> _Result:
+            return _Result()
+
+    monkeypatch.setattr(workflow, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(workflow, "fetch_flow_row", AsyncMock(return_value={"id": FLOW_UUID}))
+    monkeypatch.setattr(
+        workflow,
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={
+                    "id": "3ccccccc-cccc-cccc-cccc-cccccccccccc",
+                    "definition": definition,
+                },
+                source="pinned",
+                requested_revision_id="3ccccccc-cccc-cccc-cccc-cccccccccccc",
+                failure_reason=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_session_workflow_state",
+        AsyncMock(
+            return_value={
+                "uuid": "3ddddddd-dddd-dddd-dddd-dddddddddddd",
+                "state": 0,
+                "runtime_variables": runtime,
+                "last_card_uuid": None,
+                "next_card_uuid": create_ref,
+                "frozen_until": None,
+            }
+        ),
+    )
+    fetch_context = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        workflow,
+        "fetch_contact_runtime_context_for_session",
+        fetch_context,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_create_contact_person_by_identifier_for_update",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "insert_create_contact_person_if_missing",
+        AsyncMock(return_value=_person(full_name="Nome Novo", extras={"segment": "premium"})),
+    )
+
+    async def _replace(*_args, **kwargs) -> None:
+        persisted.append(kwargs)
+
+    monkeypatch.setattr(workflow, "replace_session_workflow_state", _replace)
+    monkeypatch.setattr(workflow, "persist_session_metrics", AsyncMock())
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=301,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    assert result.executed_steps == 2
+    assert fetch_context.await_count == 0
+    assert runtime["workflow_v2"]["person_adoption"]["person_uuid"] == PERSON_UUID
+    assert runtime["variables"]["contact"]["contact_list_member_id"] is None
+    assert runtime["variables"]["contact"]["channel_address"] is None
+    assert runtime["variables"]["system"]["contact"]["identifier"] == "12345678901"
+    assert persisted[-1]["state"] == 3
+
+
+@pytest.mark.asyncio
+async def test_unbound_person_allows_membership_only_after_adoption(monkeypatch) -> None:
+    create_ref = "41111111-1111-1111-1111-111111111111"
+    membership_ref = "42222222-2222-2222-2222-222222222222"
+    finish_ref = "43333333-3333-3333-3333-333333333333"
+    definition = {
+        "components": [
+            {
+                **_component(identifier="{{payload.identifier}}"),
+                "ref_id": create_ref,
+            },
+            {
+                "ref_id": membership_ref,
+                "component_id": "source_list_membership",
+                "parameters": {},
+            },
+            {"ref_id": finish_ref, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": create_ref, "to": membership_ref, "branch": "created"},
+            {"from": membership_ref, "to": finish_ref, "branch": "changed"},
+        ],
+    }
+    runtime = {
+        "input_payload": {"session_scope": "person"},
+        "workflow_v2": {"flow_id": FLOW_UUID, "next_card_cursor": create_ref},
+        "variables": {
+            "payload": {
+                "identifier": "12345678901",
+                "name": "Nome Novo",
+                "segment": "premium",
+            },
+            "customs": {},
+        },
+    }
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        def begin_nested(self) -> _Transaction:
+            return _Transaction()
+
+        async def execute(self, *_args, **_kwargs) -> _Result:
+            return _Result()
+
+    monkeypatch.setattr(workflow, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(workflow, "fetch_flow_row", AsyncMock(return_value={"id": FLOW_UUID}))
+    monkeypatch.setattr(
+        workflow,
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={
+                    "id": "4ccccccc-cccc-cccc-cccc-cccccccccccc",
+                    "definition": definition,
+                },
+                source="pinned",
+                requested_revision_id="4ccccccc-cccc-cccc-cccc-cccccccccccc",
+                failure_reason=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_session_workflow_state",
+        AsyncMock(
+            return_value={
+                "uuid": "4ddddddd-dddd-dddd-dddd-dddddddddddd",
+                "state": 0,
+                "runtime_variables": runtime,
+                "last_card_uuid": None,
+                "next_card_uuid": create_ref,
+                "frozen_until": None,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_create_contact_person_by_identifier_for_update",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "insert_create_contact_person_if_missing",
+        AsyncMock(return_value=_person(full_name="Nome Novo")),
+    )
+    run_membership = AsyncMock(return_value="changed")
+    monkeypatch.setattr(workflow, "_run_source_list_membership", run_membership)
+    monkeypatch.setattr(workflow, "replace_session_workflow_state", AsyncMock())
+    monkeypatch.setattr(workflow, "persist_session_metrics", AsyncMock())
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=401,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    assert result.executed_steps == 3
+    run_membership.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unbound_person_blocks_selector_without_materialized_member(monkeypatch) -> None:
+    create_ref = "51111111-1111-1111-1111-111111111111"
+    selector_ref = "52222222-2222-2222-2222-222222222222"
+    definition = {
+        "components": [
+            {
+                **_component(identifier="{{payload.identifier}}"),
+                "ref_id": create_ref,
+            },
+            {
+                "ref_id": selector_ref,
+                "component_id": "select_contact_channel",
+                "parameters": {},
+            },
+        ],
+        "branches": [
+            {"from": create_ref, "to": selector_ref, "branch": "created"},
+        ],
+    }
+    runtime = {
+        "input_payload": {"session_scope": "person"},
+        "workflow_v2": {"flow_id": FLOW_UUID, "next_card_cursor": create_ref},
+        "variables": {
+            "payload": {
+                "identifier": "12345678901",
+                "name": "Nome Novo",
+                "segment": "premium",
+            },
+            "customs": {},
+        },
+    }
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+        def begin_nested(self) -> _Transaction:
+            return _Transaction()
+
+        async def execute(self, *_args, **_kwargs) -> _Result:
+            return _Result()
+
+    monkeypatch.setattr(workflow, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(workflow, "fetch_flow_row", AsyncMock(return_value={"id": FLOW_UUID}))
+    monkeypatch.setattr(
+        workflow,
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={
+                    "id": "5ccccccc-cccc-cccc-cccc-cccccccccccc",
+                    "definition": definition,
+                },
+                source="pinned",
+                requested_revision_id="5ccccccc-cccc-cccc-cccc-cccccccccccc",
+                failure_reason=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_session_workflow_state",
+        AsyncMock(
+            return_value={
+                "uuid": "5ddddddd-dddd-dddd-dddd-dddddddddddd",
+                "state": 0,
+                "runtime_variables": runtime,
+                "last_card_uuid": None,
+                "next_card_uuid": create_ref,
+                "frozen_until": None,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_create_contact_person_by_identifier_for_update",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "insert_create_contact_person_if_missing",
+        AsyncMock(return_value=_person(full_name="Nome Novo")),
+    )
+    run_selector = AsyncMock()
+    monkeypatch.setattr(workflow, "_run_select_contact_channel", run_selector)
+    replace = AsyncMock()
+    monkeypatch.setattr(workflow, "replace_session_workflow_state", replace)
+    monkeypatch.setattr(workflow, "persist_session_metrics", AsyncMock())
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=501,
+    )
+
+    assert result.stopped_reason == "contact_member_scope_not_found"
+    assert result.executed_steps == 2
+    assert result.next_card_uuid is None
+    run_selector.assert_not_awaited()
+    assert runtime["workflow_v2"]["terminal_failure"]["component_kind"] == (
+        "select_contact_channel"
+    )
+    assert replace.await_args.kwargs["state"] == 3

@@ -169,7 +169,102 @@ async def test_identidade_upsert_creates_person_and_adds_to_selected_mailing(mon
     result = runtime["variables"]["customs"]["identidade"]
     assert result["local_action"]["status"] == "created"
     assert result["mailing_action"]["status"] == "added"
+    assert runtime["variables"]["contact"]["person_uuid"] == (
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    )
+    assert runtime["variables"]["contact"]["channel_address"] is None
+    assert runtime["workflow_v2"]["person_adoption"]["source_component_kind"] == (
+        "identidade_person"
+    )
     membership.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unbound_person_bootstrap_identidade_not_found_can_finish(monkeypatch) -> None:
+    flow_uuid = "63333333-3333-3333-3333-333333333333"
+    identidade_ref = "61111111-1111-1111-1111-111111111111"
+    finish_ref = "62222222-2222-2222-2222-222222222222"
+    definition = {
+        "components": [
+            {"ref_id": identidade_ref, "component_id": "identidade_person", "parameters": {}},
+            {"ref_id": finish_ref, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": identidade_ref, "to": finish_ref, "branch": "nao_encontrado"}
+        ],
+    }
+    runtime = {
+        "input_payload": {"session_scope": "person"},
+        "workflow_v2": {"flow_id": flow_uuid, "next_card_cursor": identidade_ref},
+        "variables": {"payload": {"document": "12345678901"}, "customs": {}},
+    }
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class Session:
+        def in_transaction(self) -> bool:
+            return False
+
+        def begin(self) -> Transaction:
+            return Transaction()
+
+        async def execute(self, *_args, **_kwargs) -> Result:
+            return Result()
+
+    monkeypatch.setattr(workflow, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(workflow, "fetch_flow_row", AsyncMock(return_value={"id": flow_uuid}))
+    monkeypatch.setattr(
+        workflow,
+        "resolve_workflow_revision_for_session",
+        AsyncMock(
+            return_value=WorkflowRevisionResolution(
+                revision={
+                    "id": "64444444-4444-4444-4444-444444444444",
+                    "definition": definition,
+                },
+                source="pinned",
+                requested_revision_id="64444444-4444-4444-4444-444444444444",
+                failure_reason=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_session_workflow_state",
+        AsyncMock(
+            return_value={
+                "uuid": "65555555-5555-5555-5555-555555555555",
+                "state": 0,
+                "runtime_variables": runtime,
+                "last_card_uuid": None,
+                "next_card_uuid": identidade_ref,
+                "frozen_until": None,
+            }
+        ),
+    )
+    run_identidade = AsyncMock(return_value="nao_encontrado")
+    monkeypatch.setattr(workflow, "_run_identidade_person", run_identidade)
+    monkeypatch.setattr(workflow, "replace_session_workflow_state", AsyncMock())
+    monkeypatch.setattr(workflow, "persist_session_metrics", AsyncMock())
+
+    result = await workflow.execute_workflow_m2_for_session(
+        Session(),
+        flow_uuid=flow_uuid,
+        session_id=601,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    assert result.executed_steps == 2
+    assert run_identidade.await_args.kwargs["contact_row"] is None
 
 
 @pytest.mark.asyncio

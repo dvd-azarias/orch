@@ -1,5 +1,56 @@
 # Maintenance Log
 
+## 2026-09-18 — Bootstrap e adoção de pessoa nos cards de contato
+
+Classificação: `ALPHA_FIX_REQUIRED`, branch
+`feat/contact-person-bootstrap-adoption`, mudança cirúrgica no runtime ORCH,
+sem migration, fila, endpoint ou alteração no Target Core.
+
+- sessões `person` iniciadas por webhook sem membro operacional passam a
+  aceitar somente `create_contact`, `identidade_person` e encerramento
+  explícito antes da adoção;
+- a adoção exige pessoa local com UUID e identificador canônicos, atualiza
+  `variables.contact`, `variables.customs.contact` e registra
+  `workflow_v2.person_adoption` sem fabricar membro, endereço ou atuador;
+- `lookup_only` e `not_found` não adotam identidade inexistente;
+- depois da adoção, `source_list_membership` pode operar, mas seletores e
+  consumidores continuam fail-closed enquanto não existir membro contextual;
+- tentativa de substituir a pessoa ancorada/adotada termina com
+  `contact_person_identity_conflict`, alarme explícito e sem mutar a identidade;
+- o dispatcher reconhece tanto esse conflito quanto a ausência de membro como
+  falhas terminais, impedindo retry infinito.
+
+Validação:
+
+- regressão direcionada final de criação, Identidade, escopo, seletor e tasks:
+  `228 passed`;
+- antes da última prova unitária, a suíte completa do branch obteve
+  `856 passed, 26 failed`; os mesmos 26 node IDs foram reproduzidos nos oito
+  arquivos equivalentes do `origin/main` limpo (`26 failed, 1 passed`), logo
+  nenhuma falha nova foi atribuída ao patch;
+- a repetição final da suíte integral foi interrompida porque o PostgreSQL
+  `10.1.20.244:6432` deixou de responder até o timeout, inclusive fora da
+  sandbox; essa indisponibilidade não invalida a regressão direcionada nem o
+  E2E já concluído antes da queda;
+- `compileall` e `git diff --check` passaram;
+- canário A `75a5372a-89c7-45c5-9037-6773a5fa3564`, sessões `8341`/`8342`:
+  `create_contact -> finish_flow`, criação e repetição idempotente, pessoa
+  `0 -> 1`, zero alarmes;
+- canário F1 `8454c7e0-fd3d-4dd7-ae59-b4eb7e5138c8`, sessões `8343`/`8344`:
+  `create_contact -> source_list_membership -> finish_flow`, vínculo
+  idempotente e `sessions_created=0` nas duas execuções;
+- canário B `f64891f1-5ac9-4b89-8312-f4c437e88ec2`, sessão `8345`:
+  `identidade_person -> finish_flow`, enriquecimento e adoção da pessoa
+  existente, contagem `1 -> 1`, zero alarmes;
+- todas as cinco sessões terminaram em `state=3`, sem falha terminal e sem
+  sessão filha. Para obter prova determinística no workspace compartilhado, a
+  API local executou M2 de forma síncrona e os workers permaneceram em filas
+  dedicadas; execuções anteriores disputadas pelo dispatcher remoto foram
+  descartadas como evidência.
+
+O patch permanece local, sem commit, deploy ou rollout. Rollback é somente de
+código e não exige compensação de dados.
+
 ## 2026-09-18 — Falha determinística do Identidade sem branch de exceção
 
 Classificação: `ALPHA_FIX_REQUIRED`, mudança cirúrgica e sem migration.
