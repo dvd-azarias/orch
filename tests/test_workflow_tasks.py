@@ -38,6 +38,7 @@ class _DummySessionContext:
     ("stopped_reason", "alarm_code"),
     [
         ("condition_branch_not_mapped", "workflow_m2_condition_branch_not_mapped"),
+        ("component_not_found", "workflow_m2_component_not_found"),
         ("api_call_missing_url", "workflow_m2_api_call_missing_url"),
         ("contact_member_scope_not_found", "workflow_m2_contact_member_scope_not_found"),
         ("contact_member_routing_update_failed", "workflow_m2_contact_member_routing_update_failed"),

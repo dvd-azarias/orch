@@ -47,6 +47,7 @@ FINAL_STOP_REASONS = {
 TERMINAL_FAILURE_STOP_REASONS = {
     "api_call_missing_url",
     "condition_branch_not_mapped",
+    "component_not_found",
     "contact_member_scope_not_found",
     "contact_member_routing_update_failed",
     "pinned_revision_invalid",
@@ -85,7 +86,6 @@ FATAL_NON_RESUMABLE_STOP_REASONS = {
     "flow_not_found",
     "revision_not_found",
     "session_not_found",
-    "component_not_found",
     "loop_guard_repeat_limit",
 }
 
