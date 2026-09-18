@@ -175,3 +175,90 @@ async def test_api_call_missing_runtime_url_terminalizes_without_exception_branc
     metrics = persist_metrics.await_args.kwargs["metrics"]
     assert metrics[-2]["status"] == "error"
     assert metrics[-2]["stopped_reason"] == "api_call_missing_url"
+
+
+@pytest.mark.asyncio
+async def test_identidade_error_terminalizes_without_exception_branch(monkeypatch) -> None:
+    runtime = _runtime()
+    definition = {
+        "components": [
+            {"ref_id": API_REF, "component_id": "identidade_person", "parameters": {}}
+        ],
+        "branches": [],
+    }
+    persisted, persist_metrics = _configure_execution(
+        monkeypatch,
+        definition=definition,
+        runtime=runtime,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_run_identidade_person",
+        AsyncMock(
+            side_effect=workflow.WorkflowExecutionError(
+                "identidade_person_invalid_document",
+                "Documento inválido.",
+            )
+        ),
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "identidade_person_invalid_document"
+    assert result.last_card_uuid == API_REF
+    assert result.next_card_uuid is None
+    assert runtime["workflow_v2"]["terminal_failure"]["code"] == (
+        "identidade_person_invalid_document"
+    )
+    assert persisted[-1]["state"] == 3
+    assert persisted[-1]["ended_at"] is not None
+    assert persisted[-1]["next_card_uuid"] is None
+    metrics = persist_metrics.await_args.kwargs["metrics"]
+    assert metrics[-2]["status"] == "error"
+    assert metrics[-2]["stopped_reason"] == "identidade_person_invalid_document"
+
+
+@pytest.mark.asyncio
+async def test_identidade_error_preserves_exception_branch(monkeypatch) -> None:
+    runtime = _runtime()
+    definition = {
+        "components": [
+            {"ref_id": API_REF, "component_id": "identidade_person", "parameters": {}},
+            {"ref_id": FINISH_REF, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [{"from": API_REF, "to": FINISH_REF, "branch": "exception"}],
+    }
+    persisted, _persist_metrics = _configure_execution(
+        monkeypatch,
+        definition=definition,
+        runtime=runtime,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_run_identidade_person",
+        AsyncMock(
+            side_effect=workflow.WorkflowExecutionError(
+                "identidade_person_invalid_document",
+                "Documento inválido.",
+            )
+        ),
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    assert result.last_card_uuid == FINISH_REF
+    assert result.next_card_uuid is None
+    assert runtime["identidade_person_last_error"]["code"] == (
+        "identidade_person_invalid_document"
+    )
+    assert "terminal_failure" not in runtime["workflow_v2"]
+    assert persisted[-1]["state"] == 3
