@@ -50,6 +50,7 @@ TERMINAL_FAILURE_STOP_REASONS = {
     "component_not_found",
     "contact_member_scope_not_found",
     "contact_member_routing_update_failed",
+    "contact_person_identity_conflict",
     "pinned_revision_invalid",
     "pinned_revision_not_found",
     "send_with_dialer_handoff_invalid_answer_action",

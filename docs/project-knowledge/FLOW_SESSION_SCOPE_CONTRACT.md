@@ -40,6 +40,9 @@ documentada abaixo, sem criar branch novo no canvas.
 11. Combinações inconsistentes devem ser recusadas no save/publish com `422`;
     os guards de runtime permanecem como segunda barreira fail-closed.
 12. Nenhum fallback silencioso de V2 para V1 é permitido.
+13. Uma sessão `person` iniciada por webhook pode começar sem pessoa ou membro
+    materializado, mas somente cards explícitos de bootstrap podem operar antes
+    da adoção de uma pessoa local canônica.
 
 ## Semântica dos modos
 
@@ -60,7 +63,8 @@ documentada abaixo, sem criar branch novo no canvas.
 ### `person`
 
 - uma pessoa produz uma sessão lógica para o flow;
-- a sessão começa sem `selected_contact_channel` ativo;
+- a sessão começa sem `selected_contact_channel` ativo e pode, no caminho de
+  webhook, ainda não possuir pessoa local materializada;
 - cards de efeito por pessoa podem executar uma única vez;
 - todo consumidor de canal exige seleção explícita compatível em todos os
   caminhos que chegam ao card;
@@ -70,6 +74,36 @@ documentada abaixo, sem criar branch novo no canvas.
 - dois discadores consecutivos reutilizam o mesmo telefone quando não existe
   novo seletor entre eles;
 - para trocar o telefone, o grafo deve passar por um seletor `next_eligible`.
+
+## Bootstrap de pessoa sem membro operacional
+
+Uma sessão `person` disparada por webhook pode receber apenas identificadores
+ou dados brutos. Nesse estado, o ORCH permite uma superfície inicial mínima:
+
+- `create_contact`, para localizar, criar ou atualizar a pessoa local;
+- `identidade_person`, para consultar a origem e, quando configurado para
+  persistir, localizar, criar ou enriquecer a pessoa local;
+- `finish_flow`, para encerrar de forma explícita os caminhos `not_found` ou
+  equivalentes que não materializam uma pessoa.
+
+A adoção ocorre somente depois que o card retorna uma pessoa local com UUID e
+identificador canônicos. O runtime então registra
+`workflow_v2.person_adoption` e atualiza `variables.contact` e
+`variables.customs.contact`. `lookup_only`, `not_found` ou uma resposta externa
+sem pessoa local não produzem adoção.
+
+Depois da adoção, `source_list_membership` pode vincular ou atualizar a pessoa
+na lista. Essa operação não cria sessão filha, não faz fan-out e não transforma
+automaticamente o vínculo em membro operacional da sessão atual.
+
+Enquanto não existir um `contact_list_member_id` real e contextual:
+
+- seletores e consumidores de canal continuam bloqueados em modo fail-closed;
+- nenhum endereço, membro ou `linked_actuator` é fabricado pelo bootstrap;
+- uma tentativa posterior de trocar o UUID ou identificador da pessoa adotada
+  termina com `contact_person_identity_conflict` e gera alarme;
+- uma sessão que já nasceu ancorada a uma pessoa só aceita o mesmo UUID e
+  identificador retornados pelo card.
 
 ## Taxonomia normativa dos cards
 
@@ -331,6 +365,12 @@ alteração de dados será feita como efeito colateral do rollout.
 | `channel`, dois discadores na mesma sessão | ambos usam o telefone âncora; nenhuma troca |
 | `channel` com `next_eligible` | `422` no save/publish |
 | `person`, consumidor sem seletor em um dos caminhos | `422` apontando o consumidor |
+| `person` sem membro, `create_contact -> finish_flow` | pessoa local adotada; uma sessão; nenhum canal fabricado |
+| `person` sem membro, `identidade_person(found/upsert) -> finish_flow` | pessoa local adotada; repetição não duplica pessoa |
+| `person` sem membro, `identidade_person(not_found) -> finish_flow` | encerramento normal sem adoção fictícia |
+| `person` adotada, `source_list_membership -> finish_flow` | vínculo idempotente; nenhuma sessão filha |
+| `person` adotada sem membro, seletor/consumidor | falha terminal antes do efeito de canal |
+| card retorna pessoa diferente da já adotada | `contact_person_identity_conflict`, sem troca silenciosa |
 | `person`, dois discadores sem novo seletor | ambos usam a seleção atual |
 | `person`, `respect_dial_rule` + `next_phone` | próximo telefone elegível selecionado uma vez |
 | `person`, `respect_dial_rule` sem autorização | `blocked_by_policy`/falha explícita, sem discagem |
@@ -344,9 +384,9 @@ alteração de dados será feita como efeito colateral do rollout.
 
 ## Pontos de atenção adicionais
 
-- `create_contact` não troca implicitamente a pessoa da sessão. Criar outra
-  pessoa e depois executar o seletor ainda usa o contexto original; não assumir
-  adoção implícita.
+- `create_contact` e `identidade_person` podem adotar a pessoa somente no
+  bootstrap `person` sem vínculo ou confirmar a identidade já ancorada. Eles
+  nunca podem trocar uma pessoa já adotada por outra.
 - `source_list_membership(active)` não cria sessões filhas e não garante que um
   canal recém-adicionado esteja materializado para seleção imediata.
 - o callback genérico atual escolhe a sessão ativa mais recente por
@@ -355,6 +395,28 @@ alteração de dados será feita como efeito colateral do rollout.
 - retornar ao mesmo card de discador depois de trocar telefone exige uma nova
   geração de ciclo ou uma restrição explícita. A chave atual por sessão,
   revisão e card não deve reaproveitar silenciosamente um ciclo terminal.
+
+## Evidência do bootstrap de contatos
+
+Em 2026-09-18, três canários `person` do workspace Highcomm foram executados
+pela stack local completa com filas dedicadas e API local síncrona para impedir
+que o dispatcher remoto do workspace compartilhado disputasse as sessões:
+
+- A — `75a5372a-89c7-45c5-9037-6773a5fa3564`: sessões `8341` e `8342`
+  percorreram `create_contact -> finish_flow`; a primeira criou e a segunda
+  reutilizou a pessoa, com contagem `0 -> 1`, adoção registrada, zero alarmes e
+  nenhum canal fabricado;
+- F1 — `8454c7e0-fd3d-4dd7-ae59-b4eb7e5138c8`: sessões `8343` e `8344`
+  percorreram `create_contact -> source_list_membership -> finish_flow`; criação
+  e vínculo foram idempotentes, `sessions_created=0` nas duas execuções e a
+  contagem de pessoas permaneceu `0 -> 1`;
+- B — `f64891f1-5ac9-4b89-8312-f4c437e88ec2`: sessão `8345` percorreu
+  `identidade_person -> finish_flow`, encontrou e enriqueceu a pessoa já
+  existente, adotou seu UUID e preservou a contagem `1 -> 1`.
+
+Todas terminaram em `state=3`, sem falha terminal e sem sessão filha. A prova
+negativa automatizada confirma que seletor sem membro materializado falha antes
+do efeito e que uma segunda identidade divergente não substitui a primeira.
 
 ## Continuidade obrigatória
 

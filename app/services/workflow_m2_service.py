@@ -237,7 +237,9 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "check_restriction_lists_target_core_invalid_response",
     "check_restriction_lists_target_core_unavailable",
     "condition_branch_not_mapped",
+    "contact_member_scope_not_found",
     "contact_member_routing_update_failed",
+    "contact_person_identity_conflict",
     "person_scope_channel_component_not_supported",
     "select_contact_channel_invalid_channel_label",
     "select_contact_channel_invalid_channel_type",
@@ -311,6 +313,15 @@ PERSON_SCOPE_CHANNEL_COMPONENT_KINDS = {
     "send_with_whatsapp",
     "send_whatsapp_interactive",
     "send_whatsapp_template",
+}
+UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS = {
+    "create_contact",
+    "finish_flow",
+    "identidade_person",
+}
+UNBOUND_PERSON_ADOPTED_COMPONENT_KINDS = {
+    *UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS,
+    "source_list_membership",
 }
 
 
@@ -514,6 +525,77 @@ def _ensure_person_scope_component_supported(
             "person_scope_channel_component_not_supported",
             "Sessões por pessoa precisam selecionar explicitamente um canal antes de executar componentes de comunicação.",
         )
+
+
+def _adopted_person_identity(
+    runtime_variables: dict[str, Any],
+) -> dict[str, str] | None:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    adoption = (
+        workflow_meta.get("person_adoption")
+        if isinstance(workflow_meta, dict)
+        else None
+    )
+    variables = runtime_variables.get("variables")
+    contact = variables.get("contact") if isinstance(variables, dict) else None
+    if not isinstance(adoption, dict) or not isinstance(contact, dict):
+        return None
+    if str(adoption.get("status") or "").strip().lower() != "adopted":
+        return None
+    try:
+        adopted_uuid = str(UUID(str(adoption.get("person_uuid"))))
+        contact_uuid = str(UUID(str(contact.get("person_uuid"))))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if adopted_uuid != contact_uuid:
+        return None
+    identifier = str(
+        contact.get("identifier") or adoption.get("identifier") or ""
+    ).strip()
+    if not identifier:
+        return None
+    return {"person_uuid": adopted_uuid, "identifier": identifier}
+
+
+def _unbound_person_component_allowed(
+    *,
+    component_kind_value: str,
+    runtime_variables: dict[str, Any],
+) -> bool:
+    if component_kind_value in UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS:
+        return True
+    return (
+        component_kind_value in UNBOUND_PERSON_ADOPTED_COMPONENT_KINDS
+        and _adopted_person_identity(runtime_variables) is not None
+    )
+
+
+def _ensure_unbound_person_component_supported(
+    *,
+    session_scope: str,
+    component_kind_value: str,
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    person_scope_without_selectors: bool,
+) -> None:
+    if (
+        session_scope != "person"
+        or not person_scope_without_selectors
+        or isinstance(contact_row, dict)
+        or _unbound_person_component_allowed(
+            component_kind_value=component_kind_value,
+            runtime_variables=runtime_variables,
+        )
+    ):
+        return
+    raise WorkflowExecutionError(
+        "contact_member_scope_not_found",
+        (
+            "A sessão por pessoa ainda não possui membro operacional. "
+            "Crie ou identifique a pessoa, materialize seu vínculo e selecione "
+            "um canal antes de continuar para este card."
+        ),
+    )
 
 
 def _read_max_steps(settings: Any) -> int:
@@ -4414,6 +4496,144 @@ def _inject_contact_runtime_scope(
     customs["contact"] = contact_payload
 
 
+def _validate_person_adoption_candidate(
+    *,
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    person_uuid: Any = None,
+    identifier: Any = None,
+) -> None:
+    candidate_uuid: str | None = None
+    if person_uuid is not None and str(person_uuid).strip():
+        try:
+            candidate_uuid = str(UUID(str(person_uuid)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise WorkflowExecutionError(
+                "contact_person_identity_conflict",
+                "O card retornou uma referência de pessoa inválida.",
+            ) from exc
+    candidate_identifier = str(identifier or "").strip() or None
+
+    expected_uuid: str | None = None
+    expected_identifier: str | None = None
+    if isinstance(contact_row, dict):
+        raw_expected_uuid = contact_row.get("person_uuid")
+        if raw_expected_uuid is not None and str(raw_expected_uuid).strip():
+            try:
+                expected_uuid = str(UUID(str(raw_expected_uuid)))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise WorkflowExecutionError(
+                    "contact_person_identity_conflict",
+                    "A sessão possui uma referência de pessoa inválida.",
+                ) from exc
+        expected_identifier = str(
+            contact_row.get("contact_identifier") or ""
+        ).strip() or None
+
+    adopted = _adopted_person_identity(runtime_variables)
+    if adopted is not None:
+        expected_uuid = expected_uuid or adopted["person_uuid"]
+        expected_identifier = expected_identifier or adopted["identifier"]
+
+    if (
+        expected_uuid is not None
+        and candidate_uuid is not None
+        and expected_uuid != candidate_uuid
+    ) or (
+        expected_identifier is not None
+        and candidate_identifier is not None
+        and expected_identifier != candidate_identifier
+    ):
+        raise WorkflowExecutionError(
+            "contact_person_identity_conflict",
+            "O card retornou uma pessoa diferente da identidade já adotada pela sessão.",
+        )
+
+
+def _adopt_person_runtime_scope(
+    *,
+    runtime_variables: dict[str, Any],
+    person: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+    source_component_kind: str,
+    source_component_ref_id: str | None,
+) -> None:
+    person_uuid = person.get("uuid") or person.get("person_uuid")
+    identifier = person.get("identifier")
+    if person_uuid is None or not str(person_uuid).strip():
+        raise WorkflowExecutionError(
+            "contact_person_identity_conflict",
+            "A pessoa retornada pelo card não possui UUID canônico.",
+        )
+    _validate_person_adoption_candidate(
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        person_uuid=person_uuid,
+        identifier=identifier,
+    )
+    normalized_person_uuid = str(UUID(str(person_uuid)))
+    normalized_identifier = str(identifier or "").strip()
+    if not normalized_identifier:
+        raise WorkflowExecutionError(
+            "contact_person_identity_conflict",
+            "A pessoa retornada pelo card não possui identificador canônico.",
+        )
+
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    current_contact = (
+        variables.get("contact")
+        if isinstance(variables.get("contact"), dict)
+        else {}
+    )
+    anchored = isinstance(contact_row, dict)
+    birth_date = person.get("birthdate") or person.get("birthday")
+    if isinstance(birth_date, (date, datetime)):
+        birth_date = birth_date.isoformat()
+    contact_payload = {
+        "contact_list_member_id": (
+            current_contact.get("contact_list_member_id") if anchored else None
+        ),
+        "identifier": normalized_identifier,
+        "name": person.get("name") or person.get("full_name"),
+        "full_name": person.get("full_name") or person.get("name"),
+        "gender": person.get("gender"),
+        "country": person.get("country"),
+        "province": person.get("province") or person.get("state"),
+        "city": person.get("city"),
+        "birth_date": birth_date,
+        "age": person.get("age"),
+        "channel_type": current_contact.get("channel_type") if anchored else None,
+        "channel_label": current_contact.get("channel_label") if anchored else None,
+        "channel_address": current_contact.get("channel_address") if anchored else None,
+        "channel": (
+            copy.deepcopy(current_contact.get("channel"))
+            if anchored and isinstance(current_contact.get("channel"), dict)
+            else {"type": None, "label": None, "address": None}
+        ),
+        "person_uuid": normalized_person_uuid,
+        "extra": _build_contact_extra_with_aliases(
+            _normalize_contact_extra_data(
+                person.get("extras") or person.get("extra")
+            )
+        ),
+    }
+    variables["contact"] = contact_payload
+    customs["contact"] = copy.deepcopy(contact_payload)
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    workflow_meta["person_adoption"] = {
+        "status": "adopted",
+        "person_uuid": normalized_person_uuid,
+        "identifier": normalized_identifier,
+        "source_component_kind": source_component_kind,
+        "source_component_ref_id": source_component_ref_id,
+        "adopted_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _inject_callback_runtime_scope(
     *,
     runtime_variables: dict[str, Any],
@@ -6280,6 +6500,7 @@ async def _run_identidade_person(
     flow_uuid: str,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None = None,
 ) -> str | None:
     params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
     component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip()
@@ -6419,6 +6640,11 @@ async def _run_identidade_person(
         )
     except IdentidadePersonServiceError as exc:
         raise WorkflowExecutionError(exc.code, exc.message) from exc
+    _validate_person_adoption_candidate(
+        runtime_variables=runtime_variables,
+        contact_row=contact_row,
+        identifier=normalized_person.get("identifier"),
+    )
     local_action, mailing_action = await _persist_identidade_person_action(
         db_session=db_session,
         flow_uuid=flow_uuid,
@@ -6448,6 +6674,17 @@ async def _run_identidade_person(
         status_code=query_result.status_code,
         attempts=query_result.attempts,
     )
+    if local_action.get("person_uuid"):
+        _adopt_person_runtime_scope(
+            runtime_variables=runtime_variables,
+            person={
+                **normalized_person,
+                "uuid": local_action.get("person_uuid"),
+            },
+            contact_row=contact_row,
+            source_component_kind="identidade_person",
+            source_component_ref_id=component_ref_id,
+        )
     runtime_variables.pop("identidade_person_pending_query", None)
     if mailing_action.get("flow_link") == "pending" and mailing_public_id is not None:
         workflow_meta = _ensure_workflow_meta(runtime_variables)
@@ -6860,6 +7097,11 @@ async def _run_create_contact(
                             person = existing
             else:
                 identifier = _create_contact_identifier(params.get("identifier"), resolution_scope)
+                _validate_person_adoption_candidate(
+                    runtime_variables=runtime_variables,
+                    contact_row=contact_row,
+                    identifier=identifier,
+                )
                 existing = await fetch_create_contact_person_by_identifier_for_update(
                     db_session,
                     identifier=identifier,
@@ -6912,6 +7154,13 @@ async def _run_create_contact(
                                     "A pessoa deixou de estar disponível durante a atualização.",
                                 )
                             branch = "updated"
+            if person is not None:
+                _validate_person_adoption_candidate(
+                    runtime_variables=runtime_variables,
+                    contact_row=contact_row,
+                    person_uuid=person.get("uuid"),
+                    identifier=person.get("identifier") or identifier,
+                )
     except WorkflowExecutionError:
         raise
     except Exception as exc:
@@ -6934,6 +7183,14 @@ async def _run_create_contact(
         output=output,
         component_ref_id=component_ref_id,
     )
+    if person is not None:
+        _adopt_person_runtime_scope(
+            runtime_variables=runtime_variables,
+            person=person,
+            contact_row=contact_row,
+            source_component_kind="create_contact",
+            source_component_ref_id=component_ref_id,
+        )
     runtime_variables.pop("create_contact_last_error", None)
     logger.info(
         "workflow m2 create contact completed",
@@ -8837,10 +9094,27 @@ async def execute_workflow_m2_for_session(
             resolved_contact_list_member_id,
         )
 
+        initial_component = index_components(definition).get(
+            str(session_state.get("next_card_uuid") or "")
+        )
+        initial_component_kind = (
+            component_kind(initial_component)
+            if isinstance(initial_component, dict)
+            else ""
+        )
+        unbound_person_entry_allowed = (
+            person_scope_without_selectors
+            and _unbound_person_component_allowed(
+                component_kind_value=initial_component_kind,
+                runtime_variables=runtime_variables,
+            )
+        )
+
         if (
             contextual_member_routing_enabled
             and (contact_member_scope.explicit or session_scope == "person")
             and contact_runtime_context is None
+            and not unbound_person_entry_allowed
         ):
             failed_at = datetime.now(timezone.utc)
             if person_scope_without_selectors:
@@ -9245,6 +9519,13 @@ async def execute_workflow_m2_for_session(
             branch_label: str | None = None
 
             try:
+                _ensure_unbound_person_component_supported(
+                    session_scope=session_scope,
+                    component_kind_value=kind,
+                    runtime_variables=runtime_variables,
+                    contact_row=contact_runtime_context,
+                    person_scope_without_selectors=person_scope_without_selectors,
+                )
                 _ensure_person_scope_component_supported(
                     session_scope=session_scope,
                     component_kind_value=kind,
@@ -9259,6 +9540,11 @@ async def execute_workflow_m2_for_session(
                             flow_uuid=flow_uuid,
                             component=component,
                             runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
+                        )
+                        _inject_system_runtime_scope(
+                            runtime_variables=runtime_variables,
+                            session_state=session_state,
                             contact_row=contact_runtime_context,
                         )
                     except WorkflowExecutionError as exc:
@@ -10359,6 +10645,12 @@ async def execute_workflow_m2_for_session(
                                 flow_uuid=flow_uuid,
                                 component=component,
                                 runtime_variables=runtime_variables,
+                                contact_row=contact_runtime_context,
+                            )
+                            _inject_system_runtime_scope(
+                                runtime_variables=runtime_variables,
+                                session_state=session_state,
+                                contact_row=contact_runtime_context,
                             )
                         except WorkflowExecutionError as exc:
                             exception_branch = _resolve_component_exception_branch_label(
