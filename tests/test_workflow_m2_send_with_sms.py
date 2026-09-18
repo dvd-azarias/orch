@@ -266,6 +266,8 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_sms_intent(
         channel_supplier_v2_flow_allowlist=(FLOW_UUID,),
         channel_supplier_v2_encryption_key=key,
         channel_supplier_v2_encryption_key_id="v1",
+        channel_supplier_v2_callbacks_enabled=True,
+        channel_supplier_v2_callback_base_url="https://syncwebhook.example.test",
     )
     monkeypatch.setattr(workflow, "get_settings", lambda: enabled_settings)
 
@@ -286,6 +288,8 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_sms_intent(
     plaintext = Fernet(key.encode()).decrypt(intent["envelope_ciphertext"].encode())
     assert b"secret-basic-token" in plaintext
     assert b"5511999990001" in plaintext
+    assert b"syncwebhook.example.test/v1/orch/channel-supplier-v2/callbacks/" in plaintext
+    assert b"callback.invalid" not in plaintext
     assert persisted[-1]["runtime_variables"] is runtime
 
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Header, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Header, Query, Request, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,7 @@ from app.schemas.orch import (
     OrchBillingReprocessRequest,
     OrchBillingReprocessResponse,
     OrchBillingStatusResponse,
+    OrchChannelSupplierV2CallbackResponse,
     OrchCreateSessionRequest,
     OrchDialerSupplierV2TerminalRequest,
     OrchDialerSupplierV2TerminalResponse,
@@ -69,6 +71,15 @@ from app.services.billing_batch_service import (
     mark_billing_reprocess_enqueued,
     parse_billing_period,
 )
+from app.services.channel_supplier_v2_callback_service import (
+    ChannelSupplierV2CallbackError,
+    persist_channel_supplier_v2_callback,
+)
+from app.services.channel_supplier_v2_service import (
+    ChannelSupplierV2RegistrationError,
+    channel_supplier_v2_callbacks_enabled_for_context,
+    parse_channel_callback_token,
+)
 from app.services.discarded_event_service import persist_discarded_event
 from app.services.file_event_ingest_service import expand_arquivos_payload_into_rows
 from app.services.fileapp_tipo1_service import (
@@ -98,17 +109,42 @@ from app.tasks.fileapp_ingest_tasks import ingest_fileapp_event_task, ingest_fil
 from app.tasks.billing_batch_tasks import billing_reprocess_task
 from app.tasks.workflow_tasks import (
     advance_session_task,
+    resume_channel_supplier_v2_callback_task,
     resume_dialer_supplier_v2_terminal_task,
 )
 
 router = APIRouter(prefix="/v1/orch", tags=["orch"])
 logger = get_logger(__name__)
 _CELERY_ENQUEUE_TIMEOUT_SECONDS = 3.0
+_CHANNEL_SUPPLIER_V2_CALLBACK_MAX_BODY_BYTES = 1024 * 1024
 _POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
 _SUPPORTED_MANUAL_APPS = {"ArquivosApp", "WhatsApp", "DialerApp", "GenericApp"}
 _FLOW_ALIAS_PATTERN = re.compile(r"^[0-9a-f]{14}$")
 _SWITCH_BOT_FLOW_SUCCESS_STATUSES = {"success", "completed", "finished"}
 _SWITCH_BOT_FLOW_FAILURE_STATUSES = {"error", "exception", "failed", "unsuccess"}
+
+
+async def _read_channel_supplier_v2_callback_json(request: Request) -> Any:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _CHANNEL_SUPPLIER_V2_CALLBACK_MAX_BODY_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="O callback excede o limite de 1 MiB.",
+            )
+    if not body:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="O callback deve conter um corpo JSON.",
+        )
+    try:
+        return json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="O callback deve conter JSON UTF-8 válido.",
+        ) from exc
 
 
 def _legacy_workspace_context() -> tuple[str | None, str]:
@@ -763,6 +799,149 @@ async def _trigger_orch_for_workspace(
             "batch_mode": "file_rows",
         }
     return first_response
+
+
+@router.post(
+    "/channel-supplier-v2/callbacks/{callback_token}/{channel}/{event_kind}",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchChannelSupplierV2CallbackResponse,
+)
+async def callback_channel_supplier_v2(
+    callback_token: str,
+    channel: str,
+    event_kind: str,
+    request: Request,
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchChannelSupplierV2CallbackResponse:
+    """Persist and resume an exact SMS/RCS dispatch without phone correlation."""
+
+    settings = get_settings()
+    try:
+        claims = parse_channel_callback_token(callback_token, settings=settings)
+    except ChannelSupplierV2RegistrationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token de callback inválido.",
+        ) from exc
+
+    normalized_channel = str(channel or "").strip().lower()
+    normalized_event_kind = str(event_kind or "").strip().lower()
+    if normalized_channel != claims["channel"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="O canal do callback não corresponde à intenção assinada.",
+        )
+    if not channel_supplier_v2_callbacks_enabled_for_context(
+        settings=settings,
+        workspace_uuid=claims["workspace_uuid"],
+        flow_uuid=claims["flow_uuid"],
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Callback SMS/RCS V2 não habilitado para este contexto.",
+        )
+
+    payload = await _read_channel_supplier_v2_callback_json(request)
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(
+        claims["workspace_uuid"]
+    )
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    tx_context = (
+        db_session.begin_nested()
+        if db_session.in_transaction()
+        else db_session.begin()
+    )
+    try:
+        async with tx_context:
+            safe_schema = workspace_schema.replace('"', '""')
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+            persisted = await persist_channel_supplier_v2_callback(
+                db_session,
+                claims=claims,
+                channel=normalized_channel,
+                event_kind=normalized_event_kind,
+                payload=payload,
+            )
+    except ChannelSupplierV2CallbackError as exc:
+        http_status = (
+            status.HTTP_409_CONFLICT
+            if exc.code == "channel_supplier_v2_callback_identity_mismatch"
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(
+            status_code=http_status,
+            detail={"message": exc.message, "error_code": exc.code},
+        ) from exc
+    if persisted is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sessão fixada pelo callback não encontrada.",
+        )
+    if db_session.in_transaction():
+        await db_session.commit()
+
+    if persisted.resume_required:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: resume_channel_supplier_v2_callback_task.apply_async(
+                        kwargs={
+                            "workspace_uuid": safe_workspace_uuid,
+                            "flow_uuid": claims["flow_uuid"],
+                            "session_id": persisted.session_id,
+                        },
+                        queue=settings.celery_execute_queue,
+                        routing_key=settings.celery_execute_queue,
+                    )
+                ),
+                timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.exception(
+                "channel Supplier V2 callback enqueue failed",
+                extra={
+                    "event": "orch.channel_supplier_v2.callback_enqueue_failed",
+                    "supplier_version": "v2",
+                    "workspace_uuid": safe_workspace_uuid,
+                    "flow_uuid": claims["flow_uuid"],
+                    "session_id": persisted.session_id,
+                    "channel": normalized_channel,
+                    "event_kind": normalized_event_kind,
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Callback persistido; retomada pendente de reconciliação.",
+            ) from exc
+
+    logger.info(
+        "channel Supplier V2 callback handled",
+        extra={
+            "event": "orch.channel_supplier_v2.callback",
+            "supplier_version": "v2",
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": claims["flow_uuid"],
+            "session_id": persisted.session_id,
+            "channel": normalized_channel,
+            "event_kind": normalized_event_kind,
+            "accepted_count": persisted.accepted_count,
+            "inserted_count": persisted.inserted_count,
+            "idempotent_count": persisted.idempotent_count,
+            "resume_required": persisted.resume_required,
+            "late_callback": persisted.late_callback,
+        },
+    )
+    return OrchChannelSupplierV2CallbackResponse(
+        channel=normalized_channel,
+        event_kind=normalized_event_kind,
+        session_id=persisted.session_id,
+        session_uuid=persisted.session_uuid,
+        accepted_count=persisted.accepted_count,
+        inserted_count=persisted.inserted_count,
+        idempotent_count=persisted.idempotent_count,
+        resume_required=persisted.resume_required,
+        late_callback=persisted.late_callback,
+    )
 
 
 @router.post(

@@ -634,7 +634,7 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 ## R33 — `linked_actuator=sms` pode ser confundido com envelope pronto para envio
 
-`STATUS`: GATE 1 MITIGATED / CALLBACK GATE 2 OPEN
+`STATUS`: GATE 1 MITIGATED / GATE 2 IMPLEMENTED LOCALLY / CANARY PENDING
 
 `IMPACT`: critical se o envio real for habilitado sem contrato materializado
 
@@ -644,17 +644,17 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 `DESCRIPTION`: a marca `linked_actuator=sms` identifica a intenção e o membro escolhido, mas não transporta mensagem renderizada, revisão fixada do flow, configuração completa do provedor, callbacks, chave de idempotência ou credencial protegida. Um emissor que trate somente essa marca como item pronto teria de adivinhar dados ausentes ou carregar a definição corrente do flow. Além de poder enviar conteúdo vazio, incorreto ou duplicado, essa leitura quebraria o pin de revisão e faria Supplier/Target executar parte do grafo que pertence ao ORCH.
 
-`MITIGATION`: o Gate 1 materializa no ORCH uma intenção Fernet ligada a sessão/card/membro/revisão, registra pós-commit por chave idempotente e autoriza somente o outbox isolado da Supplier V2 após revalidar revisão, card, membro e marcador. Flag e allowlists falham fechadas; Supplier V1 permanece fora. Implementar no Gate 2 inbox/ledger de callbacks com correlação inequívoca antes de liberar branches.
+`MITIGATION`: o Gate 1 materializa no ORCH uma intenção Fernet ligada a sessão/card/membro/revisão, registra pós-commit por chave idempotente e autoriza somente o outbox isolado da Supplier V2 após revalidar revisão, card, membro e marcador. Flag e allowlists falham fechadas; Supplier V1 permanece fora. O Gate 2 acrescenta URLs do ORCH assinadas por dispatch, normalização limitada, ledger idempotente e commit antes do enqueue. SMS só avança por status/DLR correlacionado; MO é preservado para a espera genérica. Callback histórico é auditado sem reabrir sessão.
 
 `DETECTION`: alertar qualquer tentativa de dispatch SMS sem envelope completo; consultas do Supplier/Target ao grafo do flow para montar SMS; SMS marcado sem payload materializado quando o modo de envio real estiver ativo; repetição da mesma chave de idempotência; callback sem correlação única; segredo ou mensagem expostos em log, alarme ou métrica.
 
-`EVIDENCE`: a fronteira marker-only continua coberta com o Gate desligado. No branch do Gate 1, testes comprovam envelope sem segredo/endereço em claro, fingerprint HMAC com chave derivada, idempotência determinística, replay estável e registro exclusivo na rota V2. PostgreSQL isolado comprovou o reconciliador pós-commit. Deploy e canário integrado ainda estão pendentes.
+`EVIDENCE`: a fronteira marker-only continua coberta com os Gates desligados. Testes locais comprovam envelope sem segredo/endereço em claro, token adulterado rejeitado, corpo limitado, identidade exata, deduplicação por sessão em PostgreSQL, callback tardio processado sem retomada, queda do broker após commit e corrida MO -> status -> `wait_for_event`. Deploy e canário integrado ainda estão pendentes.
 
 `V2`: registry de conectores e credenciais, outbox transacional de comunicação, dispatch idempotente e inbox normalizado de callbacks como contratos nativos da plataforma.
 
 ## R34 — `linked_actuator=rcs` pode ser confundido com capacidade ou envelope de envio
 
-`STATUS`: GATE 1 MITIGATED / CALLBACK GATE 2 OPEN
+`STATUS`: GATE 1 MITIGATED / GATE 2 IMPLEMENTED LOCALLY / CANARY PENDING
 
 `IMPACT`: critical se o envio real for habilitado ou se telefones genéricos forem promovidos para RCS
 
@@ -664,11 +664,11 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 `DESCRIPTION`: nem todo telefone suporta RCS, e `linked_actuator=rcs` registra somente a intenção já decidida pelo ORCH. O marcador não contém mensagem materializada, revisão, contrato do provedor, credencial, idempotência nem correlação de callback. Inferir capacidade a partir de `voice/phone/sms` pode encaminhar contatos inelegíveis; fazer Supplier/Target carregar o flow para completar dados viola a autoridade do ORCH e o pin de revisão.
 
-`MITIGATION`: selecionar e marcar somente membro explicitamente tipado como `rcs`. O Gate 1 cifra destino/template/variáveis/credencial sob autoridade do ORCH e a Supplier V2 revalida o contexto antes do claim; claim expirado ou transporte ambíguo vira `uncertain` e nunca é reenviado automaticamente. Gate 2 deve normalizar callbacks antes de qualquer retomada.
+`MITIGATION`: selecionar e marcar somente membro explicitamente tipado como `rcs`. O Gate 1 cifra destino/template/variáveis/credencial sob autoridade do ORCH e a Supplier V2 revalida o contexto antes do claim; claim expirado ou transporte ambíguo vira `uncertain` e nunca é reenviado automaticamente. O Gate 2 injeta os callbacks oficiais por mensagem, normaliza somente o ciclo conhecido e exige identidade assinada integral antes de persistir e escolher branch. O prazo é imutável e telemetria anterior ao evento de conclusão não libera o card.
 
 `DETECTION`: alertar marcador RCS em membro não-RCS; tentativa de dispatch sem envelope completo; consulta do emissor à definição do flow; callback sem correlação única; mensagem, endereço ou segredo em logs, alarmes ou métricas.
 
-`EVIDENCE`: além dos guards por tipo exato e da regressão marker-only, o Gate 1 possui testes de materialização cifrada, registro idempotente, payload exato do provedor e classificação segura de respostas. O provedor real aceitou e entregou um smoke manual; o canário integrado ORCH -> Supplier V2 -> provedor ainda está pendente.
+`EVIDENCE`: além dos guards por tipo exato e da regressão marker-only, há testes de materialização cifrada, payload oficial com `url_callback_mo|status`, compatibilidade do Gate 1 sem callbacks, normalização de `sent|delivered|read|unavailable|failed|expired`, telemetria fora de ordem, branch exata e timeout. O provedor real aceitou e entregou um smoke manual; o canário integrado ORCH -> Supplier V2 -> provedor -> ORCH ainda está pendente.
 
 `V2`: registry de conectores/capacidades, outbox RCS transacional e inbox normalizado de callbacks.
 

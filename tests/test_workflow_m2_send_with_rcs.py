@@ -194,6 +194,8 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
         "customer_code": "BRAD_EAVM_RCS",
         "template_code": "4580",
         "template_variables": {"nome": "{{contact.full_name}}"},
+        "completion_event": "response",
+        "timeout_seconds": 300,
     }
     persisted = _configure_execution(
         monkeypatch, runtime=runtime, contact_row=_contact_row()
@@ -234,6 +236,8 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
         channel_supplier_v2_flow_allowlist=(FLOW_UUID,),
         channel_supplier_v2_encryption_key=key,
         channel_supplier_v2_encryption_key_id="v1",
+        channel_supplier_v2_callbacks_enabled=True,
+        channel_supplier_v2_callback_base_url="https://syncwebhook.example.test",
     )
     monkeypatch.setattr(workflow, "get_settings", lambda: enabled_settings)
 
@@ -254,6 +258,11 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
     assert b"secret-rcs-token" in plaintext
     assert b"BRAD_EAVM_RCS" in plaintext
     assert b"Contato de Teste" in plaintext
+    assert b"url_callback_mo" not in plaintext
+    assert b"syncwebhook.example.test/v1/orch/channel-supplier-v2/callbacks/" in plaintext
+    wait_state = runtime["workflow_v2"]["channel_dispatch_v2_wait"]
+    assert wait_state["completion_event"] == "response"
+    assert wait_state["timeout_seconds"] == 300
     assert persisted[-1]["runtime_variables"] is runtime
 
 

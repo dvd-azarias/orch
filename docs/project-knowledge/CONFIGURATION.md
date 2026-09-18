@@ -137,6 +137,20 @@ Defaults importantes:
   `CELERY_BEAT_CHANNEL_SUPPLIER_V2_RECONCILE_ENABLED=true` em exatamente um
   Beat do ambiente. Não habilitar antes da migration, do worker Supplier V2 e
   do canário. Ver `CHANNEL_DISPATCH_V2_PLAN.md`.
+- Retorno SMS/RCS Supplier V2: é um Gate independente e também desligado por
+  padrão em `CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED=false`. Sua ativação exige o
+  Gate de dispatch acima e `CHANNEL_SUPPLIER_V2_CALLBACK_BASE_URL` apontando
+  para a base pública do próprio ORCH; a aplicação acrescenta
+  `/v1/orch/channel-supplier-v2/callbacks/...`. DLR, MO e status de SMS, bem
+  como MO e status de RCS, recebem URLs assinadas por dispatch. A URL não leva
+  telefone, mensagem ou credencial: contém somente identidade operacional
+  assinada com chave derivada de `CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY`. O evento
+  é persistido em `orch_channel_events` antes do enqueue na fila `execute`, e o
+  reconciliador já existente cobre o gap commit -> enqueue. Desligar apenas
+  este Gate impede novas URLs do ORCH e novas retomadas sem alterar Supplier
+  V1, marker-only ou o Gate 1. Não rotacionar/remover a chave enquanto houver
+  dispatches pendentes de callback; primeiro fechar a origem, aguardar o drain
+  e somente então trocar a chave nos dois serviços.
 - `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 

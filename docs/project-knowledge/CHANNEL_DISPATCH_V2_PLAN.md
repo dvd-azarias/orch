@@ -64,17 +64,85 @@ Classificação: `ALPHA_FIX_OPTIONAL`, com ativação exclusivamente canária.
 O aceite HTTP não significa entrega ao destinatário. Para RCS, `status=V`
 significa que a solicitação foi considerada válida, não que foi entregue/lida.
 
-## Gate 2 — posterior, antes da retomada automática
+## Gate 2 — contrato aprovado
 
-- documentar e capturar os callbacks oficiais de SMS e RCS;
-- criar ledger idempotente de eventos externos;
-- correlacionar callback à intenção sem expor segredo;
-- mapear DLR/MO/status e RCS delivered/read/response/expired;
-- entregar evento terminal ao ORCH por outbox;
-- retomar exatamente a sessão/card/revisão e branch corretos;
-- implementar timeout verificável para o branch correspondente.
+Classificação: `ALPHA_FIX_OPTIONAL`, opt-in e canária. O Gate 1 permanece
+inalterado quando a flag específica de callbacks está desligada.
 
-Até o Gate 2, nenhuma resposta imediata do provedor libera a sessão.
+### Autoridade e callback público
+
+- o ORCH continua sendo a autoridade do grafo e gera, por intenção, URLs
+  públicas opacas e assinadas;
+- os callbacks apontam diretamente para o webhook do ORCH, nunca para o
+  Runner genérico nem para uma URL fixa do definition;
+- SMS recebe três URLs por dispatch: DLR, MO e status;
+- RCS recebe duas URLs por mensagem, nos campos oficiais
+  `url_callback_mo` e `url_callback_status`;
+- a Supplier V2 continua sendo a única emissora. Ela apenas transporta as URLs
+  já materializadas no envelope cifrado e não tenta interpretar o grafo;
+- nenhuma URL, token, telefone, mensagem ou credencial de provedor é registrada
+  em logs.
+
+### Correlação e segurança
+
+O token de callback é um envelope compacto assinado por HMAC, derivado da
+mesma chave exclusiva do Channel Dispatch V2. Ele contém somente identidade
+operacional não sensível: workspace, flow, sessão, revisão, card, canal e
+sequência. Não contém telefone, pessoa, lista, mensagem ou credencial.
+
+Ao receber um callback, o ORCH:
+
+1. valida formato, versão e assinatura em tempo constante;
+2. fixa o workspace trazido pelo token e localiza exatamente a sessão;
+3. confere flow, revisão, card, canal e sequência contra a intenção ativa ou
+   seu histórico durável;
+4. normaliza o evento conforme o contrato oficial do provedor;
+5. persiste idempotentemente em `orch_channel_events` antes de enfileirar a
+   retomada;
+6. responde replay como sucesso idempotente e nunca cria sessão nova a partir
+   de callback.
+
+O identificador externo do provedor é usado na deduplicação. Quando ausente,
+o callback é rejeitado; correlação por telefone ou por "sessão ativa mais
+recente" é proibida.
+
+### Semântica SMS
+
+- `MT-STATUS` válido/enviado e DLR entregue confirmam que o card de envio pode
+  avançar linearmente;
+- DLR não entregue/falha também libera o card linear, mas preserva o resultado
+  normalizado em runtime para diagnóstico e para decisão posterior do grafo;
+- MO é preservado como evento de resposta e pode satisfazer o card de espera
+  seguinte mesmo quando chegar antes de ele ser armado;
+- mensagens usadas nos canários são explicitamente textos de teste;
+- callbacks estáticos configurados no catálogo deixam de ser fonte de
+  autoridade quando o Gate 2 está ativo.
+
+### Semântica RCS
+
+- `sent`/`queued` são somente telemetria e não liberam o card;
+- `delivered` e `read` liberam somente quando correspondem ao
+  `completion_event` configurado;
+- mensagem ou arquivo recebido libera `response`;
+- `unavailable`, `failed` e `expired` seguem seus branches próprios;
+- `timeout_seconds` arma `frozen_until`; ao vencer sem evento conclusivo, o
+  runtime segue exclusivamente pelo branch `timeout`;
+- callback recebido antes de o worker observar o bloqueio permanece no ledger
+  e é consumido na retomada, sem janela de perda.
+
+### Concorrência, replay e rollback
+
+- persistência do callback precede o enqueue;
+- o reconciliador existente de `orch_channel_events` cobre o gap
+  commit → enqueue;
+- sessão encerrada, desassociada ou com identidade divergente não é reaberta;
+- eventos duplicados não repetem branch, envio ou avanço de card;
+- rollback operacional: desligar a flag de callbacks, retirar o flow da
+  allowlist e preservar ledger/envelopes para auditoria. Supplier V1 não é
+  alterada.
+
+Até o Gate 2 ser ativado e homologado no canário, o aceite HTTP imediato do
+provedor continua sem liberar a sessão.
 
 ## Rollback
 

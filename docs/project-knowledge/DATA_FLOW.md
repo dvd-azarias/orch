@@ -307,13 +307,30 @@ ORCH executa a revisão fixada e renderiza o card
   -> Supplier V2 revalida revisão/card/membro/marcador e persiste o outbox
   -> emissor realiza o POST ao provedor
   -> aceite explícito vira accepted; ambiguidade vira uncertain sem reenvio
-  -> sessão permanece bloqueada
+  -> sessão permanece bloqueada até callback correlacionado
 ```
 
 O Target consulta a revisão publicada somente para comprovar que os campos
 estáticos cifrados pertencem ao card pinado; ele não renderiza o grafo nem
-escolhe destinatário. DLR/MO/status, ledger externo e retomada da branch ainda
-pertencem ao Gate 2. Até lá, aceite HTTP nunca libera a sessão.
+escolhe destinatário. Com o Gate 2 desligado, aceite HTTP nunca libera a sessão
+e o comportamento anterior permanece integralmente preservado.
+
+Com `CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED=true`, o ORCH substitui os callbacks
+estáticos do card por três URLs próprias, assinadas e exclusivas do dispatch:
+DLR, MO e status. A assinatura fixa workspace, sessão, flow, revisão, card,
+canal e sequência, sem telefone ou conteúdo. O callback entra diretamente em
+`/v1/orch/channel-supplier-v2/callbacks/...`, revalida a intenção ativa ou seu
+histórico, grava primeiro no ledger `orch_channel_events` e somente depois
+publica a retomada. Identificador do provedor, sessão, canal e tipo normalizado
+formam a deduplicação; callback histórico fica auditado como tardio e nunca
+reabre card ou sessão.
+
+Status/DLR `sent|delivered|failed` conclui o card SMS pela sequência linear do
+canvas. MO vira `result=response` no inbox genérico da sessão. Se a resposta
+chegar antes do status que libera o card, o runtime a preserva e arma um
+`wait_for_event(callback/response)` subsequente com `not_before` igual ao
+instante do dispatch; assim a corrida não perde a resposta e não consome evento
+anterior da sessão.
 
 ## Handoff RCS e dispatch opt-in pela Supplier V2
 
@@ -331,8 +348,15 @@ Com o Gate desligado, o runtime continua apenas marker-only. Com o Gate ativo,
 o ORCH cifra `authorization_token`, broker, cliente, template, variáveis
 renderizadas e destino; a Supplier V2 envia o template pela fila exclusiva.
 `status=V` com identificador confirma apenas aceite válido. Delivery, read,
-response, expired, timeout e retomada do canvas continuam pendentes no Gate 2.
-`linked_actuator=rcs` isolado nunca autoriza dispatch.
+response, expired e timeout somente retomam o canvas quando o Gate 2 está
+ligado. Nesse modo, a mensagem RCS recebe `url_callback_mo` e
+`url_callback_status` do ORCH. O card persiste `completion_event` e prazo
+imutável: `sent` é telemetria; `delivered|read` concluem somente quando forem o
+evento configurado; MO segue por `response`; indisponibilidade, falha e
+expiração seguem seus branches; ausência de terminal até o prazo segue por
+`timeout`. Evento sem branch exata usa `exception` quando disponível e nunca
+escolhe arbitrariamente outra saída. `linked_actuator=rcs` isolado nunca
+autoriza dispatch.
 
 ## Handoff de e-mail marker-only e fronteira do envio real
 
