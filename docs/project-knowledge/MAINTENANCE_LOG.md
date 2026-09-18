@@ -1,5 +1,26 @@
 # Maintenance Log
 
+## 2026-09-18 — Falha terminal explícita para card ausente em revisão histórica
+
+Classificação: `ALPHA_FIX_REQUIRED`, sem migration e sem alteração de flows
+válidos.
+
+- quando o cursor de uma sessão pinada aponta para um `ref_id` ausente da
+  revisão, o runtime grava `workflow_v2.terminal_failure` com
+  `code=component_not_found` e o identificador ausente;
+- a sessão termina uma única vez com `state=3`, `ended_at` e cursor seguinte
+  limpo, preservando o último card válido;
+- o evento estruturado de erro inclui flow, sessão, revisão e referência
+  ausente, sem parâmetros do card ou payload do contato;
+- `component_not_found` passa pela mesma classificação de falha terminal dos
+  demais erros determinísticos e produz alarme no worker Celery; o fallback
+  inline já possuía o mapeamento correspondente;
+- o Target Core impede novas definitions órfãs; esta defesa existe para
+  revisões antigas e corridas operacionais.
+
+Validação local: `160 passed` na regressão de engine M2, dispatcher e task.
+Rollback é somente de código; não há migration nem compensação de dados.
+
 ## 2026-09-17 — Gate 2 de callbacks e retomada SMS/RCS pela Supplier V2
 
 Classificação: `ALPHA_FIX_OPTIONAL`, opt-in, alto risco e sem migration.
