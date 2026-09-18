@@ -6,11 +6,17 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from cryptography.fernet import Fernet
 
 from app.services.channel_supplier_v2_service import (
+    ChannelSupplierV2RegistrationError,
+    build_channel_callback_token,
+    build_channel_callback_urls,
     build_channel_dispatch_intent,
+    channel_supplier_v2_callbacks_enabled_for_context,
     channel_supplier_v2_enabled_for_context,
+    parse_channel_callback_token,
     register_channel_dispatch,
 )
 
@@ -30,6 +36,8 @@ def _settings():
         channel_supplier_v2_flow_allowlist=(FLOW_UUID,),
         channel_supplier_v2_encryption_key=key,
         channel_supplier_v2_encryption_key_id="v1",
+        channel_supplier_v2_callbacks_enabled=True,
+        channel_supplier_v2_callback_base_url="https://syncwebhook.example.test",
         target_core_supplier_api_base_url="https://target.invalid",
         target_core_api_bearer_token="internal-token",
         channel_supplier_v2_http_timeout_seconds=5.0,
@@ -143,6 +151,79 @@ def test_channel_dispatch_gate_requires_both_allowlists() -> None:
         settings=settings,
         workspace_uuid=WORKSPACE_UUID,
         flow_uuid="33333333-3333-4333-8333-333333333333",
+    )
+    assert channel_supplier_v2_callbacks_enabled_for_context(
+        settings=settings, workspace_uuid=WORKSPACE_UUID, flow_uuid=FLOW_UUID
+    )
+
+
+def test_callback_token_is_signed_scoped_and_contains_no_sensitive_data() -> None:
+    settings = _settings()
+    token = build_channel_callback_token(
+        workspace_uuid=WORKSPACE_UUID,
+        session_uuid=SESSION_UUID,
+        flow_uuid=FLOW_UUID,
+        flow_revision_id=REVISION_UUID,
+        component_ref_id="send-sms-1",
+        channel="sms",
+        dispatch_sequence=2,
+        settings=settings,
+    )
+
+    assert token.startswith("cdv2.1.")
+    assert "11999990001" not in token
+    assert "secret-basic-token" not in token
+    assert parse_channel_callback_token(token, settings=settings) == {
+        "workspace_uuid": WORKSPACE_UUID,
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "component_ref_id": "send-sms-1",
+        "channel": "sms",
+        "dispatch_sequence": 2,
+    }
+
+    token_parts = token.split(".")
+    signature = token_parts[-1]
+    tampered_signature = (
+        ("A" if signature[0] != "A" else "B") + signature[1:]
+    )
+    tampered = ".".join([*token_parts[:-1], tampered_signature])
+    with pytest.raises(ChannelSupplierV2RegistrationError) as exc_info:
+        parse_channel_callback_token(tampered, settings=settings)
+    assert exc_info.value.code == "channel_supplier_v2_callback_token_invalid"
+
+
+def test_callback_urls_are_generated_only_for_official_channel_events() -> None:
+    settings = _settings()
+    sms_urls = build_channel_callback_urls(
+        workspace_uuid=WORKSPACE_UUID,
+        session_uuid=SESSION_UUID,
+        flow_uuid=FLOW_UUID,
+        flow_revision_id=REVISION_UUID,
+        component_ref_id="send-sms-1",
+        channel="sms",
+        dispatch_sequence=1,
+        settings=settings,
+    )
+    rcs_urls = build_channel_callback_urls(
+        workspace_uuid=WORKSPACE_UUID,
+        session_uuid=SESSION_UUID,
+        flow_uuid=FLOW_UUID,
+        flow_revision_id=REVISION_UUID,
+        component_ref_id="send-rcs-1",
+        channel="rcs",
+        dispatch_sequence=1,
+        settings=settings,
+    )
+
+    assert set(sms_urls) == {"dlr", "mo", "status"}
+    assert set(rcs_urls) == {"mo", "status"}
+    assert all(
+        url.startswith(
+            "https://syncwebhook.example.test/v1/orch/channel-supplier-v2/callbacks/cdv2.1."
+        )
+        for url in (*sms_urls.values(), *rcs_urls.values())
     )
 
 

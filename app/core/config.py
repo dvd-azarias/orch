@@ -5,7 +5,7 @@ import platform
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 from uuid import UUID
 
 
@@ -157,6 +157,8 @@ class Settings:
     channel_supplier_v2_flow_allowlist: tuple[str, ...]
     channel_supplier_v2_encryption_key: str | None
     channel_supplier_v2_encryption_key_id: str
+    channel_supplier_v2_callbacks_enabled: bool
+    channel_supplier_v2_callback_base_url: str | None
     channel_supplier_v2_http_timeout_seconds: float
     channel_supplier_v2_max_attempts: int
     channel_supplier_v2_retry_backoff_seconds: float
@@ -744,6 +746,12 @@ def get_settings() -> Settings:
             _read_env_optional("CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY_ID", "v1")
             or "v1"
         ),
+        channel_supplier_v2_callbacks_enabled=_read_env_bool(
+            "CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED", False
+        ),
+        channel_supplier_v2_callback_base_url=_read_env_optional(
+            "CHANNEL_SUPPLIER_V2_CALLBACK_BASE_URL"
+        ),
         channel_supplier_v2_http_timeout_seconds=_read_env_float_range(
             "CHANNEL_SUPPLIER_V2_HTTP_TIMEOUT_SECONDS",
             5.0,
@@ -934,6 +942,31 @@ def get_settings() -> Settings:
                 "TARGET_CORE_API_BEARER_TOKEN é obrigatória quando "
                 "CHANNEL_SUPPLIER_V2_ENABLED=true."
             )
+        if settings.channel_supplier_v2_callbacks_enabled:
+            callback_base_url = str(
+                settings.channel_supplier_v2_callback_base_url or ""
+            ).strip()
+            parsed_callback_base_url = urlsplit(callback_base_url)
+            if not callback_base_url:
+                raise ValueError(
+                    "CHANNEL_SUPPLIER_V2_CALLBACK_BASE_URL é obrigatória quando "
+                    "CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED=true."
+                )
+            if (
+                parsed_callback_base_url.scheme not in {"http", "https"}
+                or not parsed_callback_base_url.netloc
+                or parsed_callback_base_url.query
+                or parsed_callback_base_url.fragment
+            ):
+                raise ValueError(
+                    "CHANNEL_SUPPLIER_V2_CALLBACK_BASE_URL deve ser uma base "
+                    "HTTP/HTTPS sem query ou fragmento."
+                )
+    elif settings.channel_supplier_v2_callbacks_enabled:
+        raise ValueError(
+            "CHANNEL_SUPPLIER_V2_ENABLED=true é obrigatório quando "
+            "CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED=true."
+        )
     if settings.orch_dialer_multilane_v2_enabled:
         if not settings.dialer_supplier_v2_enabled:
             raise ValueError(

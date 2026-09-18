@@ -238,6 +238,21 @@ class OrchDialerSupplierV2TerminalResponse(BaseModel):
     cycle_id: str
     event_id: str
     idempotent: bool
+
+
+class OrchChannelSupplierV2CallbackResponse(BaseModel):
+    api_version: str = "v1"
+    status: Literal["accepted"] = "accepted"
+    accepted: bool = True
+    channel: Literal["sms", "rcs"]
+    event_kind: Literal["dlr", "mo", "status"]
+    session_id: int
+    session_uuid: str
+    accepted_count: int
+    inserted_count: int
+    idempotent_count: int
+    resume_required: bool
+    late_callback: bool
     reason: str | None = None
 
 

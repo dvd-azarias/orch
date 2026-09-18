@@ -1,5 +1,56 @@
 # Maintenance Log
 
+## 2026-09-17 — Gate 2 de callbacks e retomada SMS/RCS pela Supplier V2
+
+Classificação: `ALPHA_FIX_OPTIONAL`, opt-in, alto risco e sem migration.
+
+- um Gate separado, desligado por padrão, gera callbacks públicos do próprio
+  ORCH para DLR/MO/status de SMS e MO/status de RCS;
+- o token HMAC fixa workspace, sessão, flow, revisão, card, canal e sequência,
+  sem telefone, mensagem ou credencial; canal divergente e assinatura alterada
+  são rejeitados antes de ler banco;
+- o callback é limitado a 1 MiB/100 eventos, normalizado em conjunto fechado e
+  persistido no ledger existente antes do enqueue; queda do broker deixa o
+  evento recuperável pelo reconciliador;
+- SMS avança pela sequência linear após status/DLR e preserva MO como
+  `callback/response`, inclusive na corrida em que a resposta chega antes do
+  status e do armamento de `wait_for_event`;
+- RCS injeta `url_callback_mo|status` por mensagem, trata `sent` como
+  telemetria e resolve evento configurado, falhas de negócio ou timeout pela
+  branch exata, com fallback somente para `exception`;
+- callback duplicado é idempotente por sessão/canal/id/tipo; callback de
+  intenção histórica é auditado e marcado como processado sem reabrir sessão;
+- Supplier V1, cards legados, Gate 1 sem callback e schema permanecem
+  inalterados. SMS usado em canário deve conter texto inequivocamente de teste,
+  e todos os callbacks do ensaio devem apontar para o ORCH.
+
+Validação local:
+
+- ORCH: `79 passed` nos testes direcionados de API, configuração, engine,
+  repositórios, normalização, callbacks e cards;
+  `12 passed` na regressão PostgreSQL de SMS/RCS, ledger, reconciliador e
+  roteamento, incluindo isolamento entre sessões e descarte histórico;
+- Target Core: `109 passed` na regressão focada e `3 passed, 2 skipped` nos
+  testes de banco/migration já existentes;
+- suíte completa ORCH: `843 passed, 26 failed`; as 26 falhas são a baseline já
+  documentada que ainda chama `trigger_orch(flow_uuid=...)`, assinatura que não
+  foi alterada neste branch;
+- `compileall` e `git diff --check` passaram nos módulos e diffs tocados;
+- a stack local canônica subiu API, todos os workers e Beats das fases
+  homologadas; a nova task
+  `app.tasks.workflow.resume_channel_supplier_v2_callback` foi registrada, os
+  smokes encadeados dos flows A/B foram aceitos nas sessões `8177`/`8178` e os
+  logs não apresentaram `ERROR`, `CRITICAL` ou traceback. A stack foi encerrada
+  ao final e todos os processos ficaram `down`.
+
+O E2E com os provedores reais ainda não foi executado.
+
+Rollout: implantar Target Core antes do ORCH, configurar a base pública do ORCH,
+reiniciar API/workers/Beat da mesma revisão e habilitar os Gates somente no
+workspace/flow canário. Rollback: desligar
+`CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED`; não apagar ledger/outbox nem tocar na
+Supplier V1.
+
 ## 2026-09-17 — Lista de origem da sessão no `source_list_membership`
 
 Classificação: `ALPHA_FIX_OPTIONAL`, aditiva e sem migration.

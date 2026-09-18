@@ -80,7 +80,9 @@ from app.repositories.workspaces_repository import fetch_workspace_otima_billing
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
 from app.services.channel_supplier_v2_service import (
     ChannelSupplierV2RegistrationError,
+    build_channel_callback_urls,
     build_channel_dispatch_intent,
+    channel_supplier_v2_callbacks_enabled_for_context,
     channel_supplier_v2_enabled_for_context,
 )
 from app.services.dialer_supplier_v2_service import (
@@ -193,6 +195,10 @@ SWITCH_BOT_FLOW_BLOCKING_STOP_REASONS = {
 }
 IDENTIDADE_PERSON_BLOCKING_STOP_REASONS = {
     "blocked_identidade_person_flow_link",
+}
+CHANNEL_SUPPLIER_V2_BLOCKING_STOP_REASONS = {
+    "blocked_send_with_sms": "sms",
+    "blocked_send_with_rcs": "rcs",
 }
 WHATSAPP_STATUS_ORDER_PREREQUISITES = {
     "delivered": "whatsapp_sent_at",
@@ -322,6 +328,14 @@ class _SelectContactChannelExecution:
     branch_label: str
     contact_row: dict[str, Any] | None
     deferred_until: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _ChannelSupplierV2ResumeDecision:
+    changed: bool
+    terminal: bool
+    channel: str
+    branch_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2901,6 +2915,23 @@ def _materialize_channel_dispatch_v2_intent(
                 or [0]
             )
 
+        callback_urls: dict[str, str] | None = None
+        if channel_supplier_v2_callbacks_enabled_for_context(
+            settings=settings,
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+        ):
+            callback_urls = build_channel_callback_urls(
+                workspace_uuid=workspace_uuid,
+                session_uuid=session_uuid,
+                flow_uuid=flow_uuid,
+                flow_revision_id=flow_revision_id,
+                component_ref_id=component_ref_id,
+                channel=channel,
+                dispatch_sequence=sequence,
+                settings=settings,
+            )
+
         if channel == "sms":
             provider = {
                 "basic_token": str(
@@ -2917,20 +2948,36 @@ def _materialize_channel_dispatch_v2_intent(
                     _catalog_parameter_scalar(params.get("codigo_fornecedor")) or ""
                 ).strip(),
                 "callbacks": {
-                    "dlr": str(
-                        _render_value(params.get("url_callback_dlr"), resolution_scope)
-                        or ""
-                    ).strip(),
-                    "mo": str(
-                        _render_value(params.get("url_callback_mo"), resolution_scope)
-                        or ""
-                    ).strip(),
-                    "status": str(
-                        _render_value(
-                            params.get("url_callback_status"), resolution_scope
-                        )
-                        or ""
-                    ).strip(),
+                    "dlr": (
+                        callback_urls["dlr"]
+                        if callback_urls is not None
+                        else str(
+                            _render_value(
+                                params.get("url_callback_dlr"), resolution_scope
+                            )
+                            or ""
+                        ).strip()
+                    ),
+                    "mo": (
+                        callback_urls["mo"]
+                        if callback_urls is not None
+                        else str(
+                            _render_value(
+                                params.get("url_callback_mo"), resolution_scope
+                            )
+                            or ""
+                        ).strip()
+                    ),
+                    "status": (
+                        callback_urls["status"]
+                        if callback_urls is not None
+                        else str(
+                            _render_value(
+                                params.get("url_callback_status"), resolution_scope
+                            )
+                            or ""
+                        ).strip()
+                    ),
                 },
             }
         else:
@@ -2955,6 +3002,16 @@ def _materialize_channel_dispatch_v2_intent(
                     _catalog_parameter_scalar(params.get("template_code")) or ""
                 ).strip(),
                 "variables": raw_variables,
+                **(
+                    {
+                        "callbacks": {
+                            "mo": callback_urls["mo"],
+                            "status": callback_urls["status"],
+                        }
+                    }
+                    if callback_urls is not None
+                    else {}
+                ),
             }
         intent = build_channel_dispatch_intent(
             session_uuid=session_uuid,
@@ -2988,6 +3045,53 @@ def _materialize_channel_dispatch_v2_intent(
             workflow_meta["channel_dispatch_v2_history"] = history
         history.append(existing)
     workflow_meta["channel_dispatch_v2"] = intent
+    if channel == "rcs" and callback_urls is not None:
+        completion_event = str(
+            _catalog_parameter_scalar(params.get("completion_event")) or ""
+        ).strip().lower()
+        raw_timeout = _catalog_parameter_scalar(params.get("timeout_seconds"))
+        try:
+            if isinstance(raw_timeout, bool):
+                raise ValueError
+            timeout_seconds = int(str(raw_timeout).strip())
+        except (TypeError, ValueError):
+            timeout_seconds = 0
+        if (
+            completion_event not in {"delivered", "read", "response"}
+            or not 1 <= timeout_seconds <= WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS
+        ):
+            raise WorkflowExecutionError(
+                "channel_supplier_v2_rcs_wait_invalid",
+                "A configuração de conclusão e timeout do RCS é inválida.",
+            )
+        existing_wait = workflow_meta.get("channel_dispatch_v2_wait")
+        wait_matches = (
+            isinstance(existing_wait, dict)
+            and str(existing_wait.get("component_ref_id") or "")
+            == component_ref_id
+            and str(existing_wait.get("channel") or "") == channel
+            and int(existing_wait.get("dispatch_sequence") or 0) == sequence
+        )
+        if not wait_matches:
+            requested_at = _parse_iso_datetime(intent.get("requested_at"))
+            started_at = requested_at or datetime.now(timezone.utc)
+            started_at_utc = (
+                started_at
+                if started_at.tzinfo is not None
+                else started_at.replace(tzinfo=timezone.utc)
+            )
+            workflow_meta["channel_dispatch_v2_wait"] = {
+                "component_ref_id": component_ref_id,
+                "channel": channel,
+                "dispatch_sequence": sequence,
+                "completion_event": completion_event,
+                "timeout_seconds": timeout_seconds,
+                "started_at": started_at_utc.isoformat(),
+                "timeout_at": (
+                    started_at_utc + timedelta(seconds=timeout_seconds)
+                ).isoformat(),
+                "status": "waiting",
+            }
 
 
 async def _prepare_send_with_email_contact_member(
@@ -3200,6 +3304,292 @@ def _should_resume_identidade_person_blocking_execution(runtime_variables: dict[
     state = _identidade_person_flow_link_state(runtime_variables)
     status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
     return status in {"completed", "failed"}
+
+
+def _channel_supplier_v2_active_intent(
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    if not isinstance(workflow_meta, dict):
+        return None
+    intent = workflow_meta.get("channel_dispatch_v2")
+    if not isinstance(intent, dict):
+        return None
+    channel = str(intent.get("channel") or "").strip().lower()
+    if channel not in {"sms", "rcs"}:
+        return None
+    return intent
+
+
+def _channel_supplier_v2_event_matches_intent(
+    event: dict[str, Any],
+    intent: dict[str, Any],
+) -> bool:
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    identity = payload.get("dispatch_identity")
+    if not isinstance(identity, dict):
+        return False
+    for field in (
+        "session_uuid",
+        "flow_uuid",
+        "flow_revision_id",
+        "component_ref_id",
+        "channel",
+    ):
+        if str(identity.get(field) or "").strip().lower() != str(
+            intent.get(field) or ""
+        ).strip().lower():
+            return False
+    try:
+        return int(identity.get("dispatch_sequence")) == int(
+            intent.get("dispatch_sequence")
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _channel_supplier_v2_event_received_at(event: dict[str, Any]) -> str:
+    for field in ("event_ts", "received_at"):
+        raw = event.get(field)
+        if isinstance(raw, datetime):
+            normalized = raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+            return normalized.isoformat()
+        parsed = _parse_iso_datetime(raw)
+        if parsed is not None:
+            normalized = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+            return normalized.isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _preserve_sms_response_callback(
+    runtime_variables: dict[str, Any],
+    *,
+    event: dict[str, Any],
+) -> None:
+    payload = event.get("payload")
+    provider_payload = (
+        payload.get("provider_payload")
+        if isinstance(payload, dict) and isinstance(payload.get("provider_payload"), dict)
+        else {}
+    )
+    callbacks_pending = runtime_variables.get("callbacks_pending")
+    if not isinstance(callbacks_pending, list):
+        callbacks_pending = []
+        runtime_variables["callbacks_pending"] = callbacks_pending
+    callbacks_pending.append(
+        {
+            "event_name": "callback",
+            "result": "response",
+            "received_at": _channel_supplier_v2_event_received_at(event),
+            "data": {
+                "channel": "sms",
+                "message_id": str(event.get("event_id") or ""),
+                "provider_payload": copy.deepcopy(provider_payload),
+            },
+        }
+    )
+
+
+def _channel_supplier_v2_rcs_wait_state(
+    runtime_variables: dict[str, Any],
+    *,
+    intent: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    state = workflow_meta.get("channel_dispatch_v2_wait")
+    if not isinstance(state, dict):
+        return None
+    if not all(
+        str(state.get(field) or "").strip().lower()
+        == str(intent.get(field) or "").strip().lower()
+        for field in ("component_ref_id", "channel")
+    ):
+        return None
+    try:
+        if int(state.get("dispatch_sequence")) != int(intent.get("dispatch_sequence")):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return state
+
+
+async def _consume_channel_supplier_v2_events(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    runtime_variables: dict[str, Any],
+    blocking_stop_reason: str | None,
+) -> _ChannelSupplierV2ResumeDecision:
+    intent = _channel_supplier_v2_active_intent(runtime_variables)
+    if intent is None:
+        return _ChannelSupplierV2ResumeDecision(False, False, "")
+    channel = str(intent["channel"])
+    expected_block = (
+        "blocked_send_with_sms" if channel == "sms" else "blocked_send_with_rcs"
+    )
+    changed = False
+
+    for _ in range(100):
+        event = await fetch_next_pending_channel_event(
+            db_session,
+            session_id=session_id,
+            channel=channel,
+        )
+        if not isinstance(event, dict):
+            break
+        event_row_id = int(event["id"])
+        if not _channel_supplier_v2_event_matches_intent(event, intent):
+            await mark_channel_event_processed(
+                db_session,
+                event_row_id=event_row_id,
+                session_id=session_id,
+                channel=channel,
+                discard_reason="channel_supplier_v2_intent_mismatch",
+            )
+            changed = True
+            continue
+
+        event_type = str(event.get("event_type") or "").strip().lower()
+        event_summary = {
+            "component_ref_id": intent.get("component_ref_id"),
+            "dispatch_sequence": intent.get("dispatch_sequence"),
+            "event_type": event_type,
+            "event_id": str(event.get("event_id") or ""),
+            "event_at": _channel_supplier_v2_event_received_at(event),
+        }
+
+        if blocking_stop_reason != expected_block:
+            if channel == "sms" and event_type == "response":
+                _preserve_sms_response_callback(runtime_variables, event=event)
+                runtime_variables["send_with_sms_last_response"] = event_summary
+                discard_reason = "channel_supplier_v2_sms_response_forwarded"
+            else:
+                discard_reason = "channel_supplier_v2_callback_after_card"
+            await mark_channel_event_processed(
+                db_session,
+                event_row_id=event_row_id,
+                session_id=session_id,
+                channel=channel,
+                discard_reason=discard_reason,
+            )
+            changed = True
+            continue
+
+        if channel == "sms":
+            if event_type == "response":
+                _preserve_sms_response_callback(runtime_variables, event=event)
+                runtime_variables["send_with_sms_last_response"] = event_summary
+                await mark_channel_event_processed(
+                    db_session,
+                    event_row_id=event_row_id,
+                    session_id=session_id,
+                    channel=channel,
+                )
+                changed = True
+                continue
+            if event_type in {"sent", "delivered", "failed"}:
+                runtime_variables["send_with_sms_last_result"] = event_summary
+                workflow_meta = _ensure_workflow_meta(runtime_variables)
+                next_cursor = _read_next_cursor(runtime_variables)
+                requested_at = _parse_iso_datetime(intent.get("requested_at"))
+                if next_cursor and requested_at is not None:
+                    workflow_meta["wait_for_event_activation_override"] = {
+                        "card_cursor": next_cursor,
+                        "not_before": requested_at.isoformat(),
+                        "source_component_ref_id": intent.get("component_ref_id"),
+                    }
+                await mark_channel_event_processed(
+                    db_session,
+                    event_row_id=event_row_id,
+                    session_id=session_id,
+                    channel=channel,
+                )
+                return _ChannelSupplierV2ResumeDecision(
+                    True,
+                    True,
+                    channel,
+                )
+            await mark_channel_event_processed(
+                db_session,
+                event_row_id=event_row_id,
+                session_id=session_id,
+                channel=channel,
+                discard_reason="channel_supplier_v2_sms_telemetry",
+            )
+            changed = True
+            continue
+
+        wait_state = _channel_supplier_v2_rcs_wait_state(
+            runtime_variables,
+            intent=intent,
+        )
+        completion_event = str(
+            wait_state.get("completion_event") if isinstance(wait_state, dict) else ""
+        ).strip().lower()
+        terminal_branch: str | None = None
+        if event_type in {"unavailable", "failed", "expired", "response"}:
+            terminal_branch = event_type
+        elif event_type in {"delivered", "read"} and event_type == completion_event:
+            terminal_branch = event_type
+
+        runtime_variables["send_with_rcs_last_result"] = event_summary
+        await mark_channel_event_processed(
+            db_session,
+            event_row_id=event_row_id,
+            session_id=session_id,
+            channel=channel,
+            discard_reason=(
+                None if terminal_branch is not None else "channel_supplier_v2_rcs_telemetry"
+            ),
+        )
+        changed = True
+        if terminal_branch is not None:
+            if isinstance(wait_state, dict):
+                wait_state["status"] = "completed"
+                wait_state["outcome"] = terminal_branch
+                wait_state["completed_at"] = datetime.now(timezone.utc).isoformat()
+            return _ChannelSupplierV2ResumeDecision(
+                True,
+                True,
+                channel,
+                branch_label=terminal_branch,
+            )
+
+    if channel == "rcs" and blocking_stop_reason == expected_block:
+        wait_state = _channel_supplier_v2_rcs_wait_state(
+            runtime_variables,
+            intent=intent,
+        )
+        timeout_at = (
+            _parse_iso_datetime(wait_state.get("timeout_at"))
+            if isinstance(wait_state, dict)
+            else None
+        )
+        if timeout_at is not None:
+            timeout_at_utc = (
+                timeout_at
+                if timeout_at.tzinfo is not None
+                else timeout_at.replace(tzinfo=timezone.utc)
+            )
+            if datetime.now(timezone.utc) >= timeout_at_utc:
+                wait_state["status"] = "completed"
+                wait_state["outcome"] = "timeout"
+                wait_state["completed_at"] = datetime.now(timezone.utc).isoformat()
+                runtime_variables["send_with_rcs_last_result"] = {
+                    "component_ref_id": intent.get("component_ref_id"),
+                    "dispatch_sequence": intent.get("dispatch_sequence"),
+                    "event_type": "timeout",
+                    "event_at": timeout_at_utc.isoformat(),
+                }
+                return _ChannelSupplierV2ResumeDecision(
+                    True,
+                    True,
+                    channel,
+                    branch_label="timeout",
+                )
+    return _ChannelSupplierV2ResumeDecision(changed, False, channel)
 
 
 def _parse_variable_path_tokens(path: str) -> list[str | int] | None:
@@ -8536,6 +8926,11 @@ async def execute_workflow_m2_for_session(
 
         has_pending_whatsapp_events = False
         has_pending_dialer_events = False
+        channel_supplier_resume = _ChannelSupplierV2ResumeDecision(
+            False,
+            False,
+            "",
+        )
         resume_cursor = _read_whatsapp_resume_cursor(runtime_variables)
         if resume_cursor is not None:
             has_pending_whatsapp_events = await has_pending_channel_events(
@@ -8550,6 +8945,42 @@ async def execute_workflow_m2_for_session(
                 session_id=session_id,
                 channel="dialer",
             )
+
+        active_channel_intent = _channel_supplier_v2_active_intent(runtime_variables)
+        callbacks_enabled = channel_supplier_v2_callbacks_enabled_for_context(
+            settings=settings,
+            workspace_uuid=get_current_workspace_uuid(),
+            flow_uuid=flow_uuid,
+        )
+        if callbacks_enabled and active_channel_intent is not None:
+            active_channel = str(active_channel_intent["channel"])
+            has_pending_channel_supplier_events = await has_pending_channel_events(
+                db_session,
+                session_id=session_id,
+                channel=active_channel,
+            )
+            if has_pending_channel_supplier_events or (
+                blocking_stop_reason == "blocked_send_with_rcs"
+                and active_channel == "rcs"
+            ):
+                channel_supplier_resume = await _consume_channel_supplier_v2_events(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    blocking_stop_reason=blocking_stop_reason,
+                )
+                if channel_supplier_resume.changed and not channel_supplier_resume.terminal:
+                    await replace_session_workflow_state(
+                        db_session,
+                        session_id=session_id,
+                        runtime_variables=runtime_variables,
+                        last_card_uuid=_to_uuid_or_none(
+                            session_state.get("last_card_uuid")
+                        ),
+                        next_card_uuid=_to_uuid_or_none(
+                            session_state.get("next_card_uuid")
+                        ),
+                    )
 
         current_next_card_uuid = session_state.get("next_card_uuid")
         if current_next_card_uuid is None:
@@ -8581,6 +9012,7 @@ async def execute_workflow_m2_for_session(
                 should_preempt_to_whatsapp_resume_cursor
                 or should_preempt_to_dialer_resume_cursor
                 or should_preempt_wait_for_event
+                or channel_supplier_resume.terminal
             ):
                 return await _finalize(
                     WorkflowExecutionResult(
@@ -8670,6 +9102,50 @@ async def execute_workflow_m2_for_session(
                     session_id=session_id,
                     runtime_variables=runtime_variables,
                     last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
+                )
+            elif (
+                channel_supplier_resume.terminal
+                and blocking_stop_reason
+                in CHANNEL_SUPPLIER_V2_BLOCKING_STOP_REASONS
+            ):
+                resumed_from_card = str(
+                    session_state.get("last_card_uuid") or ""
+                ).strip()
+                if channel_supplier_resume.channel == "rcs":
+                    branch_label = channel_supplier_resume.branch_label
+                    available_labels = outgoing_branch_labels(
+                        definition,
+                        current_card_uuid=resumed_from_card,
+                    )
+                    selected_branch = (
+                        branch_label
+                        if branch_label in available_labels
+                        else (
+                            "exception"
+                            if "exception" in available_labels
+                            else None
+                        )
+                    )
+                    current_card_uuid = (
+                        resolve_next_card_uuid_by_branch(
+                            definition,
+                            current_card_uuid=resumed_from_card,
+                            branch_label=selected_branch,
+                        )
+                        if selected_branch is not None
+                        else None
+                    )
+                _clear_blocking_execution(runtime_variables)
+                await clear_session_frozen_until(
+                    db_session,
+                    session_id=session_id,
+                )
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(resumed_from_card),
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
             else:
@@ -9876,6 +10352,20 @@ async def execute_workflow_m2_for_session(
                         _set_cursors(runtime_variables, last_cursor=last_card_uuid, next_cursor=next_card_uuid)
                         _mark_blocking_execution(runtime_variables, stopped_reason=blocking_stop_reason)
                         _reset_loop_guard_counter(runtime_variables)
+                        blocking_frozen_until: datetime | None = None
+                        if kind == "send_with_rcs":
+                            active_intent = _channel_supplier_v2_active_intent(
+                                runtime_variables
+                            )
+                            if active_intent is not None:
+                                wait_state = _channel_supplier_v2_rcs_wait_state(
+                                    runtime_variables,
+                                    intent=active_intent,
+                                )
+                                if isinstance(wait_state, dict):
+                                    blocking_frozen_until = _parse_iso_datetime(
+                                        wait_state.get("timeout_at")
+                                    )
 
                         await replace_session_workflow_state(
                             db_session,
@@ -9883,6 +10373,7 @@ async def execute_workflow_m2_for_session(
                             runtime_variables=runtime_variables,
                             last_card_uuid=_to_uuid_or_none(last_card_uuid),
                             next_card_uuid=_to_uuid_or_none(next_card_uuid),
+                            frozen_until=blocking_frozen_until,
                         )
                         step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
                         step_finished_at = datetime.now(timezone.utc)

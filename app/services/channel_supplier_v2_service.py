@@ -4,11 +4,13 @@ import hashlib
 import hmac
 import json
 import re
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import request
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -18,6 +20,12 @@ from app.core.config import Settings, get_settings
 
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+_CALLBACK_TOKEN_PREFIX = "cdv2.1"
+_CALLBACK_TOKEN_SIGNATURE_BYTES = 32
+_CALLBACK_EVENT_KINDS = {
+    "sms": ("dlr", "mo", "status"),
+    "rcs": ("mo", "status"),
+}
 _INTENT_FIELDS = (
     "session_uuid",
     "flow_uuid",
@@ -84,6 +92,20 @@ def channel_supplier_v2_enabled_for_context(
     return workspace in workspaces and flow in flows
 
 
+def channel_supplier_v2_callbacks_enabled_for_context(
+    *, settings: Settings, workspace_uuid: str, flow_uuid: str
+) -> bool:
+    return bool(
+        getattr(settings, "channel_supplier_v2_callbacks_enabled", False)
+    ) and (
+        channel_supplier_v2_enabled_for_context(
+            settings=settings,
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+        )
+    )
+
+
 def _required_uuid(value: Any, field: str) -> str:
     try:
         parsed = UUID(str(value))
@@ -135,6 +157,215 @@ def _fernet(settings: Settings) -> tuple[Fernet, bytes]:
             "A chave de envelope do channel dispatch V2 é inválida.",
             retryable=False,
         ) from exc
+
+
+def _callback_signing_key(settings: Settings) -> bytes:
+    raw_text = str(settings.channel_supplier_v2_encryption_key or "").strip()
+    if not raw_text:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_encryption_key_missing",
+            "A chave de callback do channel dispatch V2 não está configurada.",
+            retryable=False,
+        )
+    try:
+        Fernet(raw_text.encode("ascii"))
+        return hashlib.sha256(
+            b"channel-dispatch-v2:callback-token:" + raw_text.encode("ascii")
+        ).digest()
+    except (ValueError, UnicodeError) as exc:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_encryption_key_invalid",
+            "A chave de callback do channel dispatch V2 é inválida.",
+            retryable=False,
+        ) from exc
+
+
+def _b64url_encode(value: bytes) -> str:
+    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(value: str) -> bytes:
+    if not value or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise ValueError("invalid base64url")
+    padding = "=" * (-len(value) % 4)
+    return urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def build_channel_callback_token(
+    *,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_uuid: str,
+    flow_revision_id: str,
+    component_ref_id: str,
+    channel: str,
+    dispatch_sequence: int,
+    settings: Settings | None = None,
+) -> str:
+    resolved = settings or get_settings()
+    component = str(component_ref_id or "").strip()
+    normalized_channel = str(channel or "").strip().lower()
+    try:
+        sequence = int(dispatch_sequence)
+    except (TypeError, ValueError) as exc:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_identity_invalid",
+            "A identidade do callback SMS/RCS V2 é inválida.",
+            retryable=False,
+        ) from exc
+    if (
+        not component
+        or len(component) > 255
+        or normalized_channel not in _CALLBACK_EVENT_KINDS
+        or sequence <= 0
+    ):
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_identity_invalid",
+            "A identidade do callback SMS/RCS V2 é inválida.",
+            retryable=False,
+        )
+    claims = {
+        "v": 1,
+        "w": _required_uuid(workspace_uuid, "workspace_uuid"),
+        "s": _required_uuid(session_uuid, "session_uuid"),
+        "f": _required_uuid(flow_uuid, "flow_uuid"),
+        "r": _required_uuid(flow_revision_id, "flow_revision_id"),
+        "c": component,
+        "h": normalized_channel,
+        "q": sequence,
+    }
+    encoded_claims = _b64url_encode(
+        json.dumps(
+            claims,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    )
+    signed_value = f"{_CALLBACK_TOKEN_PREFIX}.{encoded_claims}".encode("ascii")
+    signature = hmac.new(
+        _callback_signing_key(resolved), signed_value, hashlib.sha256
+    ).digest()
+    return f"{_CALLBACK_TOKEN_PREFIX}.{encoded_claims}.{_b64url_encode(signature)}"
+
+
+def parse_channel_callback_token(
+    token: str,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    resolved = settings or get_settings()
+    parts = str(token or "").strip().split(".")
+    if len(parts) != 4 or ".".join(parts[:2]) != _CALLBACK_TOKEN_PREFIX:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_token_invalid",
+            "O token de callback SMS/RCS V2 é inválido.",
+            retryable=False,
+        )
+    encoded_claims, encoded_signature = parts[2], parts[3]
+    signed_value = f"{_CALLBACK_TOKEN_PREFIX}.{encoded_claims}".encode("ascii")
+    try:
+        supplied_signature = _b64url_decode(encoded_signature)
+        if len(supplied_signature) != _CALLBACK_TOKEN_SIGNATURE_BYTES:
+            raise ValueError("invalid signature length")
+        expected_signature = hmac.new(
+            _callback_signing_key(resolved), signed_value, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(expected_signature, supplied_signature):
+            raise ValueError("invalid signature")
+        claims = json.loads(_b64url_decode(encoded_claims).decode("ascii"))
+    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_token_invalid",
+            "O token de callback SMS/RCS V2 é inválido.",
+            retryable=False,
+        ) from exc
+    if not isinstance(claims, Mapping) or claims.get("v") != 1:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_token_invalid",
+            "O token de callback SMS/RCS V2 é inválido.",
+            retryable=False,
+        )
+    try:
+        parsed = {
+            "workspace_uuid": _required_uuid(claims.get("w"), "workspace_uuid"),
+            "session_uuid": _required_uuid(claims.get("s"), "session_uuid"),
+            "flow_uuid": _required_uuid(claims.get("f"), "flow_uuid"),
+            "flow_revision_id": _required_uuid(
+                claims.get("r"), "flow_revision_id"
+            ),
+            "component_ref_id": str(claims.get("c") or "").strip(),
+            "channel": str(claims.get("h") or "").strip().lower(),
+            "dispatch_sequence": int(claims.get("q")),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_token_invalid",
+            "O token de callback SMS/RCS V2 é inválido.",
+            retryable=False,
+        ) from exc
+    if (
+        not parsed["component_ref_id"]
+        or len(parsed["component_ref_id"]) > 255
+        or parsed["channel"] not in _CALLBACK_EVENT_KINDS
+        or parsed["dispatch_sequence"] <= 0
+    ):
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_token_invalid",
+            "O token de callback SMS/RCS V2 é inválido.",
+            retryable=False,
+        )
+    return parsed
+
+
+def build_channel_callback_urls(
+    *,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_uuid: str,
+    flow_revision_id: str,
+    component_ref_id: str,
+    channel: str,
+    dispatch_sequence: int,
+    settings: Settings | None = None,
+) -> dict[str, str]:
+    resolved = settings or get_settings()
+    normalized_channel = str(channel or "").strip().lower()
+    event_kinds = _CALLBACK_EVENT_KINDS.get(normalized_channel)
+    base_url = str(resolved.channel_supplier_v2_callback_base_url or "").strip().rstrip(
+        "/"
+    )
+    parsed_base = urlsplit(base_url)
+    if (
+        event_kinds is None
+        or parsed_base.scheme not in {"http", "https"}
+        or not parsed_base.netloc
+        or parsed_base.query
+        or parsed_base.fragment
+    ):
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_callback_base_url_invalid",
+            "A base pública do callback SMS/RCS V2 é inválida.",
+            retryable=False,
+        )
+    token = build_channel_callback_token(
+        workspace_uuid=workspace_uuid,
+        session_uuid=session_uuid,
+        flow_uuid=flow_uuid,
+        flow_revision_id=flow_revision_id,
+        component_ref_id=component_ref_id,
+        channel=normalized_channel,
+        dispatch_sequence=dispatch_sequence,
+        settings=resolved,
+    )
+    orch_base = base_url if base_url.endswith("/v1/orch") else f"{base_url}/v1/orch"
+    return {
+        event_kind: (
+            f"{orch_base}/channel-supplier-v2/callbacks/{token}/"
+            f"{normalized_channel}/{event_kind}"
+        )
+        for event_kind in event_kinds
+    }
 
 
 def build_channel_dispatch_intent(
@@ -406,7 +637,11 @@ __all__ = [
     "ChannelDispatchRegistrationResult",
     "ChannelSupplierV2RegistrationError",
     "build_channel_dispatch_intent",
+    "build_channel_callback_token",
+    "build_channel_callback_urls",
+    "channel_supplier_v2_callbacks_enabled_for_context",
     "channel_supplier_v2_enabled_for_context",
+    "parse_channel_callback_token",
     "parse_channel_dispatch_intent",
     "register_channel_dispatch",
 ]

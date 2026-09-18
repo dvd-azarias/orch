@@ -197,6 +197,7 @@ async def fetch_next_pending_channel_event(
                 event_type,
                 event_id,
                 event_ts,
+                received_at,
                 discard_reason,
                 payload
             FROM orch_channel_events
