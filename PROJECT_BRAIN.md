@@ -61,8 +61,10 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     rejeita webhooks válidos cuja correlação da sessão difere do identificador
     do cliente. Essa igualdade continua obrigatória em `channel`, junto do
     membro e endereço de origem, para preservar a âncora imutável. O canário G
-    `716c84c9-f0c5-4d07-83ab-f983445d6c97` comprovou o gap na sessão `8411`;
-    a correção está validada em testes locais e aguarda rollout canário.
+    `716c84c9-f0c5-4d07-83ab-f983445d6c97` comprovou o gap na sessão `8411`.
+    A PR `#195`, merge `af71850`, foi implantada nos hosts `.136` e `.237`;
+    a sessão pós-deploy `8431` terminou por `selected`, sem alarme, sessão filha
+    ou atuador, preservando uma pessoa e seus dois membros operacionais.
 
 ## O que e o ORCH
 
