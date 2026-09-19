@@ -58,9 +58,24 @@ migration, fila, endpoint ou alteração de catálogo.
 
 ### ROLLOUT / ROLLBACK
 
-- Pendente: commit, PR, merge, deploy gradual dos workers de workflow e nova
-  repetição do canário G com `external_id` diferente do identificador.
-- Rollback sem migration: reverter o commit e reiniciar somente os workers de
+- A PR `#195` integrou o commit funcional `056fdd2`; o merge `af71850` foi
+  implantado por fast-forward em `10.1.20.136` e `10.1.20.237`. Os checksums
+  locais dos respectivos `.env` permaneceram idênticos antes e depois.
+- No `.136`, somente a API foi reiniciada. No `.237`, a API e os cinco workers
+  gerais foram reiniciados gradualmente; todas as units terminaram ativas,
+  readiness e Celery responderam saudáveis e o journal das units afetadas não
+  registrou warning no intervalo pós-deploy.
+- A repetição real do canário G criou a sessão `8431` com `external_id`
+  diferente do identificador do contato. Ela executou
+  `create_contact -> manage_contact_channels -> source_list_membership ->
+  select_contact_channel -> finish_flow`, terminou em `state=3`, selecionou o
+  canal e manteve uma pessoa, dois membros ativos, zero sessão filha, zero
+  `linked_actuator`, zero falha terminal e zero alarme.
+- O teste PostgreSQL transacional foi repetido no código implantado (`1
+  passed`): `channel` continua preso à entidade, ao membro e ao endereço de
+  origem, enquanto `person` resolve pela pessoa forte. As tabelas temporárias
+  foram descartadas pela própria transação.
+- Rollback sem migration: reverter o commit e reiniciar a API e os workers de
   workflow; nenhuma compensação de dados é necessária.
 - Achados separados, fora deste patch: validação Target Core de `ref_id` UUID e
   a corrida curta entre commit da sessão e primeira task.
