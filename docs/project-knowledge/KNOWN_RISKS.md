@@ -582,13 +582,13 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 `PROBABILITY`: low com os dois patches implantados na ordem; high se o contrato protegido for contornado
 
-`AFFECTED AREA`: `identidade_person` / Target Core / fan-out de sessões
+`AFFECTED AREA`: `identidade_person` / `source_list_membership` / Target Core / fan-out de sessões
 
-`DESCRIPTION`: o contrato normal de `POST /v2/flow/{flow_uuid}/mailings` materializa e enfileira membros. Invocá-lo durante uma sessão sem origem protegida poderia criar amplificação ou recursão, inclusive para o contato em execução.
+`DESCRIPTION`: o contrato normal de `POST /v2/flow/{flow_uuid}/mailings` materializa e enfileira membros. Invocá-lo durante uma sessão sem origem protegida poderia criar amplificação ou recursão, inclusive para o contato em execução. O mesmo risco existe quando **Gerenciar Contato na Lista** precisa tornar uma lista operacional para a sessão corrente.
 
-`MITIGATION`: o ORCH conclui pessoa/draft, commita e bloqueia a sessão antes da task de vínculo. A task usa `call_origin=identidade_person`; o Target Core exige que a definição executável declare o mesmo mailing, `person_action != lookup_only` e o checkbox de vínculo, então força `skip_orch_sessions=True`. Vínculo ativo é atualizado idempotentemente para materializar o draft novo e não duplica histórico.
+`MITIGATION`: o ORCH conclui pessoa/draft, commita e bloqueia a sessão antes da task de vínculo. Para Identidade, a task usa `call_origin=identidade_person`; para o propósito operacional do card de lista, usa `call_origin=source_list_membership`. O Target Core autoriza cada origem somente pela configuração correspondente na revisão executável, força `skip_orch_sessions=True`, preserva o estado de membros existentes e permite refresh idempotente do vínculo ativo. O ORCH só libera o card de lista depois de confirmar a materialização e mantém escolha de canal/atuador fora desse efeito.
 
-`DETECTION`: monitorar `blocked_identidade_person_flow_link`, `orch.identidade_person.flow_link.processed` e códigos `identidade_person_flow_link_*`; comparar `flow_mailing_links`, `contact_list_members` e `orch_sessions` por mailing no canário de escrita.
+`DETECTION`: monitorar `blocked_identidade_person_flow_link`, `blocked_source_list_membership_flow_link`, os eventos `orch.*.flow_link.processed` e códigos `*_flow_link_*`; comparar `flow_mailing_links`, `contact_list_members` e `orch_sessions` por mailing no canário de escrita. A contagem de sessões deve permanecer constante.
 
 `EVIDENCE`: o canário pré-deploy `1b54233b-7075-42c9-8085-35c8afad5db7`, executado pela stack local isolada contra as integrações reais, criou 1 pessoa, 1 draft, 8 canais/membros e 1 vínculo ativo. A chamada protegida ao Target Core retornou HTTP 200 em uma tentativa e a contagem do flow aumentou somente uma sessão. Repetir após deploy do patch de compatibilidade de `birthdate` antes de considerar a versão implantada validada.
 

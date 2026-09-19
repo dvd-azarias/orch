@@ -77,6 +77,20 @@ def _person() -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "source_list_membership_flow_link_target_core_http_error",
+        "source_list_membership_materialization_not_found",
+        "source_list_membership_persistence_failed",
+    ],
+)
+def test_membership_errors_are_terminal_without_exception_branch(
+    error_code: str,
+) -> None:
+    assert workflow._is_terminal_workflow_error_code(error_code) is True
+
+
 @pytest.fixture(autouse=True)
 def _flow_scope_dependencies(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(
@@ -197,6 +211,229 @@ async def test_membership_is_idempotent_and_accepts_serialized_parameters(monkey
     assert runtime["variables"]["customs"]["source_list_membership"]["action"] == (
         "unchanged"
     )
+
+
+@pytest.mark.asyncio
+async def test_membership_operational_persists_then_blocks_for_target_refresh(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        AsyncMock(
+            return_value={"id": 1139, "public_id": MAILING_UUID, "status": "PROCESSED"}
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "ensure_person_in_source_list",
+        AsyncMock(
+            return_value={
+                "created": True,
+                "contact_draft_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "channels": 2,
+            }
+        ),
+    )
+    runtime = _runtime()
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(
+            mailing_source="selected",
+            membership_purpose="current_flow_operational",
+        ),
+        runtime_variables=runtime,
+    )
+
+    assert branch is None
+    state = runtime["workflow_v2"]["source_list_membership_flow_link"]
+    assert state == {
+        "component_ref_id": "source-list-membership-1",
+        "flow_uuid": FLOW_UUID,
+        "mailing_uuid": MAILING_UUID,
+        "person_uuid": PERSON_UUID,
+        "status": "pending",
+        "attempts": 0,
+        "status_code": None,
+        "initial_operation_changed": True,
+        "source_membership_created": True,
+        "requested_at": ANY,
+        "completed_at": None,
+        "last_error": None,
+    }
+    output = runtime["variables"]["customs"]["source_list_membership"]
+    assert output["membership_purpose"] == "current_flow_operational"
+    assert output["flow_link_status"] == "pending"
+    assert output["sessions_created"] == 0
+
+
+@pytest.mark.asyncio
+async def test_membership_operational_resumes_same_card_after_materialization(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_person_by_uuid_for_update",
+        AsyncMock(return_value=_person()),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "resolve_source_list_by_public_id",
+        AsyncMock(
+            return_value={"id": 1139, "public_id": MAILING_UUID, "status": "PROCESSED"}
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "ensure_person_in_source_list",
+        AsyncMock(
+            return_value={
+                "created": False,
+                "contact_draft_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "channels": 2,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_active_flow_mailing_link",
+        AsyncMock(
+            return_value={
+                "contact_list_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "set_person_materialized_membership_state",
+        AsyncMock(
+            return_value={
+                "contact_list_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                "previous_state": "active",
+                "matched_members": 2,
+                "members_changed": 0,
+                "sessions_stopped": 0,
+            }
+        ),
+    )
+    runtime = _runtime()
+    runtime["workflow_v2"] = {
+        "source_list_membership_flow_link": {
+            "component_ref_id": "source-list-membership-1",
+            "status": "completed",
+            "initial_operation_changed": True,
+            "source_membership_created": True,
+        }
+    }
+
+    branch = await workflow._run_source_list_membership(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        component=_component(
+            mailing_source="selected",
+            membership_purpose="current_flow_operational",
+        ),
+        runtime_variables=runtime,
+    )
+
+    assert branch == "changed"
+    assert runtime["workflow_v2"]["source_list_membership_flow_link"]["status"] == (
+        "consumed"
+    )
+    output = runtime["variables"]["customs"]["source_list_membership"]
+    assert output["flow_link_status"] == "completed"
+    assert output["source_membership_created"] is True
+    assert output["materialized_members"] == 2
+    assert output["sessions_created"] == 0
+    operational_scope = runtime["workflow_v2"][
+        "source_list_membership_operational_scope"
+    ]
+    assert operational_scope["status"] == "ready"
+    assert operational_scope["contact_list_id"] == (
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    )
+    assert operational_scope["mailing_id"] == 1139
+    assert operational_scope["person_uuid"] == PERSON_UUID
+
+
+@pytest.mark.asyncio
+async def test_membership_operational_failed_refresh_routes_as_runtime_error() -> None:
+    runtime = _runtime()
+    runtime["workflow_v2"] = {
+        "source_list_membership_flow_link": {
+            "component_ref_id": "source-list-membership-1",
+            "status": "failed",
+            "last_error": {
+                "code": "source_list_membership_flow_link_target_core_http_error",
+                "message": "Target Core respondeu HTTP 503.",
+            },
+        }
+    }
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow._run_source_list_membership(
+            db_session=_NestedSession(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            session_id=123,
+            component=_component(
+                mailing_source="selected",
+                membership_purpose="current_flow_operational",
+            ),
+            runtime_variables=runtime,
+        )
+
+    assert exc_info.value.code == (
+        "source_list_membership_flow_link_target_core_http_error"
+    )
+    assert runtime["workflow_v2"]["source_list_membership_flow_link"]["status"] == (
+        "consumed"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("parameters", "error_code"),
+    [
+        (
+            {
+                "membership_state": "inactive",
+                "membership_purpose": "current_flow_operational",
+            },
+            "source_list_membership_operational_requires_active",
+        ),
+        (
+            {
+                "mailing_source": "session_origin",
+                "mailing_id": None,
+                "membership_purpose": "current_flow_operational",
+            },
+            "source_list_membership_operational_requires_selected_mailing",
+        ),
+    ],
+)
+async def test_membership_operational_rejects_unsafe_runtime_shapes(
+    parameters: dict,
+    error_code: str,
+) -> None:
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow._run_source_list_membership(
+            db_session=_NestedSession(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            session_id=123,
+            component=_component(**parameters),
+            runtime_variables=_runtime_with_session_origin(),
+        )
+
+    assert exc_info.value.code == error_code
 
 
 @pytest.mark.asyncio
@@ -858,6 +1095,54 @@ async def test_execute_workflow_routes_membership_by_changed_branch(monkeypatch)
     assert result.last_card_uuid == finish_ref
     assert runtime["variables"]["customs"]["source_list_membership"]["action"] == "changed"
     assert any(item.get("next_card_uuid") == finish_ref for item in persisted)
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_blocks_operational_membership_on_same_card(
+    monkeypatch,
+) -> None:
+    membership_ref = "11111111-1111-1111-1111-111111111111"
+    finish_ref = "22222222-2222-2222-2222-222222222222"
+    definition = {
+        "components": [
+            {
+                **_component(
+                    mailing_source="selected",
+                    membership_purpose="current_flow_operational",
+                ),
+                "ref_id": membership_ref,
+            },
+            {"ref_id": finish_ref, "component_id": "finish_flow", "parameters": {}},
+        ],
+        "branches": [
+            {"from": membership_ref, "to": finish_ref, "branch": "changed"}
+        ],
+    }
+    runtime = _runtime()
+    persisted: list[dict] = []
+    _configure_workflow_dependencies(
+        monkeypatch,
+        definition=definition,
+        runtime=runtime,
+        persisted=persisted,
+    )
+    run_membership = AsyncMock(return_value=None)
+    monkeypatch.setattr(workflow, "_run_source_list_membership", run_membership)
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_source_list_membership_flow_link"
+    assert result.executed_steps == 1
+    run_membership.assert_awaited_once()
+    assert persisted[-1]["last_card_uuid"] == membership_ref
+    assert persisted[-1]["next_card_uuid"] == membership_ref
+    assert runtime["workflow_v2"]["blocking_stop_reason"] == (
+        "blocked_source_list_membership_flow_link"
+    )
 
 
 @pytest.mark.asyncio

@@ -180,7 +180,7 @@ def _configure_execution(
     *,
     runtime: dict,
     definition: dict,
-    contact_row: dict,
+    contact_row: dict | None,
 ) -> list[dict]:
     persisted: list[dict] = []
     monkeypatch.setattr(workflow, "_read_enabled", lambda _settings: True)
@@ -356,6 +356,69 @@ async def test_person_scope_selects_another_member_and_rebinds_session(
     assert selection["contact_list_member_id"] == 88
     assert selection["type"] == "whatsapp"
     assert selection["address"] == "5511988880002"
+
+
+@pytest.mark.asyncio
+async def test_person_scope_selects_from_operational_membership_without_initial_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _contact_row(
+        member_id=88,
+        channel_type="whatsapp",
+        channel_label="celular",
+        address="5511988880002",
+    )
+    fetch_candidate = AsyncMock(return_value=candidate)
+    rebind = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+    monkeypatch.setattr(
+        workflow,
+        "rebind_person_session_to_contact_channel",
+        rebind,
+    )
+    runtime = _runtime(session_scope="person")
+    runtime["input_payload"] = {"session_scope": "person"}
+    runtime["variables"]["contact"] = {
+        "person_uuid": PERSON_UUID,
+        "identifier": "12345678901",
+    }
+    runtime["workflow_v2"]["person_adoption"] = {
+        "status": "adopted",
+        "person_uuid": PERSON_UUID,
+        "identifier": "12345678901",
+    }
+    runtime["workflow_v2"]["source_list_membership_operational_scope"] = {
+        "status": "ready",
+        "contact_list_id": CONTACT_LIST_UUID,
+        "mailing_id": 1140,
+        "person_uuid": PERSON_UUID,
+    }
+
+    workflow._ensure_unbound_person_component_supported(
+        session_scope="person",
+        component_kind_value="select_contact_channel",
+        runtime_variables=runtime,
+        contact_row=None,
+        person_scope_without_selectors=True,
+    )
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(channel_type="whatsapp", channel_label="celular"),
+        runtime_variables=runtime,
+        contact_row=None,
+    )
+
+    assert execution.branch_label == "selected"
+    assert fetch_candidate.await_args.kwargs["contact_list_member_id"] == 0
+    assert fetch_candidate.await_args.kwargs["contact_list_id"] == CONTACT_LIST_UUID
+    assert fetch_candidate.await_args.kwargs["mailing_id"] == 1140
+    assert fetch_candidate.await_args.kwargs["person_uuid"] == PERSON_UUID
+    assert rebind.await_args.kwargs["contact_list_member_id"] == 88
 
 
 @pytest.mark.parametrize(
@@ -827,6 +890,67 @@ async def test_executor_dispatches_person_selection_and_follows_selected_branch(
         runtime["workflow_v2"]["selected_contact_channel"]["contact_list_member_id"]
         == 88
     )
+    assert any(item.get("next_card_uuid") == SELECTED_REF for item in persisted)
+    rebind.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_executor_selects_after_operational_membership_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(session_scope="person")
+    runtime["input_payload"] = {"session_scope": "person"}
+    runtime["variables"]["contact"] = {
+        "person_uuid": PERSON_UUID,
+        "identifier": "12345678901",
+    }
+    runtime["workflow_v2"]["person_adoption"] = {
+        "status": "adopted",
+        "person_uuid": PERSON_UUID,
+        "identifier": "12345678901",
+    }
+    runtime["workflow_v2"]["source_list_membership_operational_scope"] = {
+        "status": "ready",
+        "contact_list_id": CONTACT_LIST_UUID,
+        "mailing_id": 1140,
+        "person_uuid": PERSON_UUID,
+    }
+    persisted = _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        definition=_definition(),
+        contact_row=None,
+    )
+    selected = _contact_row(
+        member_id=88,
+        channel_type="voice",
+        channel_label="telefone_2",
+        address="5511988880002",
+        is_primary=False,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_select_contact_channel_candidate",
+        AsyncMock(return_value=selected),
+    )
+    rebind = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        workflow,
+        "rebind_person_session_to_contact_channel",
+        rebind,
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "finished_by_component"
+    assert runtime["variables"]["contact"]["contact_list_member_id"] == 88
+    assert runtime["workflow_v2"]["selected_contact_channel"][
+        "contact_list_member_id"
+    ] == 88
     assert any(item.get("next_card_uuid") == SELECTED_REF for item in persisted)
     rebind.assert_awaited_once()
 

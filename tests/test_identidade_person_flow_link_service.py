@@ -57,3 +57,24 @@ async def test_link_identidade_mailing_treats_http_200_partial_error_as_failure(
     assert result.success is False
     assert result.reason == "target_core_link_not_confirmed"
     assert result.message == "Não autorizado."
+
+
+@pytest.mark.asyncio
+async def test_link_membership_operacional_uses_dedicated_origin(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def _post_json(**kwargs):
+        calls.append(kwargs)
+        return 200, '{"data":[{"results":{"linked":["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],"errors":{}}}]}'
+
+    monkeypatch.setattr(service, "_post_json", _post_json)
+
+    result = await service.link_source_list_membership_mailing_to_current_flow(
+        settings=_Settings(),
+        workspace_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        flow_uuid="cccccccc-cccc-cccc-cccc-cccccccccccc",
+        mailing_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+
+    assert result.success is True
+    assert calls[0]["payload"]["call_origin"] == "source_list_membership"

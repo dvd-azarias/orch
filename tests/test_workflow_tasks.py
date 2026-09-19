@@ -179,6 +179,54 @@ async def test_advance_session_enqueues_identidade_link_only_after_commit(monkey
 
 
 @pytest.mark.asyncio
+async def test_advance_session_enqueues_membership_link_only_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    session_context = _DummySessionContext(events)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            celery_execute_queue="orch_execute_test",
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_session_factory",
+        lambda: (lambda: session_context),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "bind_workspace_context",
+        lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"),
+    )
+
+    async def _advance(*_args, **_kwargs) -> str:
+        return "blocked_source_list_membership_flow_link"
+
+    async def _persist_metrics(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(workflow_tasks, "advance_session_once", _advance)
+    monkeypatch.setattr(workflow_tasks, "persist_session_metrics", _persist_metrics)
+    monkeypatch.setattr(
+        workflow_tasks.link_source_list_membership_mailing_task,
+        "apply_async",
+        lambda **_kwargs: events.append("enqueue"),
+    )
+
+    await workflow_tasks._advance_session_task(
+        workspace_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        flow_uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        session_id=123,
+    )
+
+    assert events == ["commit", "enqueue"]
+
+
+@pytest.mark.asyncio
 async def test_advance_session_enqueues_supplier_v2_only_after_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
