@@ -195,3 +195,55 @@ async def test_existing_source_list_draft_binds_birthdate_as_date() -> None:
     )
 
     assert session.calls[1][1]["birthdate"] == date(1940, 8, 12)
+
+
+@pytest.mark.asyncio
+async def test_source_list_draft_preserves_inactive_channel_state() -> None:
+    session = _Session(
+        [
+            _Result({"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}),
+            _Result(),
+            _Result(),
+            _Result(),
+            _Result(),
+        ]
+    )
+
+    await repository.ensure_person_in_source_list(
+        session,  # type: ignore[arg-type]
+        source_list_id=1139,
+        person={
+            **_person_payload(
+                channels=[
+                    {
+                        "type": "voice",
+                        "value": "21999999999",
+                        "label": "desativado",
+                        "is_primary": True,
+                        "state": "inactive",
+                        "is_valid": True,
+                        "is_reachable": True,
+                    },
+                    {
+                        "type": "email",
+                        "value": "pessoa@example.com",
+                        "label": "ativo",
+                        "is_primary": False,
+                    },
+                ]
+            ),
+            "uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        },
+    )
+
+    inactive_params = session.calls[2][1]
+    active_params = session.calls[3][1]
+    assert inactive_params["is_valid"] is False
+    assert inactive_params["is_reachable"] is False
+    assert inactive_params["is_primary"] is False
+    assert active_params["is_valid"] is True
+    assert active_params["is_reachable"] is True
+    assert active_params["is_primary"] is True
+    sql = str(session.calls[2][0]).lower()
+    assert "is_valid = excluded.is_valid" in sql
+    assert "is_reachable = excluded.is_reachable" in sql

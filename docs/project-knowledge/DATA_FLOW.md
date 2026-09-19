@@ -415,6 +415,22 @@ Na criação explícita pelo endpoint `/sessions`, um payload com `session_scope
 
 Em `channel`, `select_contact_channel` só pode selecionar o membro/endereço que já originou a sessão. Em `person`, a busca exige `person_uuid`, permanece dentro da mesma pessoa, `contact_list_id` e `mailing_id`, prioriza o canal marcado como primário e usa o menor `contact_list_member_id` como desempate. O rebind altera apenas `orch_sessions.entity_address` e falha de forma diagnosticável diante de perda de escopo ou colisão com outra sessão ativa. Uma tentativa posterior em `not_found` ou `exception` limpa a seleção anterior e volta a bloquear comunicação até novo `selected`.
 
+## Gerenciamento cadastral de canais
+
+```text
+pessoa adotada em session_mode=person
+  -> manage_contact_channels normaliza a lista solicitada
+  -> lock da pessoa + operação atômica em persons.channels
+  -> projeção primária legada aplicada somente se disponível
+  -> changed | unchanged | not_found | conflict | exception
+```
+
+O card não cria `source_list`, `contact_draft`, `contact_list_member`, sessão ou
+atuador. `source_list_membership` continua sendo a fronteira de lista, e
+`select_contact_channel` continua sendo a única operação que escolhe um
+endereço operacional para a sessão. Ao copiar uma pessoa para uma lista, os
+flags `is_valid/is_reachable` são preservados no draft.
+
 ## Generate file
 
 ```text

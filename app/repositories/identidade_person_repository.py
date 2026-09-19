@@ -348,6 +348,19 @@ async def ensure_person_in_source_list(
         for item in (person.get("channels") if isinstance(person.get("channels"), list) else [])
         if isinstance(item, dict) and str(item.get("type") or "").strip() and str(item.get("value") or "").strip()
     ]
+    active_channel_indexes = [
+        index
+        for index, channel in enumerate(channels)
+        if str(channel.get("state") or "active").strip().lower() != "inactive"
+        and channel.get("is_valid") is not False
+        and channel.get("is_reachable") is not False
+    ]
+    active_primary_indexes = [
+        index
+        for index in active_channel_indexes
+        if channels[index].get("is_primary") is True
+    ]
+    fallback_primary_index = active_channel_indexes[0] if active_channel_indexes else None
     existing_result = await db_session.execute(
         text(
             """
@@ -495,8 +508,8 @@ async def ensure_person_in_source_list(
                     :channel_value,
                     :channel_label,
                     :is_primary,
-                    TRUE,
-                    TRUE,
+                    :is_valid,
+                    :is_reachable,
                     FALSE,
                     NOW(),
                     NOW()
@@ -504,8 +517,8 @@ async def ensure_person_in_source_list(
                 ON CONFLICT (contact_draft_id, type, value) DO UPDATE SET
                     dialer_label = EXCLUDED.dialer_label,
                     is_primary = EXCLUDED.is_primary,
-                    is_valid = TRUE,
-                    is_reachable = TRUE,
+                    is_valid = EXCLUDED.is_valid,
+                    is_reachable = EXCLUDED.is_reachable,
                     updated_at = NOW()
                 """
             ),
@@ -514,7 +527,13 @@ async def ensure_person_in_source_list(
                 "channel_type": str(channel.get("type")).strip().lower(),
                 "channel_value": str(channel.get("value")).strip(),
                 "channel_label": str(channel.get("label") or "identidade")[:60],
-                "is_primary": bool(channel.get("is_primary")) or index == 0,
+                "is_primary": (
+                    index == active_primary_indexes[0]
+                    if active_primary_indexes
+                    else index == fallback_primary_index
+                ),
+                "is_valid": index in active_channel_indexes,
+                "is_reachable": index in active_channel_indexes,
             },
         )
 
@@ -531,7 +550,14 @@ async def ensure_person_in_source_list(
                 WHERE id = :source_list_id
                 """
             ),
-            {"source_list_id": source_list_id, "without_channel": 0 if channels else 1},
+            {
+                "source_list_id": source_list_id,
+                "without_channel": (
+                    0
+                    if active_channel_indexes
+                    else 1
+                ),
+            },
         )
 
     await db_session.execute(

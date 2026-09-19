@@ -146,6 +146,7 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `switch_bot_flow` envia ao provider `whatsapp` do Runner v5 o mesmo conteudo JSON recebido da Meta, inclusive no primeiro evento; nao cria envelope sintetico e nao encaminha status `sent/delivered/read/failed`. Usar `/webhook/session` fragmenta a identidade e desvia o dispatch para uma integracao webhook do flow.
 - A sessao ORCH permanece bloqueada no `switch_bot_flow` ate callback terminal. O `finish_flow` BOT observado em runtime envia ao alias curto do proprio flow ORCH um envelope `entity + session.id + disposition`; `session.id` coincide com `target_session_id`. Esse envelope deve ser consumido antes do trigger comum para nao criar uma sessao fantasma. O primeiro estado terminal vence callbacks tardios conflitantes.
 - `identidade_person` em `lookup_only` não pode escrever em `persons` ou listas. Telefones marcados `do_not_disturb` não podem virar canais acionáveis. O vínculo mailing→flow usa `call_origin=identidade_person` somente depois do commit local; o Target valida o card publicado, materializa membros idempotentemente e não redispara sessões.
+- `manage_contact_channels` é exclusivo de `person` e opera somente após a adoção de uma pessoa. `upsert|deactivate` altera `persons.channels` de forma idempotente, sem criar lista, membro, sessão ou `linked_actuator`; o mesmo endereço pode pertencer a pessoas diferentes. A cópia para `contact_draft_channels` deve preservar `is_valid/is_reachable` para não ressuscitar canal desativado.
 
 ## Estado da baseline
 
@@ -215,3 +216,4 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `docs/project-knowledge/MULTI_DIALER_EXECUTION_PLAN.md` — fonte única da verdade para N cards do novo Dialer por flow, com contratos, gates T1–H1, evidências, rollout fail-closed e retorno obrigatório ao flow completo.
 - `docs/project-knowledge/FLOW_SESSION_SCOPE_CONTRACT.md` — contrato normativo Person/Channel, seleção de canal, Dial Rule, validações 422 e ordem segura para retomar o canário multidialer e o flow completo.
 - `docs/project-knowledge/JOURNEY_TRACKING.md` — contrato read-only, privacidade, guardrails, UI, rollout e retorno ao flow completo do Rastreamento de Jornadas.
+- `docs/project-knowledge/CONTACT_CHANNEL_MANAGEMENT.md` — contrato, normalização, idempotência, projeção primária legada, segurança, testes e sequência de homologação do card genérico de canais.

@@ -1,5 +1,40 @@
 # Maintenance Log
 
+## 2026-09-18 — Gate D: gerenciamento genérico de canais
+
+### REQUEST / CLASSIFICATION
+
+Homologar criação, atualização, prioridade e desativação de canais em canário
+isolado antes da portabilidade Velox e da retomada do fluxo completo.
+`ALPHA_FIX_OPTIONAL`, sem migration, fila, endpoint ou efeito externo.
+
+### CHANGE
+
+- Novo handler `manage_contact_channels`, exclusivo de `person` após adoção da
+  pessoa, com operações `upsert|deactivate` e branches determinísticas.
+- Normalização canônica de telefone/e-mail e idempotência por
+  pessoa+tipo+endereço.
+- Mesmo endereço continua permitido em pessoas diferentes; a projeção primária
+  global legada é best-effort, sob advisory lock.
+- Associação posterior a lista respeita `state=inactive` e os flags de
+  validade/alcance, preservando canais inativos em vez de reativá-los.
+- O card não cria lista, membro, sessão, fan-out, comunicação ou
+  `linked_actuator`.
+
+### VALIDATION LOCAL
+
+- `116 passed` na regressão de engine e cards de contato/canal.
+- `4 passed` em PostgreSQL real com tabelas temporárias, fora da sandbox.
+- `98 passed` no catálogo/422 e regressões direcionadas do Target Core.
+- `py_compile` e `git diff --check` passaram.
+
+### PENDING
+
+- Commit/PR, merge e deploy coordenado Target Core → ORCH.
+- Criar e executar o canário D conectado no HighComm.
+- Depois, portar os dois flows Velox de referência e retomar o fluxo completo
+  `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.
+
 ## 2026-09-18 — Bootstrap e adoção de pessoa nos cards de contato
 
 Classificação: `ALPHA_FIX_REQUIRED`, branch
