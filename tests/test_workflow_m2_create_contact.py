@@ -127,6 +127,29 @@ def test_build_payload_preserva_false_e_zero_em_extras() -> None:
     assert configured == ["extra.enabled", "extra.score"]
 
 
+def test_build_payload_vazio_so_e_aceito_quando_explicitamente_permitido() -> None:
+    mapping = [
+        {"key": "full_name", "value": "{{payload.name}}"},
+        {"key": "city", "value": "{{payload.city}}"},
+    ]
+    resolution_scope = {"payload": {"name": "", "city": None}}
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        workflow._build_create_contact_payload(
+            mapping=mapping,
+            resolution_scope=resolution_scope,
+        )
+
+    assert exc_info.value.code == "create_contact_empty_mapping"
+    payload, configured = workflow._build_create_contact_payload(
+        mapping=mapping,
+        resolution_scope=resolution_scope,
+        allow_empty=True,
+    )
+    assert payload == {"extras": {}}
+    assert configured == []
+
+
 @pytest.mark.parametrize("field", ["identifier", "address", "channels", "name"])
 def test_build_payload_rejeita_campos_fora_do_novo_contrato(field: str) -> None:
     with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
@@ -372,6 +395,77 @@ async def test_upsert_atualiza_pessoa_existente_com_politica(monkeypatch) -> Non
     payload = update.await_args.kwargs["payload"]
     assert payload["full_name"] == "Nome Novo"
     assert payload["extras"]["segment"] == "premium"
+
+
+@pytest.mark.asyncio
+async def test_upsert_existente_com_mapping_vazio_preserva_e_segue_unchanged(monkeypatch) -> None:
+    existing = _person(
+        full_name="Nome Preservado",
+        country="BR",
+        state="SP",
+        city="Campinas",
+        extras={"origin": "preserved"},
+    )
+    monkeypatch.setattr(
+        workflow,
+        "fetch_create_contact_person_by_identifier_for_update",
+        AsyncMock(return_value=existing),
+    )
+    update = AsyncMock()
+    monkeypatch.setattr(workflow, "update_create_contact_person_profile", update)
+    runtime = _runtime(name="", segment=None, city="", country=None, state="   ")
+
+    branch = await workflow._run_create_contact(
+        db_session=_NestedSession(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        component=_component(
+            enrichment_policy="overwrite_non_null",
+            mapping=[
+                {"key": "full_name", "value": "{{payload.name}}"},
+                {"key": "country", "value": "{{payload.country}}"},
+                {"key": "state", "value": "{{payload.state}}"},
+                {"key": "city", "value": "{{payload.city}}"},
+            ],
+        ),
+        runtime_variables=runtime,
+        contact_row=None,
+    )
+
+    assert branch == "unchanged"
+    update.assert_not_awaited()
+    assert runtime["variables"]["customs"]["contact_action"] == {
+        "action": "unchanged",
+        "person_uuid": PERSON_UUID,
+        "identifier": "12345678901",
+        "changed_fields": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_upsert_novo_com_mapping_vazio_permanece_rejeitado(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "fetch_create_contact_person_by_identifier_for_update",
+        AsyncMock(return_value=None),
+    )
+    insert = AsyncMock()
+    monkeypatch.setattr(workflow, "insert_create_contact_person_if_missing", insert)
+    runtime = _runtime(name="", segment=None)
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow._run_create_contact(
+            db_session=_NestedSession(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            component=_component(
+                enrichment_policy="overwrite_non_null",
+                mapping=[{"key": "full_name", "value": "{{payload.name}}"}],
+            ),
+            runtime_variables=runtime,
+            contact_row=None,
+        )
+
+    assert exc_info.value.code == "create_contact_empty_mapping"
+    insert.assert_not_awaited()
 
 
 @pytest.mark.asyncio

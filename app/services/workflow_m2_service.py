@@ -7284,6 +7284,7 @@ def _build_create_contact_payload(
     *,
     mapping: Any,
     resolution_scope: dict[str, Any],
+    allow_empty: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     payload: dict[str, Any] = {}
     extras: dict[str, Any] = {}
@@ -7298,7 +7299,7 @@ def _build_create_contact_payload(
             _set_by_path(extras, key.removeprefix("extra."), _create_contact_json_safe(value))
         configured_fields.append(key)
 
-    if not configured_fields:
+    if not configured_fields and not allow_empty:
         raise WorkflowExecutionError(
             "create_contact_empty_mapping",
             "Nenhum valor do mapping pôde ser resolvido no runtime.",
@@ -7481,6 +7482,7 @@ async def _run_create_contact(
                         incoming, _ = _build_create_contact_payload(
                             mapping=params.get("mapping"),
                             resolution_scope=resolution_scope,
+                            allow_empty=True,
                         )
                         identifier = str(existing.get("identifier") or "").strip() or None
                         merged, changed_fields = _merge_create_contact_payload(
@@ -7543,6 +7545,7 @@ async def _run_create_contact(
                         incoming, _ = _build_create_contact_payload(
                             mapping=params.get("mapping"),
                             resolution_scope=resolution_scope,
+                            allow_empty=True,
                         )
                         merged, changed_fields = _merge_create_contact_payload(
                             existing,
