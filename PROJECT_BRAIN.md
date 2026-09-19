@@ -54,6 +54,15 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     provaram criação, repetição idempotente, vínculo sem sessão filha e
     enriquecimento de pessoa existente. A mudança está validada localmente e
     ainda não foi implantada.
+30. Em sessão `person`, `external_id` identifica a execução e não a pessoa. O
+    `select_contact_channel` precisa resolver e reancorar o membro por
+    `person_uuid + contact_list_id + mailing_id`; exigir que
+    `orch_sessions.entity` seja igual a `contact_list_members.contact_identifier`
+    rejeita webhooks válidos cuja correlação da sessão difere do identificador
+    do cliente. Essa igualdade continua obrigatória em `channel`, junto do
+    membro e endereço de origem, para preservar a âncora imutável. O canário G
+    `716c84c9-f0c5-4d07-83ab-f983445d6c97` comprovou o gap na sessão `8411`;
+    a correção está validada em testes locais e aguarda rollout canário.
 
 ## O que e o ORCH
 

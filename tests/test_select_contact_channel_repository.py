@@ -64,6 +64,7 @@ async def test_channel_candidate_is_pinned_to_source_member_and_session_address(
         "BTRIM(clm.contact_channel_address) = BTRIM(os.entity_address)"
         in session.statement
     )
+    assert "os.entity = clm.contact_identifier" in session.statement
     assert "source_channel.is_primary" in session.statement
     assert (
         "ORDER BY COALESCE(source_channel.is_primary, false) DESC, clm.id ASC"
@@ -92,6 +93,7 @@ async def test_person_candidate_can_change_member_but_preserves_person_list_and_
         not in session.statement
     )
     assert "clm.person_uuid = CAST(:person_uuid AS uuid)" in session.statement
+    assert "os.entity = clm.contact_identifier" not in session.statement
     assert "clm.contact_list_id = CAST(:contact_list_id AS uuid)" in session.statement
     assert "clm.mailing_id = CAST(:mailing_id AS bigint)" in session.statement
     assert session.parameters["channel_type"] == "whatsapp"
@@ -160,7 +162,7 @@ async def test_rcs_candidate_uses_exact_persisted_type_without_phone_fallback() 
 
 
 @pytest.mark.asyncio
-async def test_person_rebind_validates_scope_and_active_session_without_actuator_write() -> (
+async def test_person_rebind_uses_person_identity_instead_of_session_external_id() -> (
     None
 ):
     session = _RecordingSession(123)
@@ -177,7 +179,8 @@ async def test_person_rebind_validates_scope_and_active_session_without_actuator
 
     assert rebound is True
     assert "entity_address = BTRIM(clm.contact_channel_address)" in session.statement
-    assert "clm.contact_identifier = os.entity" in session.statement
+    assert "clm.contact_identifier = os.entity" not in session.statement
+    assert "clm.person_uuid = CAST(:person_uuid AS uuid)" in session.statement
     assert "conflicting.state <> 3" in session.statement
     assert "conflicting.unassigned_at IS NULL" in session.statement
     assert "linked_actuator" not in session.statement
