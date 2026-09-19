@@ -16,7 +16,7 @@ Ordem segura para uma jornada com atuação na mesma sessão:
 create_contact ou identidade_person
   -> manage_contact_channels
   -> source_list_membership
-  -> materialização operacional explícita (quando implementada)
+     (finalidade: Disponibilizar para uso neste fluxo)
   -> select_contact_channel
   -> atuador explícito
 ```
@@ -68,8 +68,10 @@ Não pode reativar um canal desativado apenas porque a pessoa foi associada
 novamente a uma lista.
 
 O card não atualiza `contact_list_members` já materializados. A materialização
-operacional continua sendo um contrato separado e deverá ser explícita antes
-de `select_contact_channel` utilizar um canal recém-criado na mesma sessão.
+operacional é um contrato separado e explícito do `source_list_membership`: ela
+associa a lista ao flow sem fan-out, confirma os membros e entrega somente o
+escopo pessoa/lista. `select_contact_channel` continua responsável por escolher
+e revincular o endereço na mesma sessão.
 
 ## Segurança e rollback
 

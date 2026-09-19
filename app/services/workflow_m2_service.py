@@ -155,6 +155,7 @@ WHATSAPP_BLOCKING_STOP_REASONS_BY_KIND = {
     "run_flow": "blocked_run_flow",
     "switch_bot_flow": "blocked_switch_bot_flow",
     "identidade_person": "blocked_identidade_person_flow_link",
+    "source_list_membership": "blocked_source_list_membership_flow_link",
 }
 WAIT_FOR_EVENT_BLOCKING_STOP_REASON = "blocked_wait_for_event"
 WAIT_FOR_EVENT_RESULT_RE = re.compile(r"[A-Za-z0-9._:-]+$")
@@ -207,6 +208,9 @@ SWITCH_BOT_FLOW_BLOCKING_STOP_REASONS = {
 }
 IDENTIDADE_PERSON_BLOCKING_STOP_REASONS = {
     "blocked_identidade_person_flow_link",
+}
+SOURCE_LIST_MEMBERSHIP_BLOCKING_STOP_REASONS = {
+    "blocked_source_list_membership_flow_link",
 }
 CHANNEL_SUPPLIER_V2_BLOCKING_STOP_REASONS = {
     "blocked_send_with_sms": "sms",
@@ -304,6 +308,7 @@ def _is_terminal_workflow_error_code(code: str) -> bool:
         code in TERMINAL_WORKFLOW_ERROR_CODES
         or code.startswith("identidade_person_")
         or code.startswith("manage_contact_channels_")
+        or code.startswith("source_list_membership_")
     )
 
 
@@ -338,6 +343,7 @@ UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS = {
 UNBOUND_PERSON_ADOPTED_COMPONENT_KINDS = {
     *UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS,
     "manage_contact_channels",
+    "select_contact_channel",
     "source_list_membership",
 }
 
@@ -515,6 +521,35 @@ def _active_selected_contact_channel(
     }
 
 
+def _source_list_membership_operational_scope(
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow_meta = runtime_variables.get("workflow_v2")
+    raw_scope = (
+        workflow_meta.get("source_list_membership_operational_scope")
+        if isinstance(workflow_meta, dict)
+        else None
+    )
+    if not isinstance(raw_scope, dict):
+        return None
+    if str(raw_scope.get("status") or "").strip().lower() != "ready":
+        return None
+    try:
+        contact_list_id = str(UUID(str(raw_scope.get("contact_list_id"))))
+        mailing_id = int(raw_scope.get("mailing_id"))
+        person_uuid = str(UUID(str(raw_scope.get("person_uuid"))))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if mailing_id <= 0:
+        return None
+    return {
+        **raw_scope,
+        "contact_list_id": contact_list_id,
+        "mailing_id": mailing_id,
+        "person_uuid": person_uuid,
+    }
+
+
 def _routing_scope_from_selected_contact_channel(
     selection: dict[str, Any],
 ) -> _ContactMemberRoutingScope:
@@ -581,6 +616,17 @@ def _unbound_person_component_allowed(
 ) -> bool:
     if component_kind_value in UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS:
         return True
+    if component_kind_value == "select_contact_channel":
+        adopted_identity = _adopted_person_identity(runtime_variables)
+        operational_scope = _source_list_membership_operational_scope(
+            runtime_variables
+        )
+        return (
+            adopted_identity is not None
+            and operational_scope is not None
+            and adopted_identity["person_uuid"]
+            == operational_scope["person_uuid"]
+        )
     return (
         component_kind_value in UNBOUND_PERSON_ADOPTED_COMPONENT_KINDS
         and _adopted_person_identity(runtime_variables) is not None
@@ -1706,6 +1752,14 @@ def _switch_bot_flow_state(runtime_variables: dict[str, Any]) -> dict[str, Any] 
 def _identidade_person_flow_link_state(runtime_variables: dict[str, Any]) -> dict[str, Any] | None:
     workflow_meta = _ensure_workflow_meta(runtime_variables)
     state = workflow_meta.get("identidade_person_flow_link")
+    return state if isinstance(state, dict) else None
+
+
+def _source_list_membership_flow_link_state(
+    runtime_variables: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow_meta = _ensure_workflow_meta(runtime_variables)
+    state = workflow_meta.get("source_list_membership_flow_link")
     return state if isinstance(state, dict) else None
 
 
@@ -3407,6 +3461,17 @@ def _should_resume_identidade_person_blocking_execution(runtime_variables: dict[
     if blocking_stop_reason not in IDENTIDADE_PERSON_BLOCKING_STOP_REASONS:
         return False
     state = _identidade_person_flow_link_state(runtime_variables)
+    status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
+    return status in {"completed", "failed"}
+
+
+def _should_resume_source_list_membership_blocking_execution(
+    runtime_variables: dict[str, Any],
+) -> bool:
+    blocking_stop_reason = _read_blocking_stop_reason(runtime_variables)
+    if blocking_stop_reason not in SOURCE_LIST_MEMBERSHIP_BLOCKING_STOP_REASONS:
+        return False
+    state = _source_list_membership_flow_link_state(runtime_variables)
     status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
     return status in {"completed", "failed"}
 
@@ -5235,11 +5300,26 @@ def _select_contact_channel_config(
 
 def _select_contact_channel_anchor(
     contact_row: dict[str, Any] | None,
+    *,
+    session_scope: str,
+    runtime_variables: dict[str, Any],
 ) -> tuple[int, str, int, str | None]:
     if not isinstance(contact_row, dict):
-        raise WorkflowExecutionError(
-            "select_contact_channel_missing_contact_context",
-            "A sessão não possui um membro de contato ativo para iniciar a seleção.",
+        operational_scope = (
+            _source_list_membership_operational_scope(runtime_variables)
+            if session_scope == "person"
+            else None
+        )
+        if operational_scope is None:
+            raise WorkflowExecutionError(
+                "select_contact_channel_missing_contact_context",
+                "A sessão não possui um membro de contato ativo para iniciar a seleção.",
+            )
+        return (
+            0,
+            str(operational_scope["contact_list_id"]),
+            int(operational_scope["mailing_id"]),
+            str(operational_scope["person_uuid"]),
         )
     try:
         contact_list_member_id = int(contact_row.get("contact_list_member_id"))
@@ -5427,7 +5507,11 @@ async def _run_select_contact_channel(
         contact_list_id,
         mailing_id,
         person_uuid,
-    ) = _select_contact_channel_anchor(contact_row)
+    ) = _select_contact_channel_anchor(
+        contact_row,
+        session_scope=session_scope,
+        runtime_variables=runtime_variables,
+    )
     if session_scope == "person" and person_uuid is None:
         raise WorkflowExecutionError(
             "select_contact_channel_missing_contact_context",
@@ -7664,6 +7748,18 @@ def _source_list_membership_state(value: Any) -> str:
     return normalized
 
 
+def _source_list_membership_purpose(value: Any) -> str:
+    normalized = str(
+        _catalog_parameter_scalar(value) or "organization_only"
+    ).strip().lower()
+    if normalized not in {"organization_only", "current_flow_operational"}:
+        raise WorkflowExecutionError(
+            "source_list_membership_invalid_purpose",
+            "A finalidade do vínculo da pessoa na lista é inválida.",
+        )
+    return normalized
+
+
 def _store_source_list_membership_output(
     *,
     runtime_variables: dict[str, Any],
@@ -7692,7 +7788,7 @@ async def _run_source_list_membership(
     session_id: int,
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
-) -> str:
+) -> str | None:
     params = _source_list_membership_parameters(component)
     output_var = _source_list_membership_output_var(params.get("output_var"))
     mailing_source = _source_list_membership_mailing_source(params)
@@ -7707,6 +7803,20 @@ async def _run_source_list_membership(
         else None
     )
     desired_state = _source_list_membership_state(params.get("membership_state"))
+    membership_purpose = _source_list_membership_purpose(
+        params.get("membership_purpose")
+    )
+    if membership_purpose == "current_flow_operational":
+        if desired_state != "active":
+            raise WorkflowExecutionError(
+                "source_list_membership_operational_requires_active",
+                "O uso operacional no fluxo exige estado Ativo.",
+            )
+        if mailing_source != "selected":
+            raise WorkflowExecutionError(
+                "source_list_membership_operational_requires_selected_mailing",
+                "O uso operacional no fluxo exige uma Lista específica.",
+            )
     variables = _ensure_variables(runtime_variables)
     resolution_scope = _build_runtime_resolution_scope(
         runtime_variables=runtime_variables,
@@ -7717,6 +7827,41 @@ async def _run_source_list_membership(
         resolution_scope=resolution_scope,
     )
     component_ref_id = str(component.get("ref_id") or component.get("uuid") or "").strip() or None
+    if component_ref_id is None:
+        raise WorkflowExecutionError(
+            "source_list_membership_missing_ref_id",
+            "O componente source_list_membership não possui ref_id.",
+        )
+    flow_link_state = _source_list_membership_flow_link_state(runtime_variables)
+    flow_link_confirmed = False
+    initial_operation_changed = False
+    initial_source_membership_created = False
+    if (
+        isinstance(flow_link_state, dict)
+        and str(flow_link_state.get("component_ref_id") or "") == component_ref_id
+    ):
+        flow_link_status = str(flow_link_state.get("status") or "").strip().lower()
+        if flow_link_status == "pending":
+            return None
+        if flow_link_status == "failed":
+            flow_link_state["status"] = "consumed"
+            error = flow_link_state.get("last_error")
+            error = error if isinstance(error, dict) else {}
+            raise WorkflowExecutionError(
+                str(error.get("code") or "source_list_membership_flow_link_failed"),
+                str(
+                    error.get("message")
+                    or "Falha ao disponibilizar a pessoa para uso neste fluxo."
+                ),
+            )
+        if flow_link_status == "completed":
+            flow_link_confirmed = True
+            initial_operation_changed = bool(
+                flow_link_state.get("initial_operation_changed")
+            )
+            initial_source_membership_created = bool(
+                flow_link_state.get("source_membership_created")
+            )
     branch = "not_found"
     missing: str | None = None
     source_list: dict[str, Any] | None = None
@@ -7741,6 +7886,7 @@ async def _run_source_list_membership(
             "mailing_id": mailing_public_id,
             "source_list_id": session_source_list_id,
             "desired_state": desired_state,
+            "membership_purpose": membership_purpose,
         },
     )
 
@@ -7846,6 +7992,32 @@ async def _run_source_list_membership(
             "Falha ao alterar o estado da pessoa na lista.",
         ) from exc
 
+    if flow_link_confirmed:
+        if (
+            active_link is None
+            or not active_link.get("contact_list_id")
+            or not materialized["matched_members"]
+        ):
+            if isinstance(flow_link_state, dict):
+                flow_link_state["status"] = "consumed"
+            raise WorkflowExecutionError(
+                "source_list_membership_materialization_not_found",
+                "O Target Core confirmou o vínculo, mas a pessoa não foi materializada no fluxo.",
+            )
+        workflow_meta = _ensure_workflow_meta(runtime_variables)
+        workflow_meta["source_list_membership_operational_scope"] = {
+            "status": "ready",
+            "component_ref_id": component_ref_id,
+            "contact_list_id": str(active_link["contact_list_id"]),
+            "mailing_id": int(source_list["id"]) if source_list is not None else None,
+            "mailing_uuid": mailing_public_id,
+            "person_uuid": person_uuid,
+            "materialized_members": materialized["matched_members"],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if initial_operation_changed:
+            branch = "changed"
+
     previous_state = materialized["previous_state"]
     if (
         desired_state == "active"
@@ -7857,6 +8029,19 @@ async def _run_source_list_membership(
 
     selected_channel_invalidated = False
     if desired_state == "inactive" and branch != "not_found":
+        operational_scope = _source_list_membership_operational_scope(
+            runtime_variables
+        )
+        if (
+            operational_scope is not None
+            and str(operational_scope.get("contact_list_id") or "")
+            == str(materialized.get("contact_list_id") or "")
+            and str(operational_scope.get("person_uuid") or "")
+            == str(person_uuid or "")
+        ):
+            _ensure_workflow_meta(runtime_variables).pop(
+                "source_list_membership_operational_scope", None
+            )
         selected_channel = _active_selected_contact_channel(runtime_variables)
         if (
             isinstance(selected_channel, dict)
@@ -7884,13 +8069,28 @@ async def _run_source_list_membership(
         "channels": membership.get("channels") if membership is not None else None,
         "contact_list_id": materialized["contact_list_id"],
         "flow_link_found": bool(active_link and active_link.get("contact_list_id")),
-        "source_membership_created": bool(membership and membership.get("created")),
+        "source_membership_created": bool(
+            initial_source_membership_created
+            or (membership and membership.get("created"))
+        ),
         "materialized_members": materialized["matched_members"],
         "members_changed": materialized["members_changed"],
         "sessions_stopped": materialized["sessions_stopped"],
         "sessions_created": 0,
         "missing": missing,
     }
+    if membership_purpose == "current_flow_operational":
+        output["membership_purpose"] = membership_purpose
+        output["flow_link_status"] = (
+            "completed"
+            if flow_link_confirmed
+            else (
+                "pending"
+                if membership_purpose == "current_flow_operational"
+                and branch != "not_found"
+                else "not_requested"
+            )
+        )
     if selected_channel_invalidated:
         output["selected_contact_channel_invalidated"] = True
     _store_source_list_membership_output(
@@ -7900,6 +8100,36 @@ async def _run_source_list_membership(
         component_ref_id=component_ref_id,
     )
     runtime_variables.pop("source_list_membership_last_error", None)
+    if (
+        membership_purpose == "current_flow_operational"
+        and branch != "not_found"
+        and not flow_link_confirmed
+        and mailing_public_id is not None
+    ):
+        workflow_meta = _ensure_workflow_meta(runtime_variables)
+        workflow_meta["source_list_membership_flow_link"] = {
+            "component_ref_id": component_ref_id,
+            "flow_uuid": flow_uuid,
+            "mailing_uuid": mailing_public_id,
+            "person_uuid": person_uuid,
+            "status": "pending",
+            "attempts": 0,
+            "status_code": None,
+            "initial_operation_changed": bool(
+                branch == "changed"
+                or active_link is None
+                or not materialized["matched_members"]
+            ),
+            "source_membership_created": bool(
+                membership and membership.get("created")
+            ),
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "last_error": None,
+        }
+        return None
+    if flow_link_confirmed and isinstance(flow_link_state, dict):
+        flow_link_state["status"] = "consumed"
     logger.info(
         "workflow m2 source list membership completed",
         extra={
@@ -7910,6 +8140,7 @@ async def _run_source_list_membership(
             "mailing_source": mailing_source,
             "mailing_id": mailing_public_id,
             "desired_state": desired_state,
+            "membership_purpose": membership_purpose,
             "result_action": branch,
             "members_changed": materialized["members_changed"],
             "sessions_stopped": materialized["sessions_stopped"],
@@ -9145,6 +9376,7 @@ async def execute_workflow_m2_for_session(
             "blocked_process_dialer_response",
             "blocked_switch_bot_flow",
             "blocked_identidade_person_flow_link",
+            "blocked_source_list_membership_flow_link",
         }
         workflow_status = "success"
         if result.stopped_reason == "session_execution_locked":
@@ -9707,6 +9939,24 @@ async def execute_workflow_m2_for_session(
                     last_card_uuid=_to_uuid_or_none(session_state.get("last_card_uuid")),
                     next_card_uuid=_to_uuid_or_none(current_card_uuid),
                 )
+            elif _should_resume_source_list_membership_blocking_execution(
+                runtime_variables
+            ):
+                resumed_from_card = str(
+                    session_state.get("last_card_uuid") or ""
+                ).strip()
+                if resumed_from_card:
+                    current_card_uuid = resumed_from_card
+                _clear_blocking_execution(runtime_variables)
+                await replace_session_workflow_state(
+                    db_session,
+                    session_id=session_id,
+                    runtime_variables=runtime_variables,
+                    last_card_uuid=_to_uuid_or_none(
+                        session_state.get("last_card_uuid")
+                    ),
+                    next_card_uuid=_to_uuid_or_none(current_card_uuid),
+                )
             elif (
                 channel_supplier_resume.terminal
                 and blocking_stop_reason
@@ -9933,44 +10183,6 @@ async def execute_workflow_m2_for_session(
                         if exception_branch is None:
                             raise
                         branch_label = exception_branch
-                elif kind == "source_list_membership":
-                    try:
-                        branch_label = await _run_source_list_membership(
-                            db_session=db_session,
-                            flow_uuid=flow_uuid,
-                            session_id=session_id,
-                            component=component,
-                            runtime_variables=runtime_variables,
-                        )
-                    except WorkflowExecutionError as exc:
-                        exception_branch = _resolve_component_exception_branch_label(
-                            definition=definition,
-                            current_card_uuid=next_card_uuid,
-                        )
-                        if exception_branch is None:
-                            raise
-                        runtime_variables["source_list_membership_last_error"] = {
-                            "component_ref_id": component.get("ref_id"),
-                            "code": exc.code,
-                            "message": exc.message,
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        logger.warning(
-                            "workflow m2 source list membership failed",
-                            extra={
-                                "event": "orch.workflow.m2.source_list_membership.failed",
-                                "flow_uuid": flow_uuid,
-                                "session_id": session_id,
-                                "component_ref_id": component.get("ref_id"),
-                                "error_code": exc.code,
-                            },
-                        )
-                        branch_label = exception_branch
-                    selected_contact_channel = (
-                        _active_selected_contact_channel(runtime_variables)
-                        if session_scope == "person"
-                        else None
-                    )
                 elif kind == "split_random":
                     try:
                         branch_label = _run_split_random(
@@ -11000,6 +11212,46 @@ async def execute_workflow_m2_for_session(
                         )
                         if branch_label is not None:
                             should_block_execution = False
+                    elif kind == "source_list_membership":
+                        try:
+                            branch_label = await _run_source_list_membership(
+                                db_session=db_session,
+                                flow_uuid=flow_uuid,
+                                session_id=session_id,
+                                component=component,
+                                runtime_variables=runtime_variables,
+                            )
+                        except WorkflowExecutionError as exc:
+                            exception_branch = _resolve_component_exception_branch_label(
+                                definition=definition,
+                                current_card_uuid=next_card_uuid,
+                            )
+                            if exception_branch is None:
+                                raise
+                            runtime_variables["source_list_membership_last_error"] = {
+                                "component_ref_id": component.get("ref_id"),
+                                "code": exc.code,
+                                "message": exc.message,
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            logger.warning(
+                                "workflow m2 source list membership failed",
+                                extra={
+                                    "event": "orch.workflow.m2.source_list_membership.failed",
+                                    "flow_uuid": flow_uuid,
+                                    "session_id": session_id,
+                                    "component_ref_id": component.get("ref_id"),
+                                    "error_code": exc.code,
+                                },
+                            )
+                            branch_label = exception_branch
+                        selected_contact_channel = (
+                            _active_selected_contact_channel(runtime_variables)
+                            if session_scope == "person"
+                            else None
+                        )
+                        if branch_label is not None:
+                            should_block_execution = False
                     elif kind == "identidade_person":
                         try:
                             branch_label = await _run_identidade_person(
@@ -11043,7 +11295,13 @@ async def execute_workflow_m2_for_session(
                     if should_block_execution:
                         resolved_next = (
                             next_card_uuid
-                            if kind in {"run_flow", "switch_bot_flow", "identidade_person"}
+                            if kind
+                            in {
+                                "run_flow",
+                                "switch_bot_flow",
+                                "identidade_person",
+                                "source_list_membership",
+                            }
                             else resolve_next_card_uuid(definition, next_card_uuid)
                         )
                         last_card_uuid = next_card_uuid

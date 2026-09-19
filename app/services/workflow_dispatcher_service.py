@@ -37,6 +37,7 @@ BLOCKING_RUNNING_STOP_REASONS = {
     "blocked_run_flow",
     "blocked_switch_bot_flow",
     "blocked_identidade_person_flow_link",
+    "blocked_source_list_membership_flow_link",
 }
 FINAL_STOP_REASONS = {
     "finished_by_component",

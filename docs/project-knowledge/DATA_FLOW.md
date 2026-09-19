@@ -130,14 +130,17 @@ A ordem pós-commit é obrigatória: uma chamada síncrona dentro do savepoint n
 
 ## Card `source_list_membership`
 
-1. Exige `membership_state=active|inactive`, renderiza `person_uuid` no runtime e aceita `mailing_source=session_origin|selected`. `selected` resolve o UUID público declarado no card; ausência de `mailing_source` preserva esse comportamento para definições antigas.
+1. Exige `membership_state=active|inactive`, renderiza `person_uuid` no runtime e aceita `mailing_source=session_origin|selected`. Também aceita `membership_purpose=organization_only|current_flow_operational`; ausência do propósito preserva `organization_only` nas definições antigas. `selected` resolve o UUID público declarado no card; ausência de `mailing_source` preserva esse comportamento para definições antigas.
 2. `session_origin` não confia apenas no `mailing_id` do payload: resolve a lista pelo membro materializado da sessão e exige coincidência de flow, pessoa, lista, `contact_list_id` e vínculo mailing→flow ainda ativo. Contexto inválido segue por `exception` ou `not_found` sem atingir outra lista.
 3. Em `active`, a lista precisa estar `READY_TO_INGEST` ou `PROCESSED`. O card cria ou reutiliza o draft da pessoa na `source_list` e, quando existe vínculo ativo da lista com o flow atual, reativa os `contact_list_members` já materializados para essa pessoa.
 4. Em `inactive`, a situação da `source_list` não impede a retirada. O card exige vínculo ativo mailing→flow e membros materializados da pessoa nesse par exato de `mailing_id + contact_list_id`; ausência segue por `not_found` sem atingir outro flow.
 5. Inativar grava `status=0`, preenche `unassigned_at`, limpa roteamento/tentativas e encerra somente sessões irmãs ainda ativas com o mesmo flow, lista, mailing e pessoa. A sessão que executa o card é excluída dessa parada para concluir a branch configurada.
 6. Repetir o mesmo estado é idempotente e segue por `unchanged`; qualquer vínculo-fonte criado, membro alterado ou sessão irmã parada segue por `changed`.
 7. A saída em `variables.customs[output_var]` e `source_list_membership_last_result` informa estado anterior/desejado, escopo, contagens de membros alterados e sessões paradas. `sessions_created` é sempre zero.
-8. `active` não materializa membro ausente, não recria sessão anteriormente encerrada e não associa mailing ao flow. `inactive` não apaga `source_list_contact_drafts`, `contact_drafts`, membros ou histórico.
+8. Em `organization_only`, `active` não materializa membro ausente, não recria sessão anteriormente encerrada e não associa mailing ao flow. `inactive` não apaga `source_list_contact_drafts`, `contact_drafts`, membros ou histórico.
+9. `current_flow_operational` exige `selected + active`. A primeira passagem persiste pessoa/lista e deixa a mesma sessão bloqueada no próprio card. Somente depois do commit, uma task dedicada chama `POST /v2/flow/{flow_uuid}/mailings` com `call_origin=source_list_membership`; o Target Core revalida a revisão executável e força zero fan-out.
+10. A task grava `completed|failed` sob advisory lock e reenfileira a mesma sessão. Na retomada, o card exige vínculo ativo e ao menos um membro materializado antes de seguir. Falha controlada percorre `exception`; sem essa branch, termina uma vez em vez de entrar em redispatch. Repetição do efeito no Target é idempotente.
+11. A materialização operacional grava `workflow_v2.source_list_membership_operational_scope` com pessoa, mailing e `contact_list_id`. Esse escopo não é seleção de canal: apenas autoriza um `select_contact_channel` seguinte a procurar o membro nessa pessoa/lista. O seletor continua sendo a única autoridade para escolher/revincular o endereço, e somente o card consumidor escreve `linked_actuator`.
 
 ## Card `wait_for_event`
 

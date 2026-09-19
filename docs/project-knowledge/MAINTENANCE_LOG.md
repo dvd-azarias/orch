@@ -1,5 +1,53 @@
 # Maintenance Log
 
+## 2026-09-18 — Finalidade operacional do `source_list_membership`
+
+### REQUEST / CLASSIFICATION
+
+Permitir que uma pessoa criada ou identificada durante a sessão seja vinculada
+a uma lista e passe a ser utilizável no mesmo flow, sem criar uma sessão filha
+e sem transformar o card de lista em seletor/atuador. `ALPHA_FIX_OPTIONAL`,
+aditivo e sem migration.
+
+### CHANGE / SAFETY
+
+- novo `membership_purpose=organization_only|current_flow_operational`, com o
+  comportamento histórico preservado por default;
+- finalidade operacional restrita a `mailing_source=selected` e
+  `membership_state=active`;
+- efeito externo pós-commit: a sessão bloqueia no mesmo card, task dedicada
+  solicita ao Target Core o vínculo protegido e retoma a mesma sessão;
+- `call_origin=source_list_membership` é autorizado pela revisão executável e
+  sempre usa zero fan-out;
+- após confirmação do vínculo e dos membros, o runtime grava somente um escopo
+  pessoa/lista; `select_contact_channel` continua escolhendo o endereço e o
+  consumidor continua sendo a única autoridade de `linked_actuator`;
+- vínculo ativo, redelivery da task e reentrada no card são idempotentes;
+  falhas controladas seguem pela branch `exception` e são terminais quando a
+  branch não existe, evitando redispatch infinito.
+
+### VALIDATION LOCAL
+
+- `133 passed` na regressão de criação/Identidade/lista/seletor, task pós-commit,
+  dispatcher e bloqueios;
+- suíte integral: `893 passed, 26 failed`; as 26 falhas são a baseline já
+  documentada de testes legados que ainda chamam `trigger_orch(flow_uuid=...)`,
+  sem node ID novo atribuído ao patch;
+- prova unitária encadeada confirmou sessão sem membro inicial consumindo o
+  escopo materializado, selecionando membro e terminando sem sessão filha;
+- `compileall` e `git diff --check` passam; runtime externo permanece pendente
+  até merge/deploy coordenado Target Core → ORCH.
+
+### NEXT GATES
+
+1. canário simples `create_contact -> source_list_membership operacional ->
+   select_contact_channel -> finish_flow`, incluindo repetição idempotente e
+   contagem constante de sessões;
+2. repetir com `identidade_person`;
+3. homologar conflito/dados incompletos e somente então portar os flows Velox;
+4. retomar e revisar o fluxo completo
+   `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.
+
 ## 2026-09-18 — Gate D: gerenciamento genérico de canais
 
 ### REQUEST / CLASSIFICATION

@@ -51,12 +51,13 @@ def _response_result(body: str, *, mailing_uuid: str) -> tuple[bool, str | None]
     return False, "Target Core não confirmou o vínculo da lista."
 
 
-async def link_identidade_mailing_to_current_flow(
+async def _link_mailing_to_current_flow(
     *,
     settings: Settings,
     workspace_uuid: str,
     flow_uuid: str,
     mailing_uuid: str,
+    call_origin: str,
     max_attempts: int = 3,
 ) -> IdentidadePersonFlowLinkResult:
     base_url = str(settings.target_core_api_base_url or settings.sync_webhook_base_url or "").strip().rstrip("/")
@@ -78,7 +79,7 @@ async def link_identidade_mailing_to_current_flow(
         "mailing_ids_added": [mailing_uuid],
         "mailing_ids_removed": [],
         "linked_by": None,
-        "call_origin": "identidade_person",
+        "call_origin": call_origin,
     }
     attempts = max(1, int(max_attempts))
     for attempt in range(1, attempts + 1):
@@ -129,3 +130,39 @@ async def link_identidade_mailing_to_current_flow(
         )
 
     return IdentidadePersonFlowLinkResult(False, None, attempts, "target_core_unreachable")
+
+
+async def link_identidade_mailing_to_current_flow(
+    *,
+    settings: Settings,
+    workspace_uuid: str,
+    flow_uuid: str,
+    mailing_uuid: str,
+    max_attempts: int = 3,
+) -> IdentidadePersonFlowLinkResult:
+    return await _link_mailing_to_current_flow(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        mailing_uuid=mailing_uuid,
+        call_origin="identidade_person",
+        max_attempts=max_attempts,
+    )
+
+
+async def link_source_list_membership_mailing_to_current_flow(
+    *,
+    settings: Settings,
+    workspace_uuid: str,
+    flow_uuid: str,
+    mailing_uuid: str,
+    max_attempts: int = 3,
+) -> IdentidadePersonFlowLinkResult:
+    return await _link_mailing_to_current_flow(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        mailing_uuid=mailing_uuid,
+        call_origin="source_list_membership",
+        max_attempts=max_attempts,
+    )
