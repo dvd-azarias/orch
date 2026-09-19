@@ -161,6 +161,30 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
                 session_scope="channel",
                 **common,
             )
+            sms_channel_candidate = await fetch_select_contact_channel_candidate(
+                db_session,
+                session_scope="channel",
+                **{**common, "channel_type": "sms"},
+            )
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                    SET
+                        entity = 'request-123',
+                        entity_type = 'api_request',
+                        entity_address = 'request-123'
+                    WHERE id = 123
+                    """
+                )
+            )
+            channel_candidate_with_external_identity = (
+                await fetch_select_contact_channel_candidate(
+                    db_session,
+                    session_scope="channel",
+                    **common,
+                )
+            )
             person_candidate = await fetch_select_contact_channel_candidate(
                 db_session,
                 session_scope="person",
@@ -173,11 +197,6 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
                 authorized_contact_list_member_id=88,
                 **common,
             )
-            sms_channel_candidate = await fetch_select_contact_channel_candidate(
-                db_session,
-                session_scope="channel",
-                **{**common, "channel_type": "sms"},
-            )
             sms_person_candidate = await fetch_select_contact_channel_candidate(
                 db_session,
                 session_scope="person",
@@ -186,6 +205,7 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
 
             assert channel_candidate is not None
             assert channel_candidate["contact_list_member_id"] == 77
+            assert channel_candidate_with_external_identity is None
             assert person_candidate is not None
             assert person_candidate["contact_list_member_id"] == 88
             assert person_candidate["contact_channel_type"] == "voice"
@@ -199,6 +219,15 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
             assert sms_person_candidate["contact_list_member_id"] == 88
             assert sms_person_candidate["contact_channel_type"] == "voice"
 
+            rejected_other_person = await rebind_person_session_to_contact_channel(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=123,
+                contact_list_member_id=88,
+                contact_list_id=contact_list_uuid,
+                mailing_id=1140,
+                person_uuid=str(uuid4()),
+            )
             rebound = await rebind_person_session_to_contact_channel(
                 db_session,
                 flow_uuid=flow_uuid,
@@ -208,6 +237,7 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
                 mailing_id=1140,
                 person_uuid=person_uuid,
             )
+            assert rejected_other_person is False
             assert rebound is True
 
             persisted = (
@@ -263,7 +293,7 @@ async def test_select_contact_channel_isolated_in_temporary_tables() -> None:
                     INSERT INTO orch_sessions (
                         id, flow_uuid, state, entity, entity_type, entity_address
                     ) VALUES (
-                        124, CAST(:flow_uuid AS uuid), 0, '12345678901', 'person', '5511988880002'
+                        124, CAST(:flow_uuid AS uuid), 0, 'request-123', 'api_request', '5511988880002'
                     )
                     """
                 ),

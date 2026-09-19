@@ -42,18 +42,19 @@ async def fetch_select_contact_channel_candidate(
         "excluded_contact_list_member_id": excluded_contact_list_member_id,
         "authorized_contact_list_member_id": authorized_contact_list_member_id,
     }
+    session_identity_filter = ""
     scope_filter = ""
     if session_scope == "channel":
+        session_identity_filter = """
+             AND os.entity = clm.contact_identifier
+        """
         scope_filter = """
               AND clm.id = :contact_list_member_id
               AND BTRIM(clm.contact_channel_address) = BTRIM(os.entity_address)
         """
     else:
         scope_filter = """
-              AND (
-                    CAST(:person_uuid AS uuid) IS NULL
-                    OR clm.person_uuid = CAST(:person_uuid AS uuid)
-                  )
+              AND clm.person_uuid = CAST(:person_uuid AS uuid)
               AND (
                     CAST(:excluded_contact_list_member_id AS bigint) IS NULL
                     OR clm.id <> CAST(:excluded_contact_list_member_id AS bigint)
@@ -94,7 +95,7 @@ async def fetch_select_contact_channel_candidate(
              AND os.flow_uuid = CAST(:flow_uuid AS uuid)
              AND os.state <> 3
              AND os.unassigned_at IS NULL
-             AND os.entity = clm.contact_identifier
+             {session_identity_filter}
             LEFT JOIN contact_draft_channels source_channel
               ON source_channel.id = clm.contact_channel_id
             WHERE clm.contact_list_id = CAST(:contact_list_id AS uuid)
@@ -133,7 +134,7 @@ async def rebind_person_session_to_contact_channel(
     contact_list_member_id: int,
     contact_list_id: str,
     mailing_id: int,
-    person_uuid: str | None,
+    person_uuid: str,
 ) -> bool:
     result = await db_session.execute(
         text(
@@ -151,13 +152,9 @@ async def rebind_person_session_to_contact_channel(
               AND clm.contact_list_id = CAST(:contact_list_id AS uuid)
               AND clm.mailing_id = CAST(:mailing_id AS bigint)
               AND clm.unassigned_at IS NULL
-              AND clm.contact_identifier = os.entity
               AND clm.contact_channel_address IS NOT NULL
               AND BTRIM(clm.contact_channel_address) <> ''
-              AND (
-                    CAST(:person_uuid AS uuid) IS NULL
-                    OR clm.person_uuid = CAST(:person_uuid AS uuid)
-                  )
+              AND clm.person_uuid = CAST(:person_uuid AS uuid)
               AND NOT EXISTS (
                     SELECT 1
                     FROM orch_sessions conflicting

@@ -1,5 +1,70 @@
 # Maintenance Log
 
+## 2026-09-19 — Identidade do seletor em sessões `person`
+
+### REQUEST / CLASSIFICATION
+
+Homologar o caminho completo `webhook -> pessoa -> canais -> lista operacional
+-> seleção` com repetição idempotente no canário G. `ALPHA_FIX_OPTIONAL`, sem
+migration, fila, endpoint ou alteração de catálogo.
+
+### CAUSE / EVIDENCE
+
+- Flow canário: `716c84c9-f0c5-4d07-83ab-f983445d6c97`, revisão publicada v2
+  `99b2ec3d-7693-460a-8e9c-a6ccf0d15b58`.
+- A sessão `8410` terminou por `selected` quando `external_id` e o identificador
+  da pessoa eram iguais.
+- A repetição `8411` localizou a mesma pessoa, preservou exatamente dois membros
+  operacionais, não criou sessão filha e permaneceu sem atuador, mas seguiu por
+  `not_found` quando o novo `external_id` divergiu do identificador da pessoa.
+- O repositório já recebia o `person_uuid` adotado e o escopo exato de lista e
+  mailing, porém mantinha em todos os modos o predicado legado
+  `orch_sessions.entity = contact_list_members.contact_identifier`; o rebind
+  repetia a mesma igualdade.
+- O contrato aprovado define `external_id` como correlação da sessão e
+  `person_uuid` como identidade local forte. Logo, a igualdade era correta para
+  preservar a âncora em `channel`, mas incorreta em `person`.
+
+### CHANGE / SAFETY
+
+- Em `channel`, preservar a igualdade de entidade, o membro de origem e o
+  endereço de origem.
+- Em `person`, exigir igualdade não anulável de `person_uuid`, além de lista,
+  mailing e membro, sem comparar o identificador externo da sessão.
+- O rebind `person` atualiza somente `entity_address`; não altera `entity`,
+  pessoa, lista, mailing, membro ou `linked_actuator`.
+- Nenhuma proteção global por telefone foi adicionada e nenhum comportamento
+  de `channel` foi relaxado.
+
+### VALIDATION
+
+- `50 passed` nos testes unitários do repositório e engine do seletor.
+- `1 passed` na prova PostgreSQL com tabelas temporárias: `external_id`
+  divergente seleciona/reancora somente a pessoa correta; `person_uuid`
+  divergente falha fechado; `channel` com entidade divergente continua sem
+  candidato.
+- `133 passed` na regressão integrada de criação, canais, lista operacional,
+  seletor, dispatcher e tasks.
+- Suíte completa: `893 passed, 26 failed`; as 26 falhas são exatamente a
+  baseline histórica de chamadas legadas `trigger_orch(flow_uuid=...)`, sem
+  novo node ID atribuído ao patch.
+- `compileall`, lint dos arquivos tocados e `git diff --check` passaram.
+- A sessão local `8412` não serve como prova do patch: o banco e o broker são
+  compartilhados e a retomada pós-vínculo foi disputada por workers com o
+  código ainda implantado. A stack local foi interrompida; o reconciliador
+  chegou a reavaliar sete sessões antigas já bloqueadas em discador, que
+  permaneceram em `state=1` e `blocked_send_with_dialer`, sem progressão de
+  branch observada.
+
+### ROLLOUT / ROLLBACK
+
+- Pendente: commit, PR, merge, deploy gradual dos workers de workflow e nova
+  repetição do canário G com `external_id` diferente do identificador.
+- Rollback sem migration: reverter o commit e reiniciar somente os workers de
+  workflow; nenhuma compensação de dados é necessária.
+- Achados separados, fora deste patch: validação Target Core de `ref_id` UUID e
+  a corrida curta entre commit da sessão e primeira task.
+
 ## 2026-09-18 — Finalidade operacional do `source_list_membership`
 
 ### REQUEST / CLASSIFICATION
