@@ -20,6 +20,8 @@
 - `app/services/orch_trigger_service.py`: fluxo comum, callbacks, descartes, ledger e bootstrap.
 - `app/repositories/orch_sessions_repository.py`: maior fronteira SQL; upsert, consultas, cursores e routing.
 - `app/repositories/create_contact_repository.py`: persistência restrita do card `create_contact` em `persons`, sem canais, listas, membros ou sessões filhas.
+- `app/services/manage_contact_channels_service.py`: normaliza, valida e aplica de forma pura `upsert|deactivate` sobre canais canônicos da pessoa.
+- `app/repositories/manage_contact_channels_repository.py`: bloqueio e persistência transacional de `persons.channels`; a projeção primária legada é serializada e nunca transforma endereço compartilhado em conflito entre pessoas.
 - `app/repositories/send_with_email_repository.py`: marcação transacional e idempotente do membro `email` exato com `linked_actuator=email`, sem materializar conteúdo ou enviar mensagem.
 - `app/services/workflow_runtime_service.py`: bootstrap M1.
 - `app/services/workflow_m2_service.py`: motor e componentes.

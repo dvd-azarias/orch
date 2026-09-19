@@ -49,6 +49,12 @@ from app.repositories.identidade_person_repository import (
     set_person_materialized_membership_state,
     update_person_from_payload,
 )
+from app.repositories.manage_contact_channels_repository import (
+    fetch_manage_contact_channels_person_for_update,
+    lock_manage_contact_channels_primary_projection,
+    manage_contact_channels_primary_projection_is_available,
+    update_manage_contact_channels_person,
+)
 from app.repositories.orch_channel_events_repository import (
     claim_next_pending_channel_event,
     discard_pending_channel_events,
@@ -104,6 +110,12 @@ from app.services.identidade_person_service import (
     normalize_identidade_person,
     normalize_workspace_id,
     query_identidade_person,
+)
+from app.services.manage_contact_channels_service import (
+    MANAGE_CONTACT_CHANNEL_OPERATIONS,
+    ManageContactChannelsError,
+    apply_contact_channel_operation,
+    parse_requested_contact_channels,
 )
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
@@ -288,7 +300,11 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
 
 
 def _is_terminal_workflow_error_code(code: str) -> bool:
-    return code in TERMINAL_WORKFLOW_ERROR_CODES or code.startswith("identidade_person_")
+    return (
+        code in TERMINAL_WORKFLOW_ERROR_CODES
+        or code.startswith("identidade_person_")
+        or code.startswith("manage_contact_channels_")
+    )
 
 
 RESTRICTION_LIST_CHECK_ERROR_CODES = {
@@ -321,6 +337,7 @@ UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS = {
 }
 UNBOUND_PERSON_ADOPTED_COMPONENT_KINDS = {
     *UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS,
+    "manage_contact_channels",
     "source_list_membership",
 }
 
@@ -6714,6 +6731,312 @@ async def _run_identidade_person(
     return "encontrado"
 
 
+MANAGE_CONTACT_CHANNELS_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+MANAGE_CONTACT_CHANNELS_CONFLICT_CODES = {
+    "manage_contact_channels_conflicting_duplicate",
+    "manage_contact_channels_multiple_primary",
+}
+
+
+def _manage_contact_channels_parameters(component: dict[str, Any]) -> dict[str, Any]:
+    raw = component.get("parameters")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, list):
+        parameters: dict[str, Any] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("name") or "").strip()
+            if key:
+                parameters[key] = entry.get("value")
+        return parameters
+    return {}
+
+
+def _manage_contact_channels_output_var(value: Any) -> str:
+    normalized = str(_catalog_parameter_scalar(value) or "contact_channels").strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or MANAGE_CONTACT_CHANNELS_OUTPUT_VAR_RE.fullmatch(normalized) is None
+    ):
+        raise WorkflowExecutionError(
+            "manage_contact_channels_invalid_output_var",
+            "O campo output_var deve conter um nome de variável válido.",
+        )
+    return normalized
+
+
+def _manage_contact_channels_person_uuid(
+    value: Any,
+    *,
+    resolution_scope: dict[str, Any],
+) -> str | None:
+    raw = _catalog_parameter_scalar(value, preferred_keys=("person_uuid", "uuid"))
+    rendered = _render_value(raw, resolution_scope)
+    if rendered is None or (isinstance(rendered, str) and not rendered.strip()):
+        return None
+    if isinstance(rendered, (dict, list, tuple, set, bool)):
+        raise WorkflowExecutionError(
+            "manage_contact_channels_invalid_person_uuid",
+            "O campo person_uuid deve resultar em um UUID de pessoa válido.",
+        )
+    try:
+        return str(UUID(str(rendered).strip()))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise WorkflowExecutionError(
+            "manage_contact_channels_invalid_person_uuid",
+            "O campo person_uuid deve resultar em um UUID de pessoa válido.",
+        ) from exc
+
+
+def _manage_contact_channels_operation(value: Any) -> str:
+    normalized = str(
+        _catalog_parameter_scalar(value, preferred_keys=("operation", "id", "value"))
+        or ""
+    ).strip().lower()
+    if normalized not in MANAGE_CONTACT_CHANNEL_OPERATIONS:
+        raise WorkflowExecutionError(
+            "manage_contact_channels_invalid_operation",
+            "O campo operation deve selecionar Criar/atualizar ou Desativar.",
+        )
+    return normalized
+
+
+def _store_manage_contact_channels_output(
+    *,
+    runtime_variables: dict[str, Any],
+    output_var: str,
+    output: dict[str, Any],
+    component_ref_id: str | None,
+) -> None:
+    variables = _ensure_variables(runtime_variables)
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    _set_by_path(customs, output_var, output)
+    runtime_variables["manage_contact_channels_last_result"] = {
+        "component_ref_id": component_ref_id,
+        "output_var": output_var,
+        "result": copy.deepcopy(output),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _manage_contact_channels_public_channel(channel: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": channel.get("type"),
+        "address": channel.get("value"),
+        "label": channel.get("label"),
+        "priority": channel.get("priority"),
+        "is_primary": channel.get("is_primary") is True,
+        "state": (
+            "active"
+            if channel.get("is_valid") is not False
+            and channel.get("is_reachable") is not False
+            else "inactive"
+        ),
+    }
+
+
+async def _run_manage_contact_channels(
+    *,
+    db_session: AsyncSession,
+    flow_uuid: str,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+    contact_row: dict[str, Any] | None,
+) -> str:
+    params = _manage_contact_channels_parameters(component)
+    operation = _manage_contact_channels_operation(params.get("operation"))
+    output_var = _manage_contact_channels_output_var(params.get("output_var"))
+    variables = _ensure_variables(runtime_variables)
+    resolution_scope = _build_runtime_resolution_scope(
+        runtime_variables=runtime_variables,
+        variables=variables,
+    )
+    person_uuid = _manage_contact_channels_person_uuid(
+        params.get("person_uuid"),
+        resolution_scope=resolution_scope,
+    )
+    component_ref_id = str(
+        component.get("ref_id") or component.get("uuid") or ""
+    ).strip() or None
+    rendered_channels = _render_value(params.get("channels"), resolution_scope)
+
+    try:
+        requested_channels = parse_requested_contact_channels(rendered_channels)
+    except ManageContactChannelsError as exc:
+        if exc.code not in MANAGE_CONTACT_CHANNELS_CONFLICT_CODES:
+            raise WorkflowExecutionError(exc.code, exc.message) from exc
+        output = {
+            "action": "conflict",
+            "person_uuid": person_uuid,
+            "operation": operation,
+            "changed_channels": [],
+            "missing_channels": [],
+            "channels": [],
+            "primary_projection_applied": None,
+            "conflict": {"code": exc.code, "message": exc.message},
+        }
+        _store_manage_contact_channels_output(
+            runtime_variables=runtime_variables,
+            output_var=output_var,
+            output=output,
+            component_ref_id=component_ref_id,
+        )
+        return "conflict"
+
+    logger.info(
+        "workflow m2 manage contact channels started",
+        extra={
+            "event": "orch.workflow.m2.manage_contact_channels.started",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_uuid": person_uuid,
+            "operation": operation,
+            "channel_count": len(requested_channels),
+        },
+    )
+
+    person: dict[str, Any] | None = None
+    mutation = None
+    projection_applied: bool | None = None
+    branch = "not_found"
+    try:
+        async with db_session.begin_nested():
+            if person_uuid is not None:
+                _validate_person_adoption_candidate(
+                    runtime_variables=runtime_variables,
+                    contact_row=contact_row,
+                    person_uuid=person_uuid,
+                )
+                person = await fetch_manage_contact_channels_person_for_update(
+                    db_session,
+                    person_uuid=person_uuid,
+                )
+            if person is not None:
+                _validate_person_adoption_candidate(
+                    runtime_variables=runtime_variables,
+                    contact_row=contact_row,
+                    person_uuid=person.get("uuid"),
+                    identifier=person.get("identifier"),
+                )
+                mutation = apply_contact_channel_operation(
+                    existing_channels=person.get("channels"),
+                    requested_channels=requested_channels,
+                    operation=operation,
+                )
+                if mutation.missing_keys:
+                    branch = "not_found"
+                else:
+                    primary_channel = mutation.primary_channel
+                    persisted_primary = primary_channel
+                    if primary_channel is not None:
+                        await lock_manage_contact_channels_primary_projection(
+                            db_session,
+                            channel_type=str(primary_channel["type"]),
+                            channel_value=str(primary_channel["value"]),
+                        )
+                        projection_applied = (
+                            await manage_contact_channels_primary_projection_is_available(
+                                db_session,
+                                person_uuid=person_uuid,
+                                channel_type=str(primary_channel["type"]),
+                                channel_value=str(primary_channel["value"]),
+                            )
+                        )
+                        if not projection_applied:
+                            persisted_primary = None
+
+                    expected_projection = (
+                        (
+                            str(persisted_primary.get("type") or ""),
+                            str(persisted_primary.get("value") or ""),
+                            str(persisted_primary.get("label") or ""),
+                        )
+                        if persisted_primary is not None
+                        else ("", "", "")
+                    )
+                    current_projection = (
+                        str(person.get("primary_channel_type") or ""),
+                        str(person.get("primary_channel_value") or ""),
+                        str(person.get("primary_channel_label") or ""),
+                    )
+                    projection_changed = current_projection != expected_projection
+                    if mutation.changed_keys or projection_changed:
+                        updated = await update_manage_contact_channels_person(
+                            db_session,
+                            person_uuid=person_uuid,
+                            channels=mutation.channels,
+                            primary_channel=persisted_primary,
+                        )
+                        if updated is None:
+                            raise WorkflowExecutionError(
+                                "manage_contact_channels_person_not_found_during_update",
+                                "A pessoa deixou de estar disponível durante a atualização dos canais.",
+                            )
+                        person = updated
+                        branch = "changed"
+                    else:
+                        branch = "unchanged"
+    except WorkflowExecutionError:
+        raise
+    except ManageContactChannelsError as exc:
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+    except Exception as exc:
+        raise WorkflowExecutionError(
+            "manage_contact_channels_persistence_failed",
+            "Falha ao persistir os canais da pessoa.",
+        ) from exc
+
+    channels = mutation.channels if mutation is not None else []
+    output = {
+        "action": branch,
+        "person_uuid": person_uuid,
+        "operation": operation,
+        "changed_channels": [
+            {"type": channel_type, "address": address}
+            for channel_type, address in (mutation.changed_keys if mutation is not None else [])
+        ],
+        "missing_channels": [
+            {"type": channel_type, "address": address}
+            for channel_type, address in (mutation.missing_keys if mutation is not None else [])
+        ],
+        "channels": [
+            _manage_contact_channels_public_channel(channel)
+            for channel in channels
+            if str(channel.get("type") or "") in SELECT_CONTACT_CHANNEL_TYPES
+        ],
+        "primary_projection_applied": projection_applied,
+        "conflict": None,
+    }
+    _store_manage_contact_channels_output(
+        runtime_variables=runtime_variables,
+        output_var=output_var,
+        output=output,
+        component_ref_id=component_ref_id,
+    )
+    runtime_variables.pop("manage_contact_channels_last_error", None)
+    logger.info(
+        "workflow m2 manage contact channels completed",
+        extra={
+            "event": "orch.workflow.m2.manage_contact_channels.completed",
+            "flow_uuid": flow_uuid,
+            "component_ref_id": component_ref_id,
+            "person_uuid": person_uuid,
+            "operation": operation,
+            "outcome": branch,
+            "changed_channel_count": len(output["changed_channels"]),
+            "missing_channel_count": len(output["missing_channels"]),
+            "primary_projection_applied": projection_applied,
+        },
+    )
+    return branch
+
+
 CREATE_CONTACT_ACTIONS = {"update_current", "create_if_missing", "upsert"}
 CREATE_CONTACT_ENRICHMENT_POLICIES = {"fill_missing", "overwrite_non_null"}
 CREATE_CONTACT_PROFILE_FIELDS = (
@@ -9570,6 +9893,45 @@ async def execute_workflow_m2_for_session(
                                 "error_code": exc.code,
                             },
                         )
+                        branch_label = exception_branch
+                elif kind == "manage_contact_channels":
+                    try:
+                        branch_label = await _run_manage_contact_channels(
+                            db_session=db_session,
+                            flow_uuid=flow_uuid,
+                            component=component,
+                            runtime_variables=runtime_variables,
+                            contact_row=contact_runtime_context,
+                        )
+                    except WorkflowExecutionError as exc:
+                        exception_branch = _resolve_component_exception_branch_label(
+                            definition=definition,
+                            current_card_uuid=next_card_uuid,
+                        )
+                        runtime_variables.pop(
+                            "manage_contact_channels_last_result", None
+                        )
+                        runtime_variables["manage_contact_channels_last_error"] = {
+                            "component_ref_id": component.get("ref_id"),
+                            "code": exc.code,
+                            "message": exc.message,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.warning(
+                            "workflow m2 manage contact channels failed",
+                            extra={
+                                "event": (
+                                    "orch.workflow.m2.manage_contact_channels.failed"
+                                ),
+                                "flow_uuid": flow_uuid,
+                                "session_id": session_id,
+                                "component_ref_id": component.get("ref_id"),
+                                "error_code": exc.code,
+                                "has_exception_branch": exception_branch is not None,
+                            },
+                        )
+                        if exception_branch is None:
+                            raise
                         branch_label = exception_branch
                 elif kind == "source_list_membership":
                     try:
