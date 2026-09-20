@@ -157,6 +157,75 @@ async def test_new_session_bootstrap_pins_revision_selected_after_publication(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("definition_mode", "input_payload", "expected_scope"),
+    [
+        ("person", {"document": "12345678901"}, "person"),
+        ("channel", {"document": "12345678901"}, "channel"),
+        ("person", {"session_scope": "channel"}, "channel"),
+        ("person", {"session_scope": "   "}, "person"),
+        ("unsupported", {"document": "12345678901"}, None),
+        (None, {"document": "12345678901"}, None),
+    ],
+)
+async def test_bootstrap_inherits_session_scope_without_overriding_explicit_payload(
+    monkeypatch,
+    definition_mode: str | None,
+    input_payload: dict,
+    expected_scope: str | None,
+) -> None:
+    selected_revision = _revision(CURRENT_REVISION_ID, 8, CURRENT_FINISH_CARD)
+    if definition_mode is not None:
+        selected_revision["definition"]["session_mode"] = definition_mode
+    update_position = AsyncMock()
+
+    monkeypatch.setattr(
+        workflow_runtime_service,
+        "get_settings",
+        lambda: SimpleNamespace(workflow_v2_enabled=True),
+    )
+    monkeypatch.setattr(
+        workflow_runtime_service,
+        "fetch_session_workflow_state",
+        AsyncMock(return_value={"runtime_variables": {}, "next_card_uuid": None}),
+    )
+    monkeypatch.setattr(
+        workflow_runtime_service,
+        "fetch_flow_row",
+        AsyncMock(return_value={"id": FLOW_UUID}),
+    )
+    monkeypatch.setattr(
+        workflow_runtime_service,
+        "fetch_selected_revision",
+        AsyncMock(return_value=selected_revision),
+    )
+    monkeypatch.setattr(
+        workflow_runtime_service,
+        "update_session_workflow_position",
+        update_position,
+    )
+    original_payload = dict(input_payload)
+
+    await workflow_runtime_service.bootstrap_workflow_for_session(
+        _Session(),
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        payload=input_payload,
+    )
+
+    runtime_patch = json.loads(update_position.await_args.kwargs["runtime_patch_json"])
+    assert input_payload == original_payload
+    if expected_scope is None:
+        assert "session_scope" not in runtime_patch["input_payload"]
+        assert "session_scope" not in runtime_patch["variables"]
+        assert "session_scope" not in runtime_patch["variables"]["payload"]
+    else:
+        assert runtime_patch["input_payload"]["session_scope"] == expected_scope
+        assert runtime_patch["variables"]["session_scope"] == expected_scope
+        assert runtime_patch["variables"]["payload"]["session_scope"] == expected_scope
+
+
+@pytest.mark.asyncio
 async def test_revision_resolver_uses_declared_revision_without_reading_current(monkeypatch) -> None:
     pinned_revision = _revision(PINNED_REVISION_ID, 7, PINNED_FINISH_CARD)
     fetch_by_id = AsyncMock(return_value=pinned_revision)
