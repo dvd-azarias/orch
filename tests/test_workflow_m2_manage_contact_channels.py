@@ -280,3 +280,14 @@ def test_unbound_person_allows_manage_channels_only_after_adoption() -> None:
         component_kind_value="manage_contact_channels",
         runtime_variables={"variables": {"contact": {}, "customs": {}}},
     )
+
+
+def test_unbound_person_allows_code_editor_only_after_adoption() -> None:
+    assert workflow._unbound_person_component_allowed(
+        component_kind_value="code_editor",
+        runtime_variables=_runtime(),
+    )
+    assert not workflow._unbound_person_component_allowed(
+        component_kind_value="code_editor",
+        runtime_variables={"variables": {"contact": {}, "customs": {}}},
+    )

@@ -44,6 +44,22 @@ def _to_uuid_or_none(raw_value: str | None) -> str | None:
         return None
 
 
+def _payload_with_definition_session_scope(
+    *,
+    payload: dict[str, Any],
+    definition: dict[str, Any],
+) -> dict[str, Any]:
+    effective_payload = dict(payload)
+    explicit_scope = str(effective_payload.get("session_scope") or "").strip()
+    if explicit_scope:
+        return effective_payload
+
+    definition_scope = str(definition.get("session_mode") or "").strip().lower()
+    if definition_scope in {"channel", "person"}:
+        effective_payload["session_scope"] = definition_scope
+    return effective_payload
+
+
 async def bootstrap_workflow_for_session(
     db_session: AsyncSession,
     *,
@@ -142,6 +158,10 @@ async def bootstrap_workflow_for_session(
             raise WorkflowBootstrapError("invalid_definition", "Definição do fluxo inválida.")
 
         bootstrap = build_bootstrap(definition)
+        effective_payload = _payload_with_definition_session_scope(
+            payload=payload,
+            definition=definition,
+        )
 
         runtime_patch = {
             "workflow_v2": {
@@ -154,8 +174,8 @@ async def bootstrap_workflow_for_session(
                 "last_card_cursor": None,
                 "next_card_cursor": bootstrap.next_card_uuid,
             },
-            "input_payload": payload,
-            "variables": {"payload": payload, **payload},
+            "input_payload": effective_payload,
+            "variables": {"payload": effective_payload, **effective_payload},
         }
 
         await update_session_workflow_position(
