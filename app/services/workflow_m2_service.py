@@ -342,6 +342,7 @@ UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS = {
 }
 UNBOUND_PERSON_ADOPTED_COMPONENT_KINDS = {
     *UNBOUND_PERSON_BOOTSTRAP_COMPONENT_KINDS,
+    "code_editor",
     "manage_contact_channels",
     "select_contact_channel",
     "source_list_membership",
