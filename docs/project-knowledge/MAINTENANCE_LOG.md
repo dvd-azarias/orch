@@ -1,5 +1,93 @@
 # Maintenance Log
 
+## 2026-09-20 — Preflight do substituto Velox e escopo `person` no webhook
+
+### REQUEST / CLASSIFICATION
+
+Comprovar que o substituto Velox pode receber payload cru, adotar/criar a
+pessoa, persistir canais, materializar a lista operacional e selecionar o canal
+na mesma sessão, sem discagem implícita. `ALPHA_FIX_OPTIONAL`, pequeno, sem
+migration e sem alteração do contrato `channel`.
+
+### CHANGE / SAFETY
+
+- A PR ORCH `#198` (`5c71de3`, merge `9f02c54`) faz o trigger direto herdar o
+  `session_mode` válido da revisão somente quando o payload não traz
+  `session_scope`; valor explícito continua prevalecendo.
+- `code_editor` pode continuar uma sessão `person/unbound` depois da adoção da
+  pessoa, mas não ganhou poder de bootstrap nem de criar pessoa, lista, membro
+  ou acionamento.
+- O flow canário `12fd033e-5793-4b00-95d1-dfe8867de67f` permanece protegido
+  por `payload.enable_dialer == true`; a prova omitiu o campo.
+- Supplier V1, cards legados, flows Velox e Target Core não foram alterados.
+
+### VALIDATION / RUNTIME
+
+- `285 passed` na regressão focada; suíte completa `903 passed, 26 failed`,
+  com as 26 falhas restritas à baseline documentada da assinatura legada
+  `trigger_orch(flow_uuid=...)`.
+- Merge implantado em `.136` e `.237`, `.env` preservado, API e cinco workers
+  canônicos reiniciados; readiness `200` e sem erro novo no journal das units
+  tocadas.
+- Sessões `8461`–`8468`: criação por campos legados, array com cinco canais,
+  repetição idempotente, identificador ausente, canais ausentes, telefone
+  compartilhado entre pessoas, atualização/acréscimo de canal e conflito
+  intrapayload.
+- As provas positivas terminaram com canal selecionado e lista materializada;
+  as negativas terminaram no card de atenção. Não houve alarme, sessão filha,
+  `linked_actuator` ou discagem.
+
+### OPERATIONAL LEARNING / NEXT GATE
+
+- Um probe temporário contaminou uma conexão PgBouncer ao executar
+  `SET SESSION CHARACTERISTICS ... READ ONLY`. A tentativa afetada falhou antes
+  de persistir. O probe passou a usar transação local read-only com rollback;
+  20 conexões foram verificadas como graváveis e a repetição `8462` concluiu.
+- Nunca alterar característica de sessão em probe sobre pool compartilhado.
+- Próximo gate: releases/callback do Dialer somente com autorização específica;
+  depois, encerrar a paridade e retomar o flow completo
+  `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.
+
+## 2026-09-19 — Fechamento dos cards de contato e baseline Velox
+
+### REQUEST / CLASSIFICATION
+
+Encerrar a homologação isolada dos cards de criação, canais, vínculo e seleção
+de contato e congelar o comportamento dos flows Velox `CREATE_CUSTOMER` e
+`ACIONADOR` antes de construir o substituto no HighComm. `ALPHA_FIX_OPTIONAL`,
+com mudança de runtime já integrada separadamente e esta etapa documental sem
+efeito em produção.
+
+### EVIDENCE / DECISION
+
+- As sessões `8434`–`8441` cobriram concorrência do mesmo identificador, mesmo
+  telefone em pessoas distintas, uma pessoa em listas distintas e atualização
+  vazia sem apagar dados.
+- A PR ORCH `#197`, merge `e946afe`, foi implantada em `.136` e `.237`; a prova
+  pós-deploy `8440/8441` confirmou `created -> unchanged`, uma pessoa e zero
+  alarmes.
+- A auditoria Velox foi executada em transações PostgreSQL `READ ONLY`, sem
+  alterar flows, listas, sessões ou contatos do workspace de origem.
+- `CREATE_CUSTOMER` v19 transforma cada webhook em um CSV unitário; o template
+  importa `id_alerta` como identificador da pessoa e até três telefones.
+- `ACIONADOR` v55 recebe imediatamente essas listas unitárias e executa o
+  discador legado; a fotografia continha `40.156` mailings históricos e
+  `5.157` ativos.
+- Para esse caso, a divisão em dois flows é uma ponte técnica histórica. O
+  substituto será um único flow `person` no HighComm usando somente os cards já
+  homologados, uma lista canária estável e o Dialer/Supplier V2.
+
+### SAFETY / NEXT GATE
+
+- Os flows Velox originais continuam intocados e são a referência de paridade.
+- O canário novo não usará endpoint, credencial, contato ou discador de
+  produção durante a primeira prova.
+- Próximo gate: criar lista e flow canários pelas APIs oficiais, validar o
+  draft/422, publicar e executar a matriz sem discagem real.
+- Após encerrar a paridade, retomar obrigatoriamente o flow completo
+  `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.
+- Plano detalhado: `VELOX_CONTACT_FLOW_PARITY_PLAN.md`.
+
 ## 2026-09-19 — Identidade do seletor em sessões `person`
 
 ### REQUEST / CLASSIFICATION
