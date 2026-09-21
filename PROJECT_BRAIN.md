@@ -37,7 +37,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 24. O registro de ciclo Supplier V2 do `send_with_dialer_handoff` é opt-in por `DIALER_SUPPLIER_V2_ENABLED` e allowlists explícitas de workspaces e flows. Depois de marcar o membro e persistir a intenção idempotente ligada a sessão, revisão, card, lista, membro e Perfil, o ORCH publica uma task pós-commit na fila própria `orch_dialer_supplier_v2`; o Target Core fixa o snapshot publicado e devolve o ciclo `ready`. O ORCH nunca persiste nem registra em log o `callback_token`. Erros transitórios usam retry limitado; o reconciliador consulta somente os workspaces permitidos e recupera intents `pending`, claims `registering` vencidos e `pending_retry` stale preservando a contagem. `422` fica terminal e alarmado, sem liberar a sessão. O retorno da Gate 2D entra por endpoint interno autenticado, exige correspondência integral de evento/ciclo/sessão/flow/revisão/card e só então libera o branch terminal; `release_mapping_version` é opcional para compatibilidade, aceita somente `pdial_v1` quando presente, é persistida e participa da idempotência. Callbacks brutos do PBX não avançam uma sessão registrada no Supplier V2 e são descartados de forma auditável para impedir hot loop. O canário real de 2026-09-15 confirmou um ciclo, uma tentativa e terminal `answered`, mas também revelou corrida entre o replay idempotente do registro e o callback terminal. A invariável corrigida é: `terminal_received`/`terminal_delivery` sempre vence uma task de registro atrasada; o patch JSONB usa compare-and-set, o claim terminal não chama HTTP e uma escrita que perde a corrida não gera retry nem alarme. Replay autenticado pode refletir `ready`, `deferred` ou `terminal`, enquanto criação nova continua exigindo `ready`. O Gate O1 multilane acrescenta uma autorização independente, fail-closed, para que a mesma sessão alcance posteriormente outro card: o ciclo terminal anterior é preservado em `workflow_v2.dialer_supplier_v2_history`, o novo card recebe uma intenção independente e callback histórico jamais reenfileira o card ativo. O marcador e a intenção são protegidos pelo mesmo savepoint. Em 2026-09-17, o canário também provou uma corrida curta entre o avanço disparado pelo callback bruto e a retomada terminal: o advisory lock fazia a task terminal encerrar como sucesso sem avançar o branch. Somente o endpoint terminal Supplier V2 passou a usar uma task dedicada que repete `session_execution_locked` com backoff limitado; o avanço comum continua com a semântica anterior. Card legado, Supplier V1 e flows de card único permanecem fora dessa mudança. Kerberos K1 e `service_dialer` D1 já foram implantados sob fail-closed; o canário de dois cards foi publicado, porém a homologação comportamental ainda depende do contrato Person/Channel/Dial Rule abaixo. Depois dela, o fluxo completo `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152` deverá ser revisto e ajustado ao contrato final antes de ser retomado.
 25. `session_mode=channel` e `session_mode=person` são contratos distintos e ambos permanecem suportados. Em `channel`, o membro que originou a sessão é âncora imutável e cards de seleção apenas validam essa âncora; trocar silenciosamente de endereço é proibido. Em `person`, a sessão representa a pessoa e cards seletores passam a ser a única autoridade para escolher ou avançar o membro, antes dos cards consumidores de canal. O seletor não grava `linked_actuator`; essa escrita continua exclusiva do card consumidor. Dial Rule/Supplier decide elegibilidade, limites e próxima ação; ORCH decide grafo, sessão e seleção. `flow_override` pode alterar somente preferências flexíveis e nunca ultrapassa limite duro, lista de restrição, validade, consentimento, janela legal ou bloqueio terminal. A auditoria read-only de 2026-09-16 classificou 142 orquestrações em 60 workspaces: `126 legacy_channel + 14 channel + 2 person`; seis incompatibilidades foram encontradas, todas em flows publicados do workspace DEV Highcomm, sem alteração de dados. O contrato base está implementado e exercitado; extensões e evidências ficam consolidadas em `FLOW_SESSION_SCOPE_CONTRACT.md`. O canário multidialer e o flow completo só devem ser retomados depois da homologação isolada dos cards de contato.
 26. O Rastreamento de Jornadas é uma superfície somente leitura para suporte, exposta pelo ORCH sob `/v1/orch/{workspace_uuid}/observability` e consumida exclusivamente pelo BFF da Gestão de Extensões. A visão agregada usa métricas de card no período e mantém a revisão executada; a visão individual resolve a pessoa por UUID e pelo vínculo histórico de `contact_list_member_id`, cobrindo `person` e `channel` sem correlacionar globalmente telefones iguais. O canvas retornado é estrutural e não expõe parâmetros, tokens, runtime ou callbacks; identifiers e endereços são mascarados. Credencial dedicada, período, paginação, limite de trace e `statement_timeout` são fail-closed/limitados. A entrega não altera runtime nem exige migration. Depois da homologação, o objetivo volta ao flow completo `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`. Consulte `JOURNEY_TRACKING.md`.
-27. O canário `identidade_person` de 2026-09-18 confirmou `found`, `not_found`, criação, enriquecimento e repetição sem duplicar a pessoa local. Também revelou amplificação: sem branch `exception`, `identidade_person_invalid_document` escapava da transação e a sessão permanecia disponível ao dispatcher; a sessão canária `8236` chegou a 735 execuções antes do `unassign` oficial. O patch Alpha preparado considera todo erro `identidade_person_*` terminal após as tentativas internas quando não há branch, preservando o roteamento explícito para `exception` quando existe. A correção está validada localmente e ainda não foi implantada.
+27. O canário `identidade_person` de 2026-09-18 confirmou `found`, `not_found`, criação, enriquecimento e repetição sem duplicar a pessoa local. Também revelou amplificação: sem branch `exception`, `identidade_person_invalid_document` escapava da transação e a sessão permanecia disponível ao dispatcher; a sessão canária `8236` chegou a 735 execuções antes do `unassign` oficial. A correção implantada considera todo erro `identidade_person_*` terminal após as tentativas internas quando não há branch e preserva o roteamento explícito para `exception` quando existe.
 28. Uma revisão pinada pode ser histórica e anterior às validações atuais. Se
     seu cursor apontar para card ausente, o ORCH deve terminalizar uma única
     vez com `workflow_v2.terminal_failure.code=component_not_found`, limpar o
@@ -52,8 +52,9 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     UUID/identificador divergente termina com
     `contact_person_identity_conflict`. Os canários A/F1/B (`8341`–`8345`)
     provaram criação, repetição idempotente, vínculo sem sessão filha e
-    enriquecimento de pessoa existente. A mudança está validada localmente e
-    ainda não foi implantada.
+    enriquecimento de pessoa existente. O runtime foi implantado e os gates
+    posteriores confirmaram criação, atualização, canais, associação
+    operacional e seleção na mesma sessão.
 30. Em sessão `person`, `external_id` identifica a execução e não a pessoa. O
     `select_contact_channel` precisa resolver e reancorar o membro por
     `person_uuid + contact_list_id + mailing_id`; exigir que
@@ -65,6 +66,38 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     A PR `#195`, merge `af71850`, foi implantada nos hosts `.136` e `.237`;
     a sessão pós-deploy `8431` terminou por `selected`, sem alarme, sessão filha
     ou atuador, preservando uma pessoa e seus dois membros operacionais.
+31. A homologação isolada dos cards de contato foi encerrada em 2026-09-19. As
+    sessões `8434`/`8435` provaram concorrência do mesmo identificador sem
+    duplicar pessoa; `8436`/`8437` provaram que o mesmo telefone pode pertencer
+    a pessoas diferentes; `8439` provou a mesma pessoa em listas/flows
+    distintos; `8440`/`8441` provaram criação seguida de atualização vazia sem
+    apagar os dados existentes. A PR `#197`, merge `e946afe`, corrigiu o
+    mapeamento vazio de `create_contact`; o runtime foi implantado em `.136` e
+    `.237`. A projeção escalar primária legada continua best-effort e não deve
+    ser transformada em trava global de telefone. Consulte
+    `CONTACT_LIFECYCLE_HOMOLOGATION_PLAN.md`.
+32. A auditoria `READ ONLY` das revisões publicadas Velox `CREATE_CUSTOMER` v19
+    e `ACIONADOR` v55 mostrou que cada webhook produz um CSV, uma source list
+    unitária e seu vínculo imediato ao acionador. A identidade de pessoa atual
+    é `id_alerta`; `nr_documento` é apenas dado extra. Para esse caso em tempo
+    real, a substituição correta no HighComm é um único flow `person`:
+    `create_contact -> manage_contact_channels -> source_list_membership`
+    operacional `-> select_contact_channel -> send_with_dialer_handoff`. Isso
+    não elimina a separação ingestão/acionamento para cargas reais em lote ou
+    uso futuro. Os flows Velox originais permanecem intocados. Consulte
+    `VELOX_CONTACT_FLOW_PARITY_PLAN.md`; depois da paridade, retomar o flow
+    completo `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.
+33. O substituto HighComm `12fd033e-5793-4b00-95d1-dfe8867de67f`, revisão v2
+    `a9bb2891-80db-4731-a3b9-bbb0e0cf3c14`, comprovou em `8461`–`8468` o
+    ciclo `webhook -> pessoa -> canais -> lista operacional -> seleção` para
+    criação, cinco canais, repetição, atualização, ausência e conflito. Todas
+    as provas ficaram antes do gate do Dialer: zero sessão filha, alarme,
+    `linked_actuator` ou discagem. A PR ORCH `#198`, merge `9f02c54`, corrige a
+    herança de `session_mode=person` no trigger direto sem sobrescrever
+    `session_scope` explícito. Probes via PgBouncer devem usar transação local
+    read-only com rollback; nunca `SET SESSION CHARACTERISTICS`, que pode vazar
+    para outro cliente do pool. Releases/callback ainda exigem autorização
+    específica; após esse gate, retomar o flow completo.
 
 ## O que e o ORCH
 

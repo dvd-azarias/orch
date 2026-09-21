@@ -1,0 +1,647 @@
+{
+  "schema_version": 1,
+  "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+  "generated_for": "CONTACT_LIFECYCLE_HOMOLOGATION_PLAN.md",
+  "safety": {
+    "contains_real_credentials": false,
+    "contains_actuators": false,
+    "creates_sessions_implicitly": false,
+    "notes": "Substituir somente os marcadores __CONFIGURE_* antes de publicar. Criar e alterar flows exclusivamente pelas APIs oficiais."
+  },
+  "canaries": [
+    {
+      "id": "A",
+      "name": "Canário A — Contato por Webhook",
+      "state": "api_ready_baseline",
+      "expected_baseline": "O definition é válido, mas o runtime atual deve terminar antes do primeiro card com contact_member_scope_not_found.",
+      "request": {
+        "display_name": "Canário A - Contato Webhook",
+        "change_note": "Gate 3: baseline de contato por webhook, sem atuador",
+        "definition": {
+          "info": {
+            "name": "Canário A - Contato Webhook",
+            "description": "Cria ou atualiza pessoa a partir do payload sem acionar canal."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "a1000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "a1000000-0000-4000-8000-000000000001",
+              "component_id": "create_contact",
+              "description": "Upsert cadastral a partir do webhook",
+              "parameters": {
+                "person_action": "upsert",
+                "identifier": "{{payload.contact.identifier}}",
+                "enrichment_policy": "overwrite_non_null",
+                "mapping": [
+                  {
+                    "key": "full_name",
+                    "value": "{{payload.contact.full_name}}"
+                  },
+                  {
+                    "key": "country",
+                    "value": "{{payload.contact.country}}"
+                  },
+                  {
+                    "key": "state",
+                    "value": "{{payload.contact.state}}"
+                  },
+                  {
+                    "key": "city",
+                    "value": "{{payload.contact.city}}"
+                  },
+                  {
+                    "key": "extra.canary_source",
+                    "value": "webhook"
+                  }
+                ],
+                "output_var": "contact_action"
+              }
+            }
+          ],
+          "branches": [],
+          "canvas_properties": {
+            "positions": [
+              {
+                "ref_id": "trigger-start-node",
+                "position": {
+                  "x": 200,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "a1000000-0000-4000-8000-000000000001",
+                "position": {
+                  "x": 500,
+                  "y": 200
+                }
+              }
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "B",
+      "name": "Canário B — Identidade",
+      "state": "draft_only_until_credentials",
+      "expected_baseline": "O definition é válido, mas o runtime cru em person deve parar antes do card; credenciais reais jamais ficam neste arquivo.",
+      "request": {
+        "display_name": "Canário B - Identidade",
+        "change_note": "Gate 3: baseline da Identidade, sem atuador",
+        "definition": {
+          "info": {
+            "name": "Canário B - Identidade",
+            "description": "Consulta e upsert pela Identidade sem comunicação externa ao contato."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "b1000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "b1000000-0000-4000-8000-000000000001",
+              "component_id": "identidade_person",
+              "description": "Consultar pessoa na Identidade",
+              "parameters": {
+                "workspace_id": "__CONFIGURE_IDENTIDADE_WORKSPACE__",
+                "access_token": "__CONFIGURE_IDENTIDADE_TOKEN__",
+                "document": "{{payload.identifier}}",
+                "require_phone": null,
+                "require_email": null,
+                "person_action": "upsert",
+                "enrichment_policy": "fill_missing",
+                "phone_policy": "all_eligible",
+                "mailing_id": null,
+                "link_mailing_to_current_flow": null,
+                "response_detail": "normalized",
+                "output_var": "identidade"
+              }
+            }
+          ],
+          "branches": [],
+          "canvas_properties": {
+            "positions": [
+              {
+                "ref_id": "trigger-start-node",
+                "position": {
+                  "x": 200,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "b1000000-0000-4000-8000-000000000001",
+                "position": {
+                  "x": 500,
+                  "y": 200
+                }
+              }
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "C",
+      "name": "Canário C — Lista e estado",
+      "state": "requires_real_mailing_uuid",
+      "expected_baseline": "Em sessão já ancorada, permite exercitar active, repetição, inactive e reativação sem criar sessões.",
+      "request": {
+        "display_name": "Canário C - Lista Estado",
+        "change_note": "Gate 3: baseline de vínculo e estado em lista",
+        "definition": {
+          "info": {
+            "name": "Canário C - Lista Estado",
+            "description": "Gerencia vínculo e estado de uma pessoa em lista sem fan-out."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "c1000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "c1000000-0000-4000-8000-000000000001",
+              "component_id": "source_list_membership",
+              "description": "Ativar pessoa na lista canária",
+              "parameters": {
+                "person_uuid": "{{contact.person_uuid}}",
+                "mailing_source": "selected",
+                "mailing_id": "00000000-0000-4000-8000-00000000000c",
+                "membership_state": "active",
+                "output_var": "source_list_membership"
+              }
+            }
+          ],
+          "branches": [],
+          "canvas_properties": {
+            "positions": [
+              {
+                "ref_id": "trigger-start-node",
+                "position": {
+                  "x": 200,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "c1000000-0000-4000-8000-000000000001",
+                "position": {
+                  "x": 500,
+                  "y": 200
+                }
+              }
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "D",
+      "name": "Canário D — Canais",
+      "state": "published_runtime_validated",
+      "flow_uuid": "e65308af-0e8f-4061-9a2d-d609ab7f1b9c",
+      "revision_id": "b30a196a-377a-4da0-9b46-deb775ddeb57",
+      "expected_baseline": "Cria ou atualiza a pessoa, administra telefone e e-mail, associa à lista de teste e termina sem acionar canal.",
+      "request": {
+        "display_name": "Canário D - Canais do Contato",
+        "change_note": "Gate D: canário conectado para homologação de canais do contato, sem atuador",
+        "definition": {
+          "info": {
+            "name": "Canário D - Canais do Contato",
+            "description": "Cria ou atualiza uma pessoa, gerencia seus canais e a vincula a uma lista de teste sem acionar qualquer canal."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "d1000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "d1000000-0000-4000-8000-000000000001",
+              "component_id": "create_contact",
+              "description": "Resolver pessoa a partir do payload do canário",
+              "parameters": {
+                "person_action": "upsert",
+                "identifier": "{{payload.contact.identifier}}",
+                "enrichment_policy": "overwrite_non_null",
+                "mapping": [
+                  {"key": "full_name", "value": "{{payload.contact.full_name}}"},
+                  {"key": "country", "value": "{{payload.contact.country}}"},
+                  {"key": "state", "value": "{{payload.contact.state}}"},
+                  {"key": "city", "value": "{{payload.contact.city}}"},
+                  {"key": "extra.canary_source", "value": "contact_channel_d"}
+                ],
+                "output_var": "contact_action"
+              }
+            },
+            {
+              "ref_id": "d1000000-0000-4000-8000-000000000002",
+              "component_id": "manage_contact_channels",
+              "description": "Criar ou atualizar telefone e e-mail da pessoa",
+              "parameters": {
+                "person_uuid": "{{contact_action.person_uuid}}",
+                "operation": "upsert",
+                "channels": [
+                  {
+                    "type": "voice",
+                    "address": "{{payload.contact.phone}}",
+                    "label": "principal",
+                    "priority": 1,
+                    "is_primary": true
+                  },
+                  {
+                    "type": "email",
+                    "address": "{{payload.contact.email}}",
+                    "label": "email",
+                    "priority": 2,
+                    "is_primary": false
+                  }
+                ],
+                "output_var": "contact_channels"
+              }
+            },
+            {
+              "ref_id": "d1000000-0000-4000-8000-000000000003",
+              "component_id": "source_list_membership",
+              "description": "Ativar pessoa na lista canária sem criar nova sessão",
+              "parameters": {
+                "person_uuid": "{{contact_action.person_uuid}}",
+                "mailing_source": "selected",
+                "mailing_id": "60333a24-447d-4d32-9ab5-f0f6fbefcd31",
+                "membership_state": "active",
+                "output_var": "source_list_membership"
+              }
+            },
+            {
+              "ref_id": "d1000000-0000-4000-8000-000000000004",
+              "component_id": "finish_flow",
+              "description": "Encerrar — pessoa, canais e vínculo consistentes",
+              "parameters": {"result": "success"}
+            },
+            {
+              "ref_id": "d1000000-0000-4000-8000-000000000005",
+              "component_id": "finish_flow",
+              "description": "Encerrar — operação não concluída",
+              "parameters": {"result": "unsuccess"}
+            }
+          ],
+          "branches": [
+            {"from": "d1000000-0000-4000-8000-000000000001", "to": "d1000000-0000-4000-8000-000000000002", "branch": "created"},
+            {"from": "d1000000-0000-4000-8000-000000000001", "to": "d1000000-0000-4000-8000-000000000002", "branch": "updated"},
+            {"from": "d1000000-0000-4000-8000-000000000001", "to": "d1000000-0000-4000-8000-000000000002", "branch": "unchanged"},
+            {"from": "d1000000-0000-4000-8000-000000000001", "to": "d1000000-0000-4000-8000-000000000005", "branch": "not_found"},
+            {"from": "d1000000-0000-4000-8000-000000000001", "to": "d1000000-0000-4000-8000-000000000005", "branch": "exception"},
+            {"from": "d1000000-0000-4000-8000-000000000002", "to": "d1000000-0000-4000-8000-000000000003", "branch": "changed"},
+            {"from": "d1000000-0000-4000-8000-000000000002", "to": "d1000000-0000-4000-8000-000000000003", "branch": "unchanged"},
+            {"from": "d1000000-0000-4000-8000-000000000002", "to": "d1000000-0000-4000-8000-000000000005", "branch": "not_found"},
+            {"from": "d1000000-0000-4000-8000-000000000002", "to": "d1000000-0000-4000-8000-000000000005", "branch": "conflict"},
+            {"from": "d1000000-0000-4000-8000-000000000002", "to": "d1000000-0000-4000-8000-000000000005", "branch": "exception"},
+            {"from": "d1000000-0000-4000-8000-000000000003", "to": "d1000000-0000-4000-8000-000000000004", "branch": "changed"},
+            {"from": "d1000000-0000-4000-8000-000000000003", "to": "d1000000-0000-4000-8000-000000000004", "branch": "unchanged"},
+            {"from": "d1000000-0000-4000-8000-000000000003", "to": "d1000000-0000-4000-8000-000000000005", "branch": "not_found"},
+            {"from": "d1000000-0000-4000-8000-000000000003", "to": "d1000000-0000-4000-8000-000000000005", "branch": "exception"}
+          ],
+          "canvas_properties": {
+            "positions": [
+              {"ref_id": "trigger-start-node", "position": {"x": 160, "y": 260}},
+              {"ref_id": "d1000000-0000-4000-8000-000000000001", "position": {"x": 440, "y": 260}},
+              {"ref_id": "d1000000-0000-4000-8000-000000000002", "position": {"x": 790, "y": 260}},
+              {"ref_id": "d1000000-0000-4000-8000-000000000003", "position": {"x": 1140, "y": 260}},
+              {"ref_id": "d1000000-0000-4000-8000-000000000004", "position": {"x": 1500, "y": 180}},
+              {"ref_id": "d1000000-0000-4000-8000-000000000005", "position": {"x": 1140, "y": 620}}
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "D2",
+      "name": "Canário D2 — Desativação de canal",
+      "state": "published_runtime_validated",
+      "flow_uuid": "e4cb0ef6-05fc-4c3b-8eac-9a1c67bb904a",
+      "revision_id": "4a72c336-ab15-4307-9b53-165e2938af7f",
+      "expected_baseline": "Desativa logicamente um canal existente, promove o próximo principal e repete sem nova alteração.",
+      "request": {
+        "display_name": "Canário D2 - Desativar Canal",
+        "change_note": "Gate D2: canário de desativação de canal, sem atuador",
+        "definition": {
+          "info": {
+            "name": "Canário D2 - Desativar Canal",
+            "description": "Localiza ou adota uma pessoa e desativa explicitamente um canal sintético, sem exclusão física, sessão filha ou acionamento."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "d2000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "d2000000-0000-4000-8000-000000000001",
+              "component_id": "create_contact",
+              "description": "Resolver pessoa sintética por identificador",
+              "parameters": {
+                "person_action": "upsert",
+                "identifier": "{{payload.contact.identifier}}",
+                "enrichment_policy": "overwrite_non_null",
+                "mapping": [
+                  {"key": "full_name", "value": "{{payload.contact.full_name}}"},
+                  {"key": "country", "value": "{{payload.contact.country}}"},
+                  {"key": "state", "value": "{{payload.contact.state}}"},
+                  {"key": "city", "value": "{{payload.contact.city}}"},
+                  {"key": "extra.canary_source", "value": "contact_channel_d2"}
+                ],
+                "output_var": "contact_action"
+              }
+            },
+            {
+              "ref_id": "d2000000-0000-4000-8000-000000000002",
+              "component_id": "manage_contact_channels",
+              "description": "Desativar o canal informado sem apagar histórico",
+              "parameters": {
+                "person_uuid": "{{contact_action.person_uuid}}",
+                "operation": "deactivate",
+                "channels": [{"type": "voice", "address": "{{payload.contact.phone}}"}],
+                "output_var": "contact_channels"
+              }
+            },
+            {
+              "ref_id": "d2000000-0000-4000-8000-000000000003",
+              "component_id": "finish_flow",
+              "description": "Encerrar — canal desativado ou já inativo",
+              "parameters": {"result": "success"}
+            },
+            {
+              "ref_id": "d2000000-0000-4000-8000-000000000004",
+              "component_id": "finish_flow",
+              "description": "Encerrar — desativação não concluída",
+              "parameters": {"result": "unsuccess"}
+            }
+          ],
+          "branches": [
+            {"from": "d2000000-0000-4000-8000-000000000001", "to": "d2000000-0000-4000-8000-000000000002", "branch": "created"},
+            {"from": "d2000000-0000-4000-8000-000000000001", "to": "d2000000-0000-4000-8000-000000000002", "branch": "updated"},
+            {"from": "d2000000-0000-4000-8000-000000000001", "to": "d2000000-0000-4000-8000-000000000002", "branch": "unchanged"},
+            {"from": "d2000000-0000-4000-8000-000000000001", "to": "d2000000-0000-4000-8000-000000000004", "branch": "not_found"},
+            {"from": "d2000000-0000-4000-8000-000000000001", "to": "d2000000-0000-4000-8000-000000000004", "branch": "exception"},
+            {"from": "d2000000-0000-4000-8000-000000000002", "to": "d2000000-0000-4000-8000-000000000003", "branch": "changed"},
+            {"from": "d2000000-0000-4000-8000-000000000002", "to": "d2000000-0000-4000-8000-000000000003", "branch": "unchanged"},
+            {"from": "d2000000-0000-4000-8000-000000000002", "to": "d2000000-0000-4000-8000-000000000004", "branch": "not_found"},
+            {"from": "d2000000-0000-4000-8000-000000000002", "to": "d2000000-0000-4000-8000-000000000004", "branch": "conflict"},
+            {"from": "d2000000-0000-4000-8000-000000000002", "to": "d2000000-0000-4000-8000-000000000004", "branch": "exception"}
+          ],
+          "canvas_properties": {
+            "positions": [
+              {"ref_id": "trigger-start-node", "position": {"x": 160, "y": 260}},
+              {"ref_id": "d2000000-0000-4000-8000-000000000001", "position": {"x": 440, "y": 260}},
+              {"ref_id": "d2000000-0000-4000-8000-000000000002", "position": {"x": 800, "y": 260}},
+              {"ref_id": "d2000000-0000-4000-8000-000000000003", "position": {"x": 1160, "y": 180}},
+              {"ref_id": "d2000000-0000-4000-8000-000000000004", "position": {"x": 1160, "y": 560}}
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "E",
+      "name": "Canário E — Âncora channel",
+      "state": "api_ready_baseline",
+      "expected_baseline": "Preserva o membro que originou a sessão e seleciona somente o primeiro canal elegível sem trocar de pessoa.",
+      "request": {
+        "display_name": "Canário E - Ancora Channel",
+        "change_note": "Gate 3: regressão do modo channel",
+        "definition": {
+          "info": {
+            "name": "Canário E - Ancora Channel",
+            "description": "Comprova preservação da âncora de canal sem atuação."
+          },
+          "mode": "orchestration",
+          "session_mode": "channel",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "e1000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "e1000000-0000-4000-8000-000000000001",
+              "component_id": "select_contact_channel",
+              "description": "Preservar canal de origem",
+              "parameters": {
+                "channel_type": "voice",
+                "channel_label": null,
+                "selection_strategy": "first_eligible",
+                "dial_rule_mode": "respect_dial_rule",
+                "output_var": "selected_channel"
+              }
+            }
+          ],
+          "branches": [],
+          "canvas_properties": {
+            "positions": [
+              {
+                "ref_id": "trigger-start-node",
+                "position": {
+                  "x": 200,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "e1000000-0000-4000-8000-000000000001",
+                "position": {
+                  "x": 500,
+                  "y": 200
+                }
+              }
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "F1",
+      "name": "Canário F1 — Ingestão",
+      "state": "requires_real_mailing_uuid",
+      "expected_baseline": "Definition válido e sem atuador; no runtime atual o ingresso cru person deve parar antes de criar a pessoa.",
+      "request": {
+        "display_name": "Canário F1 - Ingestao",
+        "change_note": "Gate 3: ingestão desacoplada sem atuador",
+        "definition": {
+          "info": {
+            "name": "Canário F1 - Ingestao",
+            "description": "Cria ou atualiza pessoa e organiza em lista sem gerar acionamento."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "f1000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "f1000000-0000-4000-8000-000000000001",
+              "component_id": "create_contact",
+              "description": "Upsert da pessoa recebida",
+              "parameters": {
+                "person_action": "upsert",
+                "identifier": "{{payload.contact.identifier}}",
+                "enrichment_policy": "overwrite_non_null",
+                "mapping": [
+                  {
+                    "key": "full_name",
+                    "value": "{{payload.contact.full_name}}"
+                  },
+                  {
+                    "key": "extra.canary_source",
+                    "value": "ingestion"
+                  }
+                ],
+                "output_var": "contact_action"
+              }
+            },
+            {
+              "ref_id": "f1000000-0000-4000-8000-000000000002",
+              "component_id": "source_list_membership",
+              "description": "Organizar a pessoa na lista canária",
+              "parameters": {
+                "person_uuid": "{{contact_action.person_uuid}}",
+                "mailing_source": "selected",
+                "mailing_id": "00000000-0000-4000-8000-00000000000f",
+                "membership_state": "active",
+                "output_var": "source_list_membership"
+              }
+            }
+          ],
+          "branches": [
+            {
+              "from": "f1000000-0000-4000-8000-000000000001",
+              "to": "f1000000-0000-4000-8000-000000000002",
+              "branch": "created"
+            },
+            {
+              "from": "f1000000-0000-4000-8000-000000000001",
+              "to": "f1000000-0000-4000-8000-000000000002",
+              "branch": "updated"
+            },
+            {
+              "from": "f1000000-0000-4000-8000-000000000001",
+              "to": "f1000000-0000-4000-8000-000000000002",
+              "branch": "unchanged"
+            }
+          ],
+          "canvas_properties": {
+            "positions": [
+              {
+                "ref_id": "trigger-start-node",
+                "position": {
+                  "x": 200,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "f1000000-0000-4000-8000-000000000001",
+                "position": {
+                  "x": 500,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "f1000000-0000-4000-8000-000000000002",
+                "position": {
+                  "x": 850,
+                  "y": 200
+                }
+              }
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    },
+    {
+      "id": "F2",
+      "name": "Canário F2 — Acionamento",
+      "state": "api_ready_baseline",
+      "expected_baseline": "Consome uma sessão materializada e seleciona o canal; nenhum atuador é incluído nesta primeira prova.",
+      "request": {
+        "display_name": "Canário F2 - Acionamento",
+        "change_note": "Gate 3: seleção desacoplada, ainda sem atuador",
+        "definition": {
+          "info": {
+            "name": "Canário F2 - Acionamento",
+            "description": "Seleciona canal de sessão materializada sem efetuar comunicação."
+          },
+          "mode": "orchestration",
+          "session_mode": "person",
+          "source": "manual",
+          "status": "active",
+          "trigger_ids": [],
+          "trigger_start_by_ref_id": "f2000000-0000-4000-8000-000000000001",
+          "components": [
+            {
+              "ref_id": "f2000000-0000-4000-8000-000000000001",
+              "component_id": "select_contact_channel",
+              "description": "Selecionar canal materializado",
+              "parameters": {
+                "channel_type": "voice",
+                "channel_label": null,
+                "selection_strategy": "first_eligible",
+                "dial_rule_mode": "respect_dial_rule",
+                "output_var": "selected_channel"
+              }
+            }
+          ],
+          "branches": [],
+          "canvas_properties": {
+            "positions": [
+              {
+                "ref_id": "trigger-start-node",
+                "position": {
+                  "x": 200,
+                  "y": 200
+                }
+              },
+              {
+                "ref_id": "f2000000-0000-4000-8000-000000000001",
+                "position": {
+                  "x": 500,
+                  "y": 200
+                }
+              }
+            ],
+            "collapsed_components": []
+          },
+          "webhook": [],
+          "channels": []
+        }
+      }
+    }
+  ]
+}
