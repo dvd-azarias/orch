@@ -145,6 +145,41 @@ async def test_fetch_contact_context_cross_validates_lower_selectors_with_member
 
 
 @pytest.mark.asyncio
+async def test_fetch_contact_context_allows_entity_mismatch_only_with_exact_member() -> None:
+    scoped_session = _RecordingSession({"contact_list_member_id": 10655})
+
+    row = await fetch_contact_runtime_context_for_session(
+        scoped_session,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        session_id=6937,
+        contact_list_member_id=10655,
+        contact_list_id="dc7dc1c1-2c98-42e9-a788-5d186f458daa",
+        mailing_id=1115,
+        allow_session_entity_mismatch=True,
+    )
+
+    assert row == {"contact_list_member_id": 10655}
+    assert "JOIN orch_sessions os\n              ON TRUE" in scoped_session.statement
+    assert "clm.id = :contact_list_member_id" in scoped_session.statement
+    assert "btrim(clm.contact_channel_address) = btrim(os.entity_address)" in (
+        scoped_session.statement
+    )
+
+    incomplete_scope_session = _RecordingSession(None)
+    await fetch_contact_runtime_context_for_session(
+        incomplete_scope_session,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        session_id=6937,
+        contact_list_member_id=10655,
+        allow_session_entity_mismatch=True,
+    )
+
+    assert "ON os.entity = clm.contact_identifier" in (
+        incomplete_scope_session.statement
+    )
+
+
+@pytest.mark.asyncio
 async def test_fetch_contact_context_without_scope_preserves_legacy_query() -> None:
     session = _RecordingSession(None)
 
