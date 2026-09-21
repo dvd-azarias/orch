@@ -98,6 +98,19 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     read-only com rollback; nunca `SET SESSION CHARACTERISTICS`, que pode vazar
     para outro cliente do pool. Releases/callback ainda exigem autorização
     específica; após esse gate, retomar o flow completo.
+34. A primeira discagem real do substituto Velox criou a sessão `8487`, marcou
+    o membro contextual exato, registrou um ciclo Supplier V2 e recebeu do PBX
+    `CONGESTION/cause 34`. A PR `#200`, merge `d84c21d`, já implantada em
+    `.237`, corrige exclusivamente o handoff do membro selecionado em
+    `person`. O callback terminal revelou um segundo gap: uma sessão iniciada
+    sem membro continua com correlação sintética mesmo depois de
+    `selected_contact_channel`, e a retomada não pode voltar a exigir que essa
+    correlação seja o identificador da pessoa. O patch preparado usa a seleção
+    interna como escopo efetivo e dispensa essa igualdade somente com membro
+    exato, lista, mailing e endereço da própria sessão; todos os caminhos
+    `channel`/legados permanecem com a identidade histórica. Integração e novo
+    E2E ainda são pendentes; a tentativa consumida não deve ser reutilizada ou
+    zerada.
 
 ## O que e o ORCH
 

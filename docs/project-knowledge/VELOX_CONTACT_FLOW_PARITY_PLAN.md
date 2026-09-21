@@ -290,7 +290,7 @@ configurações do canário e decisões de destino, não gaps de engine.
 - [x] Validar o draft com o `422` atual antes de publicar.
 - [x] Publicar sem endpoint de cliente e sem contato de produção.
 - [x] Executar a matriz controlada sem discagem real.
-- [ ] Executar discagem real somente após autorização específica.
+- [x] Executar discagem real somente após autorização específica.
 - [ ] Comparar resultado com as revisões Velox congeladas.
 - [ ] Registrar UUIDs, revisions, sessões, branches e contagens.
 - [ ] Encerrar Gate 8.
@@ -315,6 +315,26 @@ Dialer. Em todas as provas: `sessions_created=0`, zero sessão filha, zero
 As linhas 9, 10 e a parcela de discagem concorrente da linha 11 da matriz
 continuam pendentes porque exigem habilitar explicitamente o gate
 `enable_dialer=true`. Não fazê-lo sem autorização específica.
+
+## Evidência da primeira discagem real
+
+Em 2026-09-20, uma autorização específica permitiu executar o gate com o
+payload `gate8-real-20260920-002`. A sessão `8487` selecionou o membro `11517`,
+marcou `linked_actuator=dialer` e registrou exatamente um ciclo/tentativa na
+Supplier V2. O `service_dialer` chamou o PBX, que retornou `CONGESTION`, causa
+34, antes de tocar. O evento foi normalizado como `technical_failure`, consumiu
+a única tentativa do Perfil e encerrou a pessoa por
+`person_attempt_limit_reached`.
+
+O callback terminal foi entregue ao ORCH, mas a retomada expôs o gap
+`contact_member_scope_not_found`: a sessão nasceu sem membro, adotou a pessoa e
+selecionou o canal durante o próprio fluxo, portanto sua `entity` continuou
+sendo uma correlação sintética. A correção de handoff já integrada pela PR
+`#200` não resolve sozinha a hidratação posterior. O patch seguinte deve usar
+somente `workflow_v2.selected_contact_channel` válido para recuperar o membro
+exato sem exigir igualdade entre essa correlação e o identificador da pessoa;
+lista, mailing e endereço da sessão continuam obrigatórios. A nova prova real
+deve usar outra pessoa e outra tentativa, nunca alterar o ledger já consumido.
 
 ## Rollback
 

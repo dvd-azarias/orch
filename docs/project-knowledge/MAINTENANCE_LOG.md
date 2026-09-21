@@ -1,5 +1,61 @@
 # Maintenance Log
 
+## 2026-09-21 — Gate 8 Velox: handoff e retomada `person/unbound`
+
+### REQUEST / CLASSIFICATION
+
+Executar a primeira discagem real do substituto Velox e corrigir somente os
+gaps comprovados entre a seleção interna de canal, o handoff Dialer V2 e a
+retomada terminal. `ALPHA_FIX_REQUIRED`, sem migration e sem alteração de
+Supplier V1, card legado ou contrato `channel`.
+
+### RUNTIME / CAUSE
+
+- O flow `12fd033e-5793-4b00-95d1-dfe8867de67f`, revisão
+  `df92d64d-58b9-431b-8a39-dc4ea6710db3`, criou a sessão `8487`, selecionou o
+  membro `11517` e alcançou o novo Dialer.
+- A PR `#200`, merge `d84c21d`, permitiu ao handoff usar esse membro contextual
+  exato em sessão `person`, mantendo membro e endereço obrigatórios e o fallback
+  legado preso à identidade da sessão. O merge foi implantado em `.237`, com
+  `.env` preservado, units ativas e health/readiness `200`.
+- O Supplier V2 criou o ciclo `181441a9-72ac-40fe-95d3-821abfed3070` e a
+  tentativa `4b255ae1-6d0e-4321-8f91-d6aa2c7cedd1`. O PBX devolveu
+  `CONGESTION`, causa 34; a regra consumiu a única tentativa e encerrou por
+  `finish_person/person_attempt_limit_reached`.
+- O callback terminal chegou corretamente ao ORCH. A retomada falhou antes de
+  percorrer a branch porque o runtime ainda tratava a sessão criada sem
+  seletores de origem como `unbound` e a consulta de contexto ainda exigia
+  `orch_sessions.entity = contact_identifier`, embora
+  `workflow_v2.selected_contact_channel` já contivesse membro, lista, mailing,
+  pessoa, tipo e endereço validados.
+
+### PATCH PREPARADO / SAFETY
+
+- A seleção interna ativa passa a ser o escopo efetivo na retomada de uma
+  sessão `person/unbound`.
+- Somente esse caminho envia opt-in ao repositório para dispensar a igualdade
+  entre a correlação sintética da sessão e o identificador da pessoa.
+- O opt-in exige `contact_list_member_id` exato e continua cruzando lista,
+  mailing e `contact_channel_address = orch_sessions.entity_address`.
+- Sem seleção interna, sem membro exato ou com endereço divergente, a busca
+  falha fechada. Chamadas comuns, `channel`, Supplier V1 e cards legados
+  preservam o predicado histórico.
+
+### VALIDATION / NEXT GATE
+
+- Testes unitários diretamente afetados: `60 passed`.
+- Regressão ampliada de runtime M2, seletor, Dialer e Supplier V2, incluindo
+  PostgreSQL real fora da sandbox: `304 passed`.
+- Suíte total: `904 passed, 26 failed`; são as mesmas 26 falhas da baseline de
+  `trigger_orch(flow_uuid=...)`, sem falha nova. `compileall` e
+  `git diff --check` passaram.
+- A alteração ainda requer commit, PR, merge e deploy. Depois disso, repetir o
+  canário com uma pessoa nova e janela de calendário controlada; não reutilizar
+  nem zerar a tentativa já consumida.
+- Depois do E2E terminal e da comparação final com as revisões Velox, encerrar
+  o Gate 8 e retomar o flow completo
+  `c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152`.
+
 ## 2026-09-20 — Preflight do substituto Velox e escopo `person` no webhook
 
 ### REQUEST / CLASSIFICATION

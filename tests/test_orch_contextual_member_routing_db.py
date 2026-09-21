@@ -225,6 +225,66 @@ async def test_contextual_member_routing_isolated_in_temporary_tables() -> None:
             assert conflict is None
             assert address_conflict is None
 
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET entity = 'generated-person-unbound-session'
+                     WHERE id = 6937
+                    """
+                )
+            )
+            synthetic_without_opt_in = await fetch_contact_runtime_context_for_session(
+                db_session,
+                **base,
+                contact_list_member_id=10655,
+                contact_list_id=expected_list_uuid,
+                mailing_id=1115,
+            )
+            synthetic_selected = await fetch_contact_runtime_context_for_session(
+                db_session,
+                **base,
+                contact_list_member_id=10655,
+                contact_list_id=expected_list_uuid,
+                mailing_id=1115,
+                allow_session_entity_mismatch=True,
+            )
+            assert synthetic_without_opt_in is None
+            assert synthetic_selected is not None
+            assert synthetic_selected["contact_list_member_id"] == 10655
+
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET entity_address = '5511777777777'
+                     WHERE id = 6937
+                    """
+                )
+            )
+            synthetic_address_conflict = (
+                await fetch_contact_runtime_context_for_session(
+                    db_session,
+                    **base,
+                    contact_list_member_id=10655,
+                    contact_list_id=expected_list_uuid,
+                    mailing_id=1115,
+                    allow_session_entity_mismatch=True,
+                )
+            )
+            assert synthetic_address_conflict is None
+
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET entity = '30392286855',
+                           entity_address = '5511999999999'
+                     WHERE id = 6937
+                    """
+                )
+            )
+
             dialer_assignment = await assign_dialer_routing_for_session(
                 db_session,
                 **base,

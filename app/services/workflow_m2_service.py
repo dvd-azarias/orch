@@ -9591,15 +9591,23 @@ async def execute_workflow_m2_for_session(
         if (
             contextual_member_routing_enabled
             and effective_contact_member_scope.valid
-            and not person_scope_without_selectors
+            and (
+                selected_contact_channel is not None
+                or not person_scope_without_selectors
+            )
         ):
+            contact_context_kwargs: dict[str, Any] = {
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+                "contact_list_member_id": effective_contact_member_scope.contact_list_member_id,
+                "contact_list_id": effective_contact_member_scope.contact_list_id,
+                "mailing_id": effective_contact_member_scope.mailing_id,
+            }
+            if selected_contact_channel is not None:
+                contact_context_kwargs["allow_session_entity_mismatch"] = True
             contact_runtime_context = await fetch_contact_runtime_context_for_session(
                 db_session,
-                flow_uuid=flow_uuid,
-                session_id=session_id,
-                contact_list_member_id=effective_contact_member_scope.contact_list_member_id,
-                contact_list_id=effective_contact_member_scope.contact_list_id,
-                mailing_id=effective_contact_member_scope.mailing_id,
+                **contact_context_kwargs,
             )
         elif contextual_member_routing_enabled:
             contact_runtime_context = None
@@ -9620,7 +9628,7 @@ async def execute_workflow_m2_for_session(
         channel_type_matches: bool | None = None
         if (
             contextual_member_routing_enabled
-            and contact_member_scope.explicit
+            and effective_contact_member_scope.explicit
             and isinstance(contact_runtime_context, dict)
         ):
             channel_type_matches = _contact_member_channel_type_matches(
@@ -9676,7 +9684,12 @@ async def execute_workflow_m2_for_session(
             and not unbound_person_entry_allowed
         ):
             failed_at = datetime.now(timezone.utc)
-            if person_scope_without_selectors:
+            if selected_contact_channel is not None:
+                failure_message = (
+                    "O canal previamente selecionado não corresponde mais ao "
+                    "membro ativo e ao endereço da sessão."
+                )
+            elif person_scope_without_selectors:
                 failure_message = (
                     "Sessão por pessoa recebida sem identificadores de membro, lista ou mailing."
                 )

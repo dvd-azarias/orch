@@ -1412,6 +1412,7 @@ async def test_person_resume_hydrates_previously_selected_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(session_scope="person")
+    runtime["input_payload"] = {"session_scope": "person"}
     runtime["workflow_v2"]["next_card_cursor"] = SELECTED_REF
     runtime["workflow_v2"]["selected_contact_channel"] = {
         "selected": True,
@@ -1484,4 +1485,5 @@ async def test_person_resume_hydrates_previously_selected_member(
     assert fetch_contact.await_args.kwargs["contact_list_member_id"] == 88
     assert fetch_contact.await_args.kwargs["contact_list_id"] == CONTACT_LIST_UUID
     assert fetch_contact.await_args.kwargs["mailing_id"] == 1140
+    assert fetch_contact.await_args.kwargs["allow_session_entity_mismatch"] is True
     assert runtime["variables"]["contact"]["channel_type"] == "whatsapp"

@@ -2737,6 +2737,7 @@ async def fetch_contact_runtime_context_for_session(
     contact_list_member_id: int | None = None,
     contact_list_id: str | None = None,
     mailing_id: int | None = None,
+    allow_session_entity_mismatch: bool = False,
 ) -> dict[str, Any] | None:
     parameters: dict[str, Any] = {
         "flow_uuid": flow_uuid,
@@ -2769,6 +2770,14 @@ async def fetch_contact_runtime_context_for_session(
         )
         contextual_filter = "\n              AND " + "\n              AND ".join(scope_predicates)
 
+    session_entity_join = "os.entity = clm.contact_identifier"
+    selected_member_scope_complete = all(
+        value is not None
+        for value in (contact_list_member_id, contact_list_id, mailing_id)
+    )
+    if allow_session_entity_mismatch and selected_member_scope_complete:
+        session_entity_join = "TRUE"
+
     result = await db_session.execute(
         text(
             f"""
@@ -2792,7 +2801,7 @@ async def fetch_contact_runtime_context_for_session(
                 clm.person_uuid::text AS person_uuid
             FROM contact_list_members clm
             JOIN orch_sessions os
-              ON os.entity = clm.contact_identifier
+              ON {session_entity_join}
             WHERE os.id = :session_id
               AND os.flow_uuid = CAST(:flow_uuid AS uuid)
               AND os.unassigned_at IS NULL
