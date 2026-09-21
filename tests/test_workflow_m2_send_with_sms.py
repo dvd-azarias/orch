@@ -222,9 +222,7 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_sms_intent(
         "message_template": "Olá {{contact.full_name}}",
         "codigo_carteira": "comunicado_digital",
         "codigo_fornecedor": "100",
-        "url_callback_dlr": "https://callback.invalid/dlr",
-        "url_callback_mo": "https://callback.invalid/mo",
-        "url_callback_status": "https://callback.invalid/status",
+        "output_var": "sms_dispatch",
     }
     persisted = _configure_execution(
         monkeypatch, runtime=runtime, contact_row=_contact_row()
@@ -281,6 +279,14 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_sms_intent(
     intent = runtime["workflow_v2"]["channel_dispatch_v2"]
     assert intent["status"] == "pending"
     assert intent["channel"] == "sms"
+    assert runtime["variables"]["customs"]["sms_dispatch"] == {
+        "channel": "sms",
+        "correlation_key": intent["correlation_key"],
+        "component_ref_id": SMS_REF,
+        "dispatch_sequence": 1,
+        "requested_at": intent["requested_at"],
+        "status": "prepared",
+    }
     serialized = str(runtime)
     assert "secret-basic-token" not in serialized
     assert "Olá Contato de Teste" not in serialized
@@ -291,6 +297,40 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_sms_intent(
     assert b"syncwebhook.example.test/v1/orch/channel-supplier-v2/callbacks/" in plaintext
     assert b"callback.invalid" not in plaintext
     assert persisted[-1]["runtime_variables"] is runtime
+
+
+@pytest.mark.asyncio
+async def test_enabled_supplier_v2_without_callbacks_fails_before_marking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    _configure_execution(
+        monkeypatch, runtime=runtime, contact_row=_contact_row()
+    )
+    assign_sms = AsyncMock()
+    monkeypatch.setattr(workflow, "assign_sms_routing_for_session", assign_sms)
+    real_settings = workflow.get_settings()
+    enabled_settings = replace(
+        real_settings,
+        channel_supplier_v2_enabled=True,
+        channel_supplier_v2_workspace_allowlist=(
+            "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        ),
+        channel_supplier_v2_flow_allowlist=(FLOW_UUID,),
+        channel_supplier_v2_callbacks_enabled=False,
+    )
+    monkeypatch.setattr(workflow, "get_settings", lambda: enabled_settings)
+
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        await workflow.execute_workflow_m2_for_session(
+            _Session(),  # type: ignore[arg-type]
+            flow_uuid=FLOW_UUID,
+            session_id=123,
+        )
+
+    assert exc_info.value.code == "channel_supplier_v2_sms_callbacks_disabled"
+    assign_sms.assert_not_awaited()
+    assert "channel_dispatch_v2" not in runtime["workflow_v2"]
 
 
 @pytest.mark.asyncio

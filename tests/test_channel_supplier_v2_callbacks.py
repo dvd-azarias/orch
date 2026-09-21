@@ -170,7 +170,7 @@ def _configure_resume_execution(
         ("status", {"messageid": "m-1", "status": 12}, "sent"),
         ("status", {"messageid": "m-1", "status": 4}, "sent"),
         ("dlr", {"messageid": "m-1", "status": 1}, "delivered"),
-        ("dlr", {"messageid": "m-1", "status": 2}, "failed"),
+        ("dlr", {"messageid": "m-1", "status": 2}, "not_delivered"),
         ("mo", {"messageid": "m-1", "mensagem": "Resposta"}, "response"),
     ],
 )
@@ -224,7 +224,7 @@ def test_callback_without_provider_message_id_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sms_mo_is_preserved_before_status_advances_linear_card(
+async def test_first_sms_lifecycle_event_advances_to_generic_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = {
@@ -253,7 +253,11 @@ async def test_sms_mo_is_preserved_before_status_advances_linear_card(
     assert decision.terminal is True
     assert decision.channel == "sms"
     assert runtime["callbacks_pending"][0]["event_name"] == "callback"
-    assert runtime["callbacks_pending"][0]["result"] == "response"
+    assert runtime["callbacks_pending"][0]["result"] == "sms_event"
+    assert runtime["callbacks_pending"][0]["data"]["status"] == "response"
+    assert runtime["callbacks_pending"][0]["data"]["correlation_key"].startswith(
+        "cdv2:sms:"
+    )
     assert runtime["workflow_v2"]["wait_for_event_activation_override"][
         "card_cursor"
     ] == NEXT_REF_ID
@@ -362,10 +366,8 @@ async def test_sms_mo_after_send_card_is_forwarded_without_reopening_card(
 
     assert decision.changed is True
     assert decision.terminal is False
-    assert runtime["callbacks_pending"][0]["result"] == "response"
-    assert mark.await_args.kwargs["discard_reason"] == (
-        "channel_supplier_v2_sms_response_forwarded"
-    )
+    assert runtime["callbacks_pending"][0]["result"] == "sms_event"
+    assert "discard_reason" not in mark.await_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -385,6 +387,16 @@ async def test_sms_status_resumes_card_and_preserves_raced_mo_for_following_wait
         },
         "variables": {"payload": {}, "customs": {}},
     }
+    runtime["variables"]["customs"]["sms_dispatch"] = {
+        "correlation_key": workflow.build_channel_dispatch_correlation_key(
+            session_uuid=SESSION_UUID,
+            flow_uuid=FLOW_UUID,
+            flow_revision_id=REVISION_UUID,
+            component_ref_id=COMPONENT_REF_ID,
+            channel="sms",
+            dispatch_sequence=1,
+        )
+    }
     definition = {
         "components": [
             {
@@ -397,7 +409,8 @@ async def test_sms_status_resumes_card_and_preserves_raced_mo_for_following_wait
                 "component_id": "wait_for_event",
                 "parameters": {
                     "event_source": "callback",
-                    "event_result": "response",
+                    "event_result": "sms_event",
+                    "correlation_key": "{{customs.sms_dispatch.correlation_key}}",
                     "timeout_seconds": 300,
                     "output_var": "sms_reply",
                 },
@@ -429,6 +442,7 @@ async def test_sms_status_resumes_card_and_preserves_raced_mo_for_following_wait
         events=[
             _event(event_type="response", channel="sms", row_id=1),
             _event(event_type="sent", channel="sms", row_id=2),
+            None,
         ],
     )
 
@@ -444,7 +458,8 @@ async def test_sms_status_resumes_card_and_preserves_raced_mo_for_following_wait
     assert runtime["variables"]["customs"]["sms_reply"]["data"][
         "channel"
     ] == "sms"
-    assert runtime["callbacks_pending"] == []
+    assert len(runtime["callbacks_pending"]) == 1
+    assert runtime["callbacks_pending"][0]["data"]["status"] == "sent"
     assert "blocking_stop_reason" not in runtime["workflow_v2"]
     assert mark.await_count == 2
     assert clear_frozen.await_count == 2

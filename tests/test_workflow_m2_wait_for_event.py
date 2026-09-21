@@ -164,6 +164,7 @@ def test_wait_for_event_accepts_serialized_catalog_parameters() -> None:
         "approved",
         60,
         "approval_event",
+        None,
     )
 
 
@@ -174,6 +175,7 @@ def test_wait_for_event_accepts_serialized_catalog_parameters() -> None:
         ({"event_result": "{{dynamic}}"}, "wait_for_event_invalid_event_result"),
         ({"timeout_seconds": 0}, "wait_for_event_invalid_timeout_seconds"),
         ({"output_var": "wait-event"}, "wait_for_event_invalid_output_var"),
+        ({"correlation_key": "bad\x00key"}, "wait_for_event_invalid_correlation_key"),
     ],
 )
 def test_wait_for_event_rejects_invalid_runtime_configuration(parameters: dict, error_code: str) -> None:
@@ -183,6 +185,93 @@ def test_wait_for_event_rejects_invalid_runtime_configuration(parameters: dict, 
         workflow._wait_for_event_config(component)
 
     assert exc_info.value.code == error_code
+
+
+def test_wait_for_event_consumes_only_exact_correlated_sms_dispatch() -> None:
+    now = datetime.now(timezone.utc)
+    runtime = _runtime()
+    runtime["variables"]["customs"]["sms_dispatch"] = {
+        "correlation_key": "cdv2:sms:expected"
+    }
+    unrelated = {
+        "event_name": "callback",
+        "result": "sms_event",
+        "received_at": now.isoformat(),
+        "data": {
+            "status": "delivered",
+            "correlation_key": "cdv2:sms:other",
+        },
+    }
+    matching = {
+        "event_name": "callback",
+        "result": "sms_event",
+        "received_at": now.isoformat(),
+        "data": {
+            "status": "sent",
+            "correlation_key": "cdv2:sms:expected",
+        },
+    }
+    runtime["callbacks_pending"] = [unrelated, matching]
+
+    result = workflow._run_wait_for_event(
+        component=_component(
+            event_result="sms_event",
+            correlation_key="{{customs.sms_dispatch.correlation_key}}",
+            timeout_seconds=60,
+        ),
+        current_card_uuid=WAIT_REF,
+        runtime_variables=runtime,
+        now=now,
+    )
+
+    assert result.branch_label == "received"
+    assert runtime["callbacks_pending"] == [unrelated]
+    assert runtime["variables"]["customs"]["wait_event"]["data"]["status"] == "sent"
+    assert runtime["variables"]["customs"]["wait_event"]["correlation_key"] == (
+        "cdv2:sms:expected"
+    )
+
+
+def test_correlated_wait_reuses_absolute_deadline_when_condition_loops_back() -> None:
+    started_at = datetime.now(timezone.utc)
+    runtime = _runtime()
+    runtime["variables"]["customs"]["sms_dispatch"] = {
+        "correlation_key": "cdv2:sms:expected"
+    }
+    runtime["callbacks_pending"] = [
+        {
+            "event_name": "callback",
+            "result": "sms_event",
+            "received_at": started_at.isoformat(),
+            "data": {
+                "status": "sent",
+                "correlation_key": "cdv2:sms:expected",
+            },
+        }
+    ]
+    component = _component(
+        event_result="sms_event",
+        correlation_key="{{customs.sms_dispatch.correlation_key}}",
+        timeout_seconds=60,
+    )
+
+    first = workflow._run_wait_for_event(
+        component=component,
+        current_card_uuid=WAIT_REF,
+        runtime_variables=runtime,
+        now=started_at,
+    )
+    second = workflow._run_wait_for_event(
+        component=component,
+        current_card_uuid=WAIT_REF,
+        runtime_variables=runtime,
+        now=started_at + timedelta(seconds=10),
+    )
+
+    assert first.branch_label == "received"
+    assert second.branch_label is None
+    assert second.timeout_at == first.timeout_at
+    assert second.timeout_at == started_at + timedelta(seconds=60)
 
 
 def test_wait_for_event_consumes_callback_that_raced_after_new_dialer_started() -> None:

@@ -123,6 +123,8 @@ def test_channel_dispatch_intent_is_encrypted_and_reentry_is_stable() -> None:
     assert intent["idempotency_key"] == (
         f"orch:v2:channel-dispatch:{idempotency_fingerprint}"
     )
+    assert intent["correlation_key"].startswith("cdv2:sms:")
+    assert len(intent["correlation_key"]) == len("cdv2:sms:") + 64
 
     replay = build_channel_dispatch_intent(
         session_uuid=SESSION_UUID,
@@ -140,6 +142,7 @@ def test_channel_dispatch_intent_is_encrypted_and_reentry_is_stable() -> None:
     )
     assert replay["envelope_ciphertext"] == intent["envelope_ciphertext"]
     assert replay["idempotency_key"] == intent["idempotency_key"]
+    assert replay["correlation_key"] == intent["correlation_key"]
 
 
 def test_channel_dispatch_gate_requires_both_allowlists() -> None:
