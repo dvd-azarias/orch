@@ -42,6 +42,44 @@ _INTENT_FIELDS = (
 )
 
 
+def build_channel_dispatch_correlation_key(
+    *,
+    session_uuid: str,
+    flow_uuid: str,
+    flow_revision_id: str,
+    component_ref_id: str,
+    channel: str,
+    dispatch_sequence: int,
+) -> str:
+    identity = {
+        "session_uuid": _required_uuid(session_uuid, "session_uuid"),
+        "flow_uuid": _required_uuid(flow_uuid, "flow_uuid"),
+        "flow_revision_id": _required_uuid(flow_revision_id, "flow_revision_id"),
+        "component_ref_id": str(component_ref_id or "").strip(),
+        "channel": str(channel or "").strip().lower(),
+        "dispatch_sequence": int(dispatch_sequence),
+    }
+    if (
+        not identity["component_ref_id"]
+        or identity["channel"] not in {"sms", "rcs"}
+        or identity["dispatch_sequence"] <= 0
+    ):
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_identity_invalid",
+            "A identidade do channel dispatch é inválida.",
+            retryable=False,
+        )
+    digest = hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"cdv2:{identity['channel']}:{digest}"
+
+
 class ChannelSupplierV2RegistrationError(RuntimeError):
     def __init__(
         self,
@@ -456,6 +494,14 @@ def build_channel_dispatch_intent(
     now = datetime.now(timezone.utc).isoformat()
     return {
         **identity,
+        "correlation_key": build_channel_dispatch_correlation_key(
+            session_uuid=identity["session_uuid"],
+            flow_uuid=identity["flow_uuid"],
+            flow_revision_id=identity["flow_revision_id"],
+            component_ref_id=identity["component_ref_id"],
+            channel=identity["channel"],
+            dispatch_sequence=identity["dispatch_sequence"],
+        ),
         "destination_fingerprint": destination_fingerprint,
         "envelope_ciphertext": ciphertext,
         "envelope_checksum": ciphertext_checksum,
@@ -512,6 +558,14 @@ def parse_channel_dispatch_intent(value: Any) -> dict[str, Any]:
             "channel": channel,
             "contact_list_member_id": member_id,
             "dispatch_sequence": sequence,
+            "correlation_key": build_channel_dispatch_correlation_key(
+                session_uuid=parsed["session_uuid"],
+                flow_uuid=parsed["flow_uuid"],
+                flow_revision_id=parsed["flow_revision_id"],
+                component_ref_id=component,
+                channel=channel,
+                dispatch_sequence=sequence,
+            ),
         }
     )
     return parsed
@@ -637,6 +691,7 @@ __all__ = [
     "ChannelDispatchRegistrationResult",
     "ChannelSupplierV2RegistrationError",
     "build_channel_dispatch_intent",
+    "build_channel_dispatch_correlation_key",
     "build_channel_callback_token",
     "build_channel_callback_urls",
     "channel_supplier_v2_callbacks_enabled_for_context",

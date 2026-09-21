@@ -87,6 +87,7 @@ from app.services.dialer_release_mapper import resolve_dialer_status_from_releas
 from app.services.channel_supplier_v2_service import (
     ChannelSupplierV2RegistrationError,
     build_channel_callback_urls,
+    build_channel_dispatch_correlation_key,
     build_channel_dispatch_intent,
     channel_supplier_v2_callbacks_enabled_for_context,
     channel_supplier_v2_enabled_for_context,
@@ -161,6 +162,7 @@ WAIT_FOR_EVENT_BLOCKING_STOP_REASON = "blocked_wait_for_event"
 WAIT_FOR_EVENT_RESULT_RE = re.compile(r"[A-Za-z0-9._:-]+$")
 WAIT_FOR_EVENT_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 WAIT_FOR_EVENT_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
+WAIT_FOR_EVENT_MAX_CORRELATION_KEY_LENGTH = 512
 SPLIT_RANDOM_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
 SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email", "rcs"}
@@ -2894,6 +2896,21 @@ async def _prepare_send_with_sms_contact_member(
                 "O membro telefônico em foco possui uma referência de pessoa inválida.",
             ) from exc
 
+    settings = get_settings()
+    if channel_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+    ) and not channel_supplier_v2_callbacks_enabled_for_context(
+        settings=settings,
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+    ):
+        raise WorkflowExecutionError(
+            "channel_supplier_v2_sms_callbacks_disabled",
+            "O SMS V2 exige callbacks internos habilitados para o fluxo.",
+        )
+
     assignment = await assign_sms_routing_for_session(
         db_session,
         flow_uuid=flow_uuid,
@@ -3075,12 +3092,18 @@ def _materialize_channel_dispatch_v2_intent(
                 or [0]
             )
 
-        callback_urls: dict[str, str] | None = None
-        if channel_supplier_v2_callbacks_enabled_for_context(
+        callbacks_enabled = channel_supplier_v2_callbacks_enabled_for_context(
             settings=settings,
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
-        ):
+        )
+        if channel == "sms" and not callbacks_enabled:
+            raise WorkflowExecutionError(
+                "channel_supplier_v2_sms_callbacks_disabled",
+                "O SMS V2 exige callbacks internos habilitados para o fluxo.",
+            )
+        callback_urls: dict[str, str] | None = None
+        if callbacks_enabled:
             callback_urls = build_channel_callback_urls(
                 workspace_uuid=workspace_uuid,
                 session_uuid=session_uuid,
@@ -3205,6 +3228,36 @@ def _materialize_channel_dispatch_v2_intent(
             workflow_meta["channel_dispatch_v2_history"] = history
         history.append(existing)
     workflow_meta["channel_dispatch_v2"] = intent
+    if channel == "sms":
+        output_var = str(
+            _catalog_parameter_scalar(params.get("output_var")) or "sms_dispatch"
+        ).strip()
+        if (
+            not output_var
+            or len(output_var) > 128
+            or WAIT_FOR_EVENT_OUTPUT_VAR_RE.fullmatch(output_var) is None
+        ):
+            raise WorkflowExecutionError(
+                "channel_supplier_v2_sms_output_var_invalid",
+                "A variável de saída do SMS é inválida.",
+            )
+        customs = variables.get("customs")
+        if not isinstance(customs, dict):
+            customs = {}
+            variables["customs"] = customs
+        dispatch_output = {
+            "channel": "sms",
+            "correlation_key": intent["correlation_key"],
+            "component_ref_id": component_ref_id,
+            "dispatch_sequence": sequence,
+            "requested_at": intent["requested_at"],
+            "status": "prepared",
+        }
+        customs[output_var] = copy.deepcopy(dispatch_output)
+        runtime_variables["send_with_sms_last_dispatch"] = {
+            "output_var": output_var,
+            **copy.deepcopy(dispatch_output),
+        }
     if channel == "rcs" and callback_urls is not None:
         completion_event = str(
             _catalog_parameter_scalar(params.get("completion_event")) or ""
@@ -3534,17 +3587,32 @@ def _channel_supplier_v2_event_received_at(event: dict[str, Any]) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _preserve_sms_response_callback(
+def _preserve_sms_lifecycle_callback(
     runtime_variables: dict[str, Any],
     *,
     event: dict[str, Any],
-) -> None:
+) -> str | None:
     payload = event.get("payload")
+    identity = payload.get("dispatch_identity") if isinstance(payload, dict) else None
+    if not isinstance(identity, dict):
+        return None
+    try:
+        correlation_key = build_channel_dispatch_correlation_key(
+            session_uuid=str(identity.get("session_uuid") or ""),
+            flow_uuid=str(identity.get("flow_uuid") or ""),
+            flow_revision_id=str(identity.get("flow_revision_id") or ""),
+            component_ref_id=str(identity.get("component_ref_id") or ""),
+            channel=str(identity.get("channel") or ""),
+            dispatch_sequence=int(identity.get("dispatch_sequence") or 0),
+        )
+    except (ChannelSupplierV2RegistrationError, TypeError, ValueError):
+        return None
     provider_payload = (
         payload.get("provider_payload")
         if isinstance(payload, dict) and isinstance(payload.get("provider_payload"), dict)
         else {}
     )
+    event_type = str(event.get("event_type") or "").strip().lower()
     callbacks_pending = runtime_variables.get("callbacks_pending")
     if not isinstance(callbacks_pending, list):
         callbacks_pending = []
@@ -3552,15 +3620,24 @@ def _preserve_sms_response_callback(
     callbacks_pending.append(
         {
             "event_name": "callback",
-            "result": "response",
+            "result": "sms_event",
             "received_at": _channel_supplier_v2_event_received_at(event),
             "data": {
                 "channel": "sms",
+                "status": event_type,
+                "correlation_key": correlation_key,
+                "component_ref_id": identity.get("component_ref_id"),
+                "dispatch_sequence": identity.get("dispatch_sequence"),
                 "message_id": str(event.get("event_id") or ""),
-                "provider_payload": copy.deepcopy(provider_payload),
+                "provider_payload": (
+                    copy.deepcopy(provider_payload)
+                    if event_type == "response"
+                    else {}
+                ),
             },
         }
     )
+    return correlation_key
 
 
 def _channel_supplier_v2_rcs_wait_state(
@@ -3601,6 +3678,7 @@ async def _consume_channel_supplier_v2_events(
         "blocked_send_with_sms" if channel == "sms" else "blocked_send_with_rcs"
     )
     changed = False
+    sms_should_resume = False
 
     for _ in range(100):
         event = await fetch_next_pending_channel_event(
@@ -3612,12 +3690,21 @@ async def _consume_channel_supplier_v2_events(
             break
         event_row_id = int(event["id"])
         if not _channel_supplier_v2_event_matches_intent(event, intent):
+            preserved_correlation = (
+                _preserve_sms_lifecycle_callback(runtime_variables, event=event)
+                if channel == "sms"
+                else None
+            )
             await mark_channel_event_processed(
                 db_session,
                 event_row_id=event_row_id,
                 session_id=session_id,
                 channel=channel,
-                discard_reason="channel_supplier_v2_intent_mismatch",
+                discard_reason=(
+                    "channel_supplier_v2_sms_history_forwarded"
+                    if preserved_correlation is not None
+                    else "channel_supplier_v2_intent_mismatch"
+                ),
             )
             changed = True
             continue
@@ -3631,63 +3718,54 @@ async def _consume_channel_supplier_v2_events(
             "event_at": _channel_supplier_v2_event_received_at(event),
         }
 
-        if blocking_stop_reason != expected_block:
-            if channel == "sms" and event_type == "response":
-                _preserve_sms_response_callback(runtime_variables, event=event)
-                runtime_variables["send_with_sms_last_response"] = event_summary
-                discard_reason = "channel_supplier_v2_sms_response_forwarded"
-            else:
-                discard_reason = "channel_supplier_v2_callback_after_card"
-            await mark_channel_event_processed(
-                db_session,
-                event_row_id=event_row_id,
-                session_id=session_id,
-                channel=channel,
-                discard_reason=discard_reason,
-            )
-            changed = True
-            continue
-
         if channel == "sms":
-            if event_type == "response":
-                _preserve_sms_response_callback(runtime_variables, event=event)
-                runtime_variables["send_with_sms_last_response"] = event_summary
+            correlation_key = _preserve_sms_lifecycle_callback(
+                runtime_variables,
+                event=event,
+            )
+            if correlation_key is None:
                 await mark_channel_event_processed(
                     db_session,
                     event_row_id=event_row_id,
                     session_id=session_id,
                     channel=channel,
+                    discard_reason="channel_supplier_v2_sms_identity_invalid",
                 )
                 changed = True
                 continue
-            if event_type in {"sent", "delivered", "failed"}:
+            if event_type == "response":
+                runtime_variables["send_with_sms_last_response"] = event_summary
+            else:
                 runtime_variables["send_with_sms_last_result"] = event_summary
-                workflow_meta = _ensure_workflow_meta(runtime_variables)
-                next_cursor = _read_next_cursor(runtime_variables)
-                requested_at = _parse_iso_datetime(intent.get("requested_at"))
-                if next_cursor and requested_at is not None:
-                    workflow_meta["wait_for_event_activation_override"] = {
-                        "card_cursor": next_cursor,
-                        "not_before": requested_at.isoformat(),
-                        "source_component_ref_id": intent.get("component_ref_id"),
-                    }
-                await mark_channel_event_processed(
-                    db_session,
-                    event_row_id=event_row_id,
-                    session_id=session_id,
-                    channel=channel,
-                )
-                return _ChannelSupplierV2ResumeDecision(
-                    True,
-                    True,
-                    channel,
-                )
             await mark_channel_event_processed(
                 db_session,
                 event_row_id=event_row_id,
                 session_id=session_id,
                 channel=channel,
-                discard_reason="channel_supplier_v2_sms_telemetry",
+            )
+            changed = True
+            if blocking_stop_reason != expected_block:
+                continue
+            workflow_meta = _ensure_workflow_meta(runtime_variables)
+            next_cursor = _read_next_cursor(runtime_variables)
+            requested_at = _parse_iso_datetime(intent.get("requested_at"))
+            if next_cursor and requested_at is not None:
+                workflow_meta["wait_for_event_activation_override"] = {
+                    "card_cursor": next_cursor,
+                    "not_before": requested_at.isoformat(),
+                    "correlation_key": correlation_key,
+                    "source_component_ref_id": intent.get("component_ref_id"),
+                }
+            sms_should_resume = True
+            continue
+
+        if blocking_stop_reason != expected_block:
+            await mark_channel_event_processed(
+                db_session,
+                event_row_id=event_row_id,
+                session_id=session_id,
+                channel=channel,
+                discard_reason="channel_supplier_v2_callback_after_card",
             )
             changed = True
             continue
@@ -3727,6 +3805,14 @@ async def _consume_channel_supplier_v2_events(
                 channel,
                 branch_label=terminal_branch,
             )
+
+    if sms_should_resume:
+        return _ChannelSupplierV2ResumeDecision(
+            True,
+            True,
+            channel,
+            branch_label="next",
+        )
 
     if channel == "rcs" and blocking_stop_reason == expected_block:
         wait_state = _channel_supplier_v2_rcs_wait_state(
@@ -6044,7 +6130,9 @@ def _wait_for_event_parameters(component: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _wait_for_event_config(component: dict[str, Any]) -> tuple[str, str, int, str]:
+def _wait_for_event_config(
+    component: dict[str, Any],
+) -> tuple[str, str, int, str, str | None]:
     params = _wait_for_event_parameters(component)
 
     event_source = str(_catalog_parameter_scalar(params.get("event_source")) or "").strip().lower()
@@ -6089,12 +6177,92 @@ def _wait_for_event_config(component: dict[str, Any]) -> tuple[str, str, int, st
             "O campo output_var deve conter um nome de variável válido.",
         )
 
-    return event_source, event_result, timeout_seconds, output_var
+    raw_correlation_key = _catalog_parameter_scalar(params.get("correlation_key"))
+    correlation_key_template = (
+        str(raw_correlation_key).strip()
+        if raw_correlation_key not in (None, "")
+        else None
+    )
+    if correlation_key_template is not None and (
+        len(correlation_key_template) > WAIT_FOR_EVENT_MAX_CORRELATION_KEY_LENGTH
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in correlation_key_template
+        )
+    ):
+        raise WorkflowExecutionError(
+            "wait_for_event_invalid_correlation_key",
+            "O campo correlation_key deve conter uma chave literal ou template válida.",
+        )
+
+    return (
+        event_source,
+        event_result,
+        timeout_seconds,
+        output_var,
+        correlation_key_template,
+    )
 
 
 def _clear_wait_for_event_state(runtime_variables: dict[str, Any]) -> None:
     workflow_meta = _ensure_workflow_meta(runtime_variables)
     workflow_meta.pop("wait_for_event", None)
+
+
+def _wait_for_event_deadline_key(*, card_cursor: str, correlation_key: str) -> str:
+    return hashlib.sha256(
+        f"{card_cursor}\x00{correlation_key}".encode("utf-8")
+    ).hexdigest()
+
+
+def _wait_for_event_correlated_timeout_at(
+    *,
+    workflow_meta: dict[str, Any],
+    card_cursor: str,
+    correlation_key: str,
+    current_time: datetime,
+    timeout_seconds: int,
+) -> datetime:
+    deadlines = workflow_meta.get("wait_for_event_deadlines")
+    if not isinstance(deadlines, dict):
+        deadlines = {}
+        workflow_meta["wait_for_event_deadlines"] = deadlines
+    for key, raw_value in list(deadlines.items()):
+        parsed = _parse_iso_datetime(raw_value)
+        if parsed is None or len(deadlines) > 100:
+            deadlines.pop(key, None)
+    deadline_key = _wait_for_event_deadline_key(
+        card_cursor=card_cursor,
+        correlation_key=correlation_key,
+    )
+    existing = _parse_iso_datetime(deadlines.get(deadline_key))
+    if existing is not None:
+        return existing if existing.tzinfo is not None else existing.replace(tzinfo=timezone.utc)
+    timeout_at = current_time + timedelta(seconds=timeout_seconds)
+    deadlines[deadline_key] = timeout_at.isoformat()
+    return timeout_at
+
+
+def _clear_wait_for_event_correlated_deadline(
+    *,
+    workflow_meta: dict[str, Any],
+    card_cursor: str,
+    correlation_key: str | None,
+) -> None:
+    if not correlation_key:
+        return
+    deadlines = workflow_meta.get("wait_for_event_deadlines")
+    if not isinstance(deadlines, dict):
+        return
+    deadlines.pop(
+        _wait_for_event_deadline_key(
+            card_cursor=card_cursor,
+            correlation_key=correlation_key,
+        ),
+        None,
+    )
+    if not deadlines:
+        workflow_meta.pop("wait_for_event_deadlines", None)
 
 
 def _wait_for_event_matching_callback_index(
@@ -6117,6 +6285,7 @@ def _wait_for_event_matching_callback_index(
     timeout_at_utc = timeout_at if timeout_at.tzinfo is not None else timeout_at.replace(tzinfo=timezone.utc)
     expected_source = str(state.get("event_source") or "").strip().lower()
     expected_result = str(state.get("event_result") or "").strip().lower()
+    expected_correlation_key = str(state.get("correlation_key") or "").strip()
     not_before = _parse_iso_datetime(state.get("not_before"))
     not_before_utc = (
         not_before
@@ -6131,6 +6300,12 @@ def _wait_for_event_matching_callback_index(
             continue
         if str(callback.get("result") or "").strip().lower() != expected_result:
             continue
+        if expected_correlation_key:
+            callback_data = callback.get("data")
+            if not isinstance(callback_data, dict) or str(
+                callback_data.get("correlation_key") or ""
+            ).strip() != expected_correlation_key:
+                continue
         received_at = _parse_iso_datetime(callback.get("received_at"))
         if received_at is None:
             continue
@@ -6191,15 +6366,49 @@ def _run_wait_for_event(
     runtime_variables: dict[str, Any],
     now: datetime | None = None,
 ) -> _WaitForEventExecution:
-    event_source, event_result, timeout_seconds, output_var = _wait_for_event_config(component)
+    (
+        event_source,
+        event_result,
+        timeout_seconds,
+        output_var,
+        correlation_key_template,
+    ) = _wait_for_event_config(component)
     current_time = now or datetime.now(timezone.utc)
     current_time_utc = current_time if current_time.tzinfo is not None else current_time.replace(tzinfo=timezone.utc)
     workflow_meta = _ensure_workflow_meta(runtime_variables)
+    correlation_key: str | None = None
+    if correlation_key_template is not None:
+        variables = _ensure_variables(runtime_variables)
+        resolution_scope = _build_runtime_resolution_scope(
+            runtime_variables=runtime_variables,
+            variables=variables,
+        )
+        rendered_correlation_key = _render_value(
+            correlation_key_template,
+            resolution_scope,
+        )
+        correlation_key = str(rendered_correlation_key or "").strip()
+        if (
+            not correlation_key
+            or len(correlation_key) > WAIT_FOR_EVENT_MAX_CORRELATION_KEY_LENGTH
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in correlation_key
+            )
+        ):
+            raise WorkflowExecutionError(
+                "wait_for_event_invalid_correlation_key",
+                "A chave de correlação não foi resolvida para um valor válido.",
+            )
     raw_state = workflow_meta.get("wait_for_event")
 
     if raw_state is None:
         callbacks_pending = runtime_variables.get("callbacks_pending")
-        pending_start_index = len(callbacks_pending) if isinstance(callbacks_pending, list) else 0
+        pending_start_index = (
+            0
+            if correlation_key is not None
+            else len(callbacks_pending) if isinstance(callbacks_pending, list) else 0
+        )
         activation_override = workflow_meta.pop(
             "wait_for_event_activation_override",
             None,
@@ -6208,6 +6417,11 @@ def _run_wait_for_event(
         if (
             isinstance(activation_override, dict)
             and str(activation_override.get("card_cursor") or "") == current_card_uuid
+            and (
+                correlation_key is None
+                or not activation_override.get("correlation_key")
+                or str(activation_override.get("correlation_key")) == correlation_key
+            )
         ):
             override_not_before = _parse_iso_datetime(
                 activation_override.get("not_before")
@@ -6215,7 +6429,17 @@ def _run_wait_for_event(
             if override_not_before is not None:
                 pending_start_index = 0
                 not_before = override_not_before.isoformat()
-        timeout_at = current_time_utc + timedelta(seconds=timeout_seconds)
+        timeout_at = (
+            _wait_for_event_correlated_timeout_at(
+                workflow_meta=workflow_meta,
+                card_cursor=current_card_uuid,
+                correlation_key=correlation_key,
+                current_time=current_time_utc,
+                timeout_seconds=timeout_seconds,
+            )
+            if correlation_key is not None
+            else current_time_utc + timedelta(seconds=timeout_seconds)
+        )
         raw_state = {
             "component_ref_id": component.get("ref_id"),
             "card_cursor": current_card_uuid,
@@ -6223,6 +6447,7 @@ def _run_wait_for_event(
             "event_result": event_result,
             "timeout_seconds": timeout_seconds,
             "output_var": output_var,
+            "correlation_key": correlation_key,
             "pending_start_index": pending_start_index,
             "not_before": not_before,
             "blocked_at": current_time_utc.isoformat(),
@@ -6244,6 +6469,7 @@ def _run_wait_for_event(
         "event_result": event_result,
         "timeout_seconds": timeout_seconds,
         "output_var": output_var,
+        "correlation_key": correlation_key,
     }
     if any(raw_state.get(key) != value for key, value in expected_state.items()):
         raise WorkflowExecutionError(
@@ -6272,6 +6498,8 @@ def _run_wait_for_event(
                 "received_at": callback.get("received_at"),
                 "data": copy.deepcopy(callback.get("data")) if isinstance(callback.get("data"), dict) else {},
             }
+            if correlation_key is not None:
+                output["correlation_key"] = correlation_key
             _store_wait_for_event_output(
                 runtime_variables=runtime_variables,
                 output_var=output_var,
@@ -6290,6 +6518,8 @@ def _run_wait_for_event(
             "event_result": event_result,
             "timeout_at": timeout_at_utc.isoformat(),
         }
+        if correlation_key is not None:
+            output["correlation_key"] = correlation_key
         _store_wait_for_event_output(
             runtime_variables=runtime_variables,
             output_var=output_var,
@@ -6298,6 +6528,11 @@ def _run_wait_for_event(
             updated_at=current_time_utc,
         )
         _clear_wait_for_event_state(runtime_variables)
+        _clear_wait_for_event_correlated_deadline(
+            workflow_meta=workflow_meta,
+            card_cursor=current_card_uuid,
+            correlation_key=correlation_key,
+        )
         runtime_variables.pop("wait_for_event_last_error", None)
         return _WaitForEventExecution(branch_label="timeout", timeout_at=timeout_at_utc)
 

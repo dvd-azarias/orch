@@ -108,15 +108,20 @@ recente" é proibida.
 
 ### Semântica SMS
 
-- `MT-STATUS` válido/enviado e DLR entregue confirmam que o card de envio pode
-  avançar linearmente;
-- DLR não entregue/falha também libera o card linear, mas preserva o resultado
-  normalizado em runtime para diagnóstico e para decisão posterior do grafo;
-- MO é preservado como evento de resposta e pode satisfazer o card de espera
-  seguinte mesmo quando chegar antes de ele ser armado;
+- o card expõe somente a saída `next`/`Próximo`; DLR, MO e status nunca são
+  configurados no canvas, pois o ORCH gera as três URLs por dispatch;
+- o primeiro callback válido libera o card e todo callback normalizado é
+  preservado no inbox como `callback/sms_event`;
+- a condição posterior decide sobre `data.status`, que pode ser `sent`,
+  `delivered`, `not_delivered`, `response`, `failed`, `status` ou `dlr`;
+- a saída do SMS fornece uma chave opaca ligada a sessão, revisão, card,
+  canal e sequência. `wait_for_event.correlation_key` impede que outro
+  disparo da mesma sessão satisfaça a espera;
+- callback que chega antes do wait permanece elegível; ao retornar da condição
+  para o mesmo wait, o timeout conserva o prazo absoluto original;
 - mensagens usadas nos canários são explicitamente textos de teste;
-- callbacks estáticos configurados no catálogo deixam de ser fonte de
-  autoridade quando o Gate 2 está ativo.
+- callbacks estáticos deixam de existir no catálogo. O SMS V2 falha fechado se
+  o Gate de callbacks internos não estiver habilitado para o contexto.
 
 ### Semântica RCS
 

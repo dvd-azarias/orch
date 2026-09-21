@@ -1,5 +1,32 @@
 # Maintenance Log
 
+## 2026-09-21 — SMS V2 composto com Aguardar Evento
+
+### REQUEST / CLASSIFICATION
+
+Simplificar `send_with_sms` para uma única saída `Próximo` e mover a decisão
+de ciclo de vida para `Aguardar Evento -> Condição`, sem expor URLs de callback
+no canvas. `ALPHA_FIX_OPTIONAL`, restrito ao caminho opt-in Supplier V2; RCS,
+Supplier V1 e o fallback marker-only permanecem inalterados.
+
+### CHANGE / SAFETY
+
+- o ORCH continua gerando e assinando DLR/MO/status por dispatch;
+- a intenção fornece correlação opaca sem telefone, mensagem ou credencial;
+- todo callback SMS vira `callback/sms_event` com status normalizado e identidade
+  exata; replay continua deduplicado pelo ledger;
+- `wait_for_event.correlation_key` filtra o dispatch e conserva o mesmo prazo
+  absoluto nos loops da condição;
+- SMS V2 falha fechado quando callbacks internos não estão habilitados.
+
+### VALIDATION / ROLLBACK
+
+- `72 passed` na regressão focada final de envelope, callbacks, tasks, SMS e
+  espera; rodada ampliada anterior: `92 passed`;
+- rollback: reverter este contrato coordenadamente no ORCH e Target Core. Não
+  há migration; desligar as allowlists V2 preserva o comportamento marker-only.
+- deploy e canário real permanecem pendentes.
+
 ## 2026-09-21 — Gate 8 Velox: handoff e retomada `person/unbound`
 
 ### REQUEST / CLASSIFICATION

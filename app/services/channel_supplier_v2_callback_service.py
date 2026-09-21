@@ -157,7 +157,7 @@ def _normalize_sms_event(
             marker in combined
             for marker in ("nao_entregue", "falha", "failed", "rejeitad")
         ):
-            return "failed"
+            return "not_delivered"
         return "dlr"
 
     if code in _SMS_SENT_STATUS_CODES or any(

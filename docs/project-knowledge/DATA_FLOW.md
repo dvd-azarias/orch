@@ -328,12 +328,14 @@ publica a retomada. Identificador do provedor, sessão, canal e tipo normalizado
 formam a deduplicação; callback histórico fica auditado como tardio e nunca
 reabre card ou sessão.
 
-Status/DLR `sent|delivered|failed` conclui o card SMS pela sequência linear do
-canvas. MO vira `result=response` no inbox genérico da sessão. Se a resposta
-chegar antes do status que libera o card, o runtime a preserva e arma um
-`wait_for_event(callback/response)` subsequente com `not_before` igual ao
-instante do dispatch; assim a corrida não perde a resposta e não consome evento
-anterior da sessão.
+O card SMS expõe somente `next`/`Próximo`. O primeiro callback válido libera
+essa transição; DLR, MO e status viram eventos `callback/sms_event` no inbox da
+sessão. `data.status` distingue `sent`, `delivered`, `not_delivered`,
+`response`, `failed` e telemetria ainda desconhecida. O card grava uma chave
+opaca em `customs.<output_var>.correlation_key`; um `wait_for_event` seguinte
+usa essa chave para consumir somente eventos do dispatch exato, inclusive os
+que chegaram antes de o wait ser armado. Se uma condição devolver a execução
+ao mesmo wait, seu timeout absoluto não é renovado.
 
 ## Handoff RCS e dispatch opt-in pela Supplier V2
 
