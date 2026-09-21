@@ -2556,9 +2556,17 @@ async def assign_dialer_handoff_routing_for_session(
         "list_validity_days": list_validity_days,
     }
     member_filter = ""
+    # Legacy/channel routing remains bound to the session entity. Person flows
+    # may adopt a contact after the session starts, so their explicit member is
+    # instead bound to the channel address selected and persisted by ORCH.
+    session_identity_filter = "\n                  AND os.entity = clm.contact_identifier"
     if contact_list_member_id is not None:
         member_filter = "\n              AND clm.id = :contact_list_member_id"
         parameters["contact_list_member_id"] = contact_list_member_id
+        session_identity_filter = (
+            "\n                  AND BTRIM(os.entity_address) = "
+            "BTRIM(clm.contact_channel_address)"
+        )
 
     result = await db_session.execute(
         text(
@@ -2569,16 +2577,15 @@ async def assign_dialer_handoff_routing_for_session(
                     fml.linked_at
                 FROM contact_list_members clm
                 JOIN orch_sessions os
-                  ON os.entity = clm.contact_identifier
+                  ON os.id = :session_id
+                 AND os.flow_uuid = CAST(:flow_uuid AS uuid)
+                 AND os.unassigned_at IS NULL
                 LEFT JOIN flow_mailing_links fml
                   ON fml.flow_id = os.flow_uuid
                  AND fml.mailing_id = clm.mailing_id
                  AND fml.contact_list_id = clm.contact_list_id
                  AND fml.unlinked_at IS NULL
-                WHERE os.id = :session_id
-                  AND os.flow_uuid = CAST(:flow_uuid AS uuid)
-                  AND os.unassigned_at IS NULL
-                  AND clm.unassigned_at IS NULL{member_filter}
+                WHERE clm.unassigned_at IS NULL{member_filter}{session_identity_filter}
                   AND (
                         :list_validity_mode = 'indefinite'
                         OR fml.linked_at IS NOT NULL
@@ -2605,8 +2612,7 @@ async def assign_dialer_handoff_routing_for_session(
                   FROM orch_sessions os
                   WHERE os.id = :session_id
                     AND os.flow_uuid = CAST(:flow_uuid AS uuid)
-                    AND os.unassigned_at IS NULL
-                    AND os.entity = clm.contact_identifier
+                    AND os.unassigned_at IS NULL{session_identity_filter}
               )
             RETURNING
                 clm.id,

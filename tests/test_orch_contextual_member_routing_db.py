@@ -273,6 +273,7 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
                     CREATE TEMP TABLE orch_sessions (
                         id BIGINT PRIMARY KEY,
                         entity TEXT NOT NULL,
+                        entity_address TEXT NULL,
                         flow_uuid UUID NOT NULL,
                         unassigned_at TIMESTAMP NULL
                     ) ON COMMIT DROP
@@ -288,6 +289,7 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
                         linked_actuator TEXT NULL,
                         list_validity DATE NULL,
                         contact_identifier TEXT NOT NULL,
+                        contact_channel_address TEXT NULL,
                         contact_list_id UUID NOT NULL,
                         mailing_id BIGINT NOT NULL,
                         unassigned_at TIMESTAMP NULL,
@@ -314,8 +316,13 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
             await db_session.execute(
                 text(
                     """
-                    INSERT INTO orch_sessions (id, entity, flow_uuid)
-                    VALUES (9001, '30392286855', CAST(:flow_uuid AS uuid))
+                    INSERT INTO orch_sessions (id, entity, entity_address, flow_uuid)
+                    VALUES (
+                        9001,
+                        '30392286855',
+                        '5511999999999',
+                        CAST(:flow_uuid AS uuid)
+                    )
                     """
                 ),
                 {"flow_uuid": flow_uuid},
@@ -326,6 +333,7 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
                     INSERT INTO contact_list_members (
                         id,
                         contact_identifier,
+                        contact_channel_address,
                         contact_list_id,
                         mailing_id,
                         created_at
@@ -333,6 +341,7 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
                     VALUES (
                         2001,
                         '30392286855',
+                        '5511999999999',
                         CAST(:contact_list_uuid AS uuid),
                         3001,
                         NOW()
@@ -392,6 +401,101 @@ async def test_dialer_handoff_materializes_list_validity_from_active_link() -> N
             )
             assert indefinite is not None
             assert indefinite["list_validity"] is None
+
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET entity = 'generated-person-unbound-session'
+                     WHERE id = 9001
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE contact_list_members
+                       SET linked_actuator = NULL,
+                           list_validity = NULL
+                     WHERE id = 2001
+                    """
+                )
+            )
+
+            contextual = await assign_dialer_handoff_routing_for_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=9001,
+                contact_list_member_id=2001,
+                list_validity_mode="indefinite",
+                list_validity_days=0,
+            )
+            assert contextual is not None
+            assert contextual["contact_list_member_id"] == 2001
+            assert contextual["linked_actuator"] == "dialer"
+
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET entity_address = '5511888888888'
+                     WHERE id = 9001
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE contact_list_members
+                       SET linked_actuator = NULL,
+                           list_validity = NULL
+                     WHERE id = 2001
+                    """
+                )
+            )
+            address_conflict = await assign_dialer_handoff_routing_for_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=9001,
+                contact_list_member_id=2001,
+                list_validity_mode="indefinite",
+                list_validity_days=0,
+            )
+            assert address_conflict is None
+            address_conflict_row = (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT linked_actuator, list_validity
+                          FROM contact_list_members
+                         WHERE id = 2001
+                        """
+                    )
+                )
+            ).mappings().one()
+            assert dict(address_conflict_row) == {
+                "linked_actuator": None,
+                "list_validity": None,
+            }
+
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET entity_address = '5511999999999'
+                     WHERE id = 9001
+                    """
+                )
+            )
+
+            legacy_without_context = await assign_dialer_handoff_routing_for_session(
+                db_session,
+                flow_uuid=flow_uuid,
+                session_id=9001,
+                list_validity_mode="indefinite",
+                list_validity_days=0,
+            )
+            assert legacy_without_context is None
 
             await db_session.execute(
                 text(
