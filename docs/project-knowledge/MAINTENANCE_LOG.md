@@ -1,5 +1,33 @@
 # Maintenance Log
 
+## 2026-09-21 — Retomada do mesmo telefone após tabulação
+
+### REQUEST / CLASSIFICATION
+
+Fazer o caminho real `answered -> Aguardar Evento -> tabulação -> seletor`
+voltar ao mesmo telefone quando o canvas assim determinar, sem codificar CPC,
+RECADO ou IMPRODUTIVA na engine. `ALPHA_FIX_REQUIRED`, opt-in pela Supplier V2;
+card legado, Supplier V1 e modo `channel` permanecem inalterados.
+
+### CHANGE / SAFETY
+
+- `wait_for_event` preserva no resultado o card Dialer que ativou a espera;
+- `flow_override` isolado não autoriza repetição: terminal `answered`, espera e
+  callback novo precisam estar integralmente correlacionados;
+- o ORCH chama a rota Supplier V2 dedicada e só materializa o mesmo membro que
+  ela autorizou;
+- após sucesso, o terminal antigo vai para histórico e o registro corrente
+  volta a `ready`, impedindo reutilização do branch `answered` anterior;
+- `respect_dial_rule` continua usando a resolução normal do próximo telefone.
+
+### VALIDATION / ROLLBACK
+
+- regressão focada cobre cliente Supplier, espera, seletor, ausência de bypass
+  em `respect_dial_rule`, membro exato e bloqueio do branch antigo;
+- rollback deve ser coordenado com a rota Target Core correspondente. Não há
+  migration nem alteração de dados legados;
+- deploy e canário real permanecem pendentes.
+
 ## 2026-09-21 — SMS V2 composto com Aguardar Evento
 
 ### REQUEST / CLASSIFICATION

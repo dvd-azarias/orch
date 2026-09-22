@@ -108,6 +108,30 @@ class DialerNextChannelResult:
         }
 
 
+@dataclass(frozen=True)
+class DialerPostAnswerRetryResult:
+    decision: str
+    reason: str
+    candidate: dict[str, Any]
+    source: dict[str, Any]
+    selector_component_ref_id: str
+    audit_event_id: str
+    replayed: bool
+    evaluated_at: str
+
+    def runtime_payload(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "reason": self.reason,
+            "candidate": dict(self.candidate),
+            "source": dict(self.source),
+            "selector_component_ref_id": self.selector_component_ref_id,
+            "audit_event_id": self.audit_event_id,
+            "replayed": self.replayed,
+            "evaluated_at": self.evaluated_at,
+        }
+
+
 def dialer_supplier_v2_enabled_for_context(
     *, settings: Settings, workspace_uuid: str, flow_uuid: str
 ) -> bool:
@@ -625,6 +649,189 @@ def _parse_next_channel_response(
     )
 
 
+def retry_dialer_after_answered_tabulation(
+    *,
+    workspace_uuid: str,
+    session_uuid: str,
+    flow_uuid: str,
+    flow_revision_id: str,
+    source_component_ref_id: str,
+    selector_component_ref_id: str,
+    wait_component_ref_id: str,
+    cycle_id: str,
+    event_id: str,
+    current_contact_list_member_id: int,
+    tabulation: str,
+    tabulation_received_at: str,
+    settings: Settings | None = None,
+) -> DialerPostAnswerRetryResult:
+    resolved_settings = settings or get_settings()
+    request_payload = {
+        "session_uuid": _eligibility_uuid(session_uuid, "session_uuid"),
+        "flow_uuid": _eligibility_uuid(flow_uuid, "flow_uuid"),
+        "flow_revision_id": _eligibility_uuid(
+            flow_revision_id, "flow_revision_id"
+        ),
+        "source_component_ref_id": _eligibility_component_ref(
+            source_component_ref_id, "source_component_ref_id"
+        ),
+        "selector_component_ref_id": _eligibility_component_ref(
+            selector_component_ref_id, "selector_component_ref_id"
+        ),
+        "wait_component_ref_id": _eligibility_component_ref(
+            wait_component_ref_id, "wait_component_ref_id"
+        ),
+        "cycle_id": _eligibility_uuid(cycle_id, "cycle_id"),
+        "event_id": _eligibility_uuid(event_id, "event_id"),
+        "current_contact_list_member_id": _eligibility_member_id(
+            current_contact_list_member_id
+        ),
+        "tabulation": str(tabulation or "").strip(),
+        "tabulation_received_at": _required_iso_datetime(
+            tabulation_received_at,
+            "tabulation_received_at",
+        ),
+    }
+    if (
+        not request_payload["tabulation"]
+        or len(str(request_payload["tabulation"])) > 128
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in str(request_payload["tabulation"])
+        )
+    ):
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_post_answer_tabulation_invalid",
+            "A tabulação pós-atendimento é inválida.",
+            retryable=False,
+        )
+
+    base_url = str(
+        resolved_settings.target_core_supplier_api_base_url or ""
+    ).strip().rstrip("/")
+    bearer = str(resolved_settings.target_core_api_bearer_token or "").strip()
+    if not base_url or not bearer:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_post_answer_configuration_missing",
+            "A integração da Supplier V2 não está configurada.",
+            retryable=False,
+        )
+
+    req = request.Request(
+        url=f"{base_url}/v2/contact-supplier/dialer-post-answer/retry",
+        method="POST",
+        data=json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", f"Bearer {bearer}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-WORKSPACE-UUID", workspace_uuid)
+
+    status_code = 599
+    response_body = b""
+    try:
+        with request.urlopen(
+            req,
+            timeout=float(resolved_settings.dialer_supplier_v2_http_timeout_seconds),
+        ) as response:  # noqa: S310
+            status_code = int(response.status)
+            response_body = response.read(_MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        status_code = int(exc.code)
+        response_body = exc.read(_MAX_RESPONSE_BYTES + 1)
+    except (URLError, TimeoutError, OSError) as exc:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_post_answer_unavailable",
+            "A Supplier V2 está indisponível para retomar o atendimento.",
+            retryable=True,
+        ) from exc
+    if len(response_body) > _MAX_RESPONSE_BYTES:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_post_answer_response_too_large",
+            "A resposta da Supplier V2 excedeu o limite seguro.",
+            retryable=True,
+            status_code=status_code,
+        )
+    if status_code != 200:
+        raise DialerSupplierV2EligibilityError(
+            _extract_error_code(response_body)
+            or "dialer_supplier_v2_post_answer_http_error",
+            "A Supplier V2 recusou a retomada pós-atendimento.",
+            retryable=status_code in _RETRYABLE_STATUS_CODES,
+            status_code=status_code,
+        )
+    return _parse_post_answer_retry_response(
+        response_body,
+        requested=request_payload,
+    )
+
+
+def _parse_post_answer_retry_response(
+    response_body: bytes,
+    *,
+    requested: Mapping[str, Any],
+) -> DialerPostAnswerRetryResult:
+    try:
+        payload = json.loads(response_body.decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping) or data.get("supplier_contract") != "v2":
+            raise ValueError("supplier contract mismatch")
+        if data.get("decision") != "retry_same_phone":
+            raise ValueError("invalid decision")
+        reason = str(data.get("reason") or "").strip()
+        if not reason:
+            raise ValueError("missing reason")
+        selector_ref = str(data.get("selector_component_ref_id") or "").strip()
+        if selector_ref != requested["selector_component_ref_id"]:
+            raise ValueError("selector mismatch")
+        source = data.get("source")
+        if not isinstance(source, Mapping) or any(
+            str(source.get(field) or "").strip() != str(expected).strip()
+            for field, expected in (
+                ("cycle_id", requested["cycle_id"]),
+                ("event_id", requested["event_id"]),
+                ("component_ref_id", requested["source_component_ref_id"]),
+            )
+        ):
+            raise ValueError("source mismatch")
+        candidate = data.get("candidate")
+        if not isinstance(candidate, Mapping) or int(
+            candidate.get("contact_list_member_id") or 0
+        ) != int(requested["current_contact_list_member_id"]):
+            raise ValueError("candidate mismatch")
+        audit_event_id = _eligibility_uuid(
+            data.get("audit_event_id"),
+            "audit_event_id",
+        )
+        replayed = data.get("replayed")
+        if not isinstance(replayed, bool):
+            raise ValueError("invalid replay flag")
+        evaluated_at = _required_iso_datetime(
+            data.get("evaluated_at"),
+            "evaluated_at",
+        )
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise DialerSupplierV2EligibilityError(
+            "dialer_supplier_v2_post_answer_invalid_response",
+            "A Supplier V2 devolveu uma retomada pós-atendimento inválida.",
+            retryable=True,
+        ) from exc
+    return DialerPostAnswerRetryResult(
+        decision="retry_same_phone",
+        reason=reason,
+        candidate=dict(candidate),
+        source=dict(source),
+        selector_component_ref_id=selector_ref,
+        audit_event_id=audit_event_id,
+        replayed=replayed,
+        evaluated_at=evaluated_at,
+    )
+
+
 def _eligibility_uuid(value: Any, field: str) -> str:
     try:
         parsed = UUID(str(value))
@@ -744,6 +951,7 @@ def _required_iso_datetime(value: Any, field: str) -> str:
 __all__ = [
     "DialerCycleRegistrationResult",
     "DialerNextChannelResult",
+    "DialerPostAnswerRetryResult",
     "DialerSupplierV2EligibilityError",
     "DialerSupplierV2RegistrationError",
     "build_dialer_cycle_intent",
@@ -752,4 +960,5 @@ __all__ = [
     "parse_dialer_cycle_intent",
     "register_dialer_cycle",
     "resolve_next_dialer_channel",
+    "retry_dialer_after_answered_tabulation",
 ]

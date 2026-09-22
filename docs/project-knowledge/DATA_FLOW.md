@@ -169,6 +169,21 @@ send_with_dialer_handoff marca linked_actuator=dialer e bloqueia
 
 O valor público desta composição é `tabulation`, em inglês. `tabulacao` continua reservado ao caminho legado de callback de `run_flow` e não deve ser reutilizado aqui. Para cobrir a corrida em que a tabulação chega depois do início do acionamento, mas antes de o `wait_for_event` ser armado, o novo Dialer fornece ao card um `not_before` igual ao instante de preparação. O card pode então considerar somente callbacks recebidos a partir daquele instante, sem consumir eventos anteriores da sessão. O guard é exclusivo dessa transição; as demais esperas preservam o índice-base histórico.
 
+Quando o caminho recebido segue para
+`select_contact_channel(next_eligible, flow_override)`, o seletor pode pedir a
+retomada do mesmo telefone atendido. A autorização exige três evidências
+simultâneas: terminal `answered` do card Dialer exato, `wait_for_event` ativado
+por esse card e callback novo com `outcome|tabulation|disposition`. O ORCH envia
+a identidade integral à rota Supplier V2 pós-atendimento; `flow_override`
+isolado nunca basta.
+
+Após a autorização, o terminal antigo é arquivado no runtime e removido do
+registro corrente, que volta a `ready`. Assim o card Dialer não reutiliza o
+branch `answered` anterior: fica novamente bloqueado até a Supplier V2 produzir
+outra tentativa e outro terminal. A Supplier reaplica Perfil, calendário e
+limites antes da chamada. `respect_dial_rule`, `channel`, Supplier V1 e o card
+legado preservam o comportamento anterior.
+
 ## Card `send_with_dialer_handoff`
 
 1. É um componente novo e aditivo. `send_with_dialer` continua com o mesmo identificador, configuração, marcador, bloqueio e callbacks.
