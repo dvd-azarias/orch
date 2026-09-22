@@ -311,6 +311,12 @@ def test_wait_for_event_consumes_callback_that_raced_after_new_dialer_started() 
     assert runtime["variables"]["customs"]["wait_event"]["data"] == {
         "outcome": "positive"
     }
+    assert runtime["variables"]["customs"]["wait_event"][
+        "source_component_ref_id"
+    ] == "dialer-handoff-1"
+    assert runtime["wait_for_event_last_result"]["result"][
+        "source_component_ref_id"
+    ] == "dialer-handoff-1"
     assert "wait_for_event" not in runtime["workflow_v2"]
     assert "wait_for_event_activation_override" not in runtime["workflow_v2"]
 

@@ -99,6 +99,7 @@ from app.services.dialer_supplier_v2_service import (
     dialer_supplier_v2_enabled_for_context,
     dialer_supplier_v2_multilane_enabled_for_context,
     resolve_next_dialer_channel,
+    retry_dialer_after_answered_tabulation,
 )
 from app.services.generate_file_dispatch_service import upsert_job_and_buffer_row
 from app.services.identidade_person_service import (
@@ -5566,6 +5567,87 @@ def _consume_next_voice_channel_decision(
     }
 
 
+def _post_answer_retry_evidence(
+    *,
+    runtime_variables: dict[str, Any],
+    registration: dict[str, Any],
+    terminal_delivery: dict[str, Any],
+    mode: str,
+) -> dict[str, str] | None:
+    """Return explicit graph evidence for a post-answer retry.
+
+    ``flow_override`` alone is intentionally insufficient.  The exact answered
+    card must have activated a ``wait_for_event`` that consumed a new callback;
+    only reaching the selector after that event authorizes the retry.
+    """
+
+    if mode != "flow_override" or str(
+        terminal_delivery.get("outcome") or ""
+    ).strip().lower() != "answered":
+        return None
+    last_result = runtime_variables.get("wait_for_event_last_result")
+    if not isinstance(last_result, dict):
+        return None
+    result = last_result.get("result")
+    if not isinstance(result, dict) or str(
+        result.get("status") or ""
+    ).strip().lower() != "received":
+        return None
+    if str(result.get("event_source") or "").strip().lower() != "callback":
+        return None
+    if str(result.get("event_result") or "").strip().lower() != "tabulation":
+        return None
+    if str(result.get("source_component_ref_id") or "").strip() != str(
+        registration.get("component_ref_id") or ""
+    ).strip():
+        return None
+    wait_component_ref_id = str(
+        last_result.get("component_ref_id") or ""
+    ).strip()
+    received_at = str(result.get("received_at") or "").strip()
+    data = result.get("data")
+    if not wait_component_ref_id or not received_at or not isinstance(data, dict):
+        return None
+    tabulation = str(
+        data.get("outcome")
+        or data.get("tabulation")
+        or data.get("disposition")
+        or ""
+    ).strip()
+    if not tabulation or len(tabulation) > 128:
+        return None
+    if _parse_iso_datetime(received_at) is None:
+        return None
+    return {
+        "wait_component_ref_id": wait_component_ref_id,
+        "tabulation": tabulation,
+        "tabulation_received_at": received_at,
+    }
+
+
+def _activate_post_answer_retry_registration(
+    *,
+    registration: dict[str, Any],
+    terminal_delivery: dict[str, Any],
+    resolution: dict[str, Any],
+    activated_at: datetime,
+) -> None:
+    history = registration.get("post_answer_retry_history")
+    if not isinstance(history, dict):
+        history = {}
+        registration["post_answer_retry_history"] = history
+    event_id = str(terminal_delivery.get("event_id") or "").strip()
+    history[event_id] = {
+        "terminal_delivery": copy.deepcopy(terminal_delivery),
+        "resolution": copy.deepcopy(resolution),
+        "activated_at": activated_at.isoformat(),
+    }
+    registration.pop("terminal_delivery", None)
+    registration["status"] = "ready"
+    registration["state"] = "ready"
+    registration["updated_at"] = activated_at.isoformat()
+
+
 async def _run_select_contact_channel(
     *,
     db_session: AsyncSession,
@@ -5610,6 +5692,8 @@ async def _run_select_contact_channel(
     supplier_resolution: dict[str, Any] | None = None
     terminal_delivery: dict[str, Any] | None = None
     decision_was_already_consumed = False
+    post_answer_retry = False
+    post_answer_retry_registration: dict[str, Any] | None = None
     evaluated_at = now or datetime.now(timezone.utc)
 
     if selection_strategy == "next_eligible":
@@ -5691,31 +5775,80 @@ async def _run_select_contact_channel(
             assert registration is not None
             assert terminal_delivery is not None
             if cached_resolution is None:
+                post_answer_evidence = _post_answer_retry_evidence(
+                    runtime_variables=runtime_variables,
+                    registration=registration,
+                    terminal_delivery=terminal_delivery,
+                    mode=dial_rule_mode,
+                )
                 try:
-                    resolved = await asyncio.to_thread(
-                        resolve_next_dialer_channel,
-                        workspace_uuid=get_current_workspace_uuid(),
-                        session_uuid=str(registration.get("session_uuid") or ""),
-                        flow_uuid=flow_uuid,
-                        flow_revision_id=flow_revision_id,
-                        source_component_ref_id=str(
-                            registration.get("component_ref_id") or ""
-                        ),
-                        selector_component_ref_id=str(
-                            component.get("ref_id") or ""
-                        ),
-                        cycle_id=str(terminal_delivery.get("cycle_id") or ""),
-                        event_id=str(terminal_delivery.get("event_id") or ""),
-                        current_contact_list_member_id=excluded_member_id,
-                        mode=dial_rule_mode,
-                        channel_label=channel_label,
-                    )
+                    if post_answer_evidence is not None:
+                        resumed = await asyncio.to_thread(
+                            retry_dialer_after_answered_tabulation,
+                            workspace_uuid=get_current_workspace_uuid(),
+                            session_uuid=str(registration.get("session_uuid") or ""),
+                            flow_uuid=flow_uuid,
+                            flow_revision_id=flow_revision_id,
+                            source_component_ref_id=str(
+                                registration.get("component_ref_id") or ""
+                            ),
+                            selector_component_ref_id=str(
+                                component.get("ref_id") or ""
+                            ),
+                            wait_component_ref_id=post_answer_evidence[
+                                "wait_component_ref_id"
+                            ],
+                            cycle_id=str(
+                                terminal_delivery.get("cycle_id") or ""
+                            ),
+                            event_id=str(
+                                terminal_delivery.get("event_id") or ""
+                            ),
+                            current_contact_list_member_id=excluded_member_id,
+                            tabulation=post_answer_evidence["tabulation"],
+                            tabulation_received_at=post_answer_evidence[
+                                "tabulation_received_at"
+                            ],
+                        )
+                        supplier_resolution = resumed.runtime_payload()
+                        supplier_resolution["decision"] = "selected"
+                        supplier_resolution["authorization"] = {
+                            "mode": "flow_override",
+                            "decision_source": "post_answer_graph_retry",
+                        }
+                        post_answer_retry = True
+                        post_answer_retry_registration = registration
+                        authorized_member_id = excluded_member_id
+                        excluded_member_id = None
+                    else:
+                        resolved = await asyncio.to_thread(
+                            resolve_next_dialer_channel,
+                            workspace_uuid=get_current_workspace_uuid(),
+                            session_uuid=str(registration.get("session_uuid") or ""),
+                            flow_uuid=flow_uuid,
+                            flow_revision_id=flow_revision_id,
+                            source_component_ref_id=str(
+                                registration.get("component_ref_id") or ""
+                            ),
+                            selector_component_ref_id=str(
+                                component.get("ref_id") or ""
+                            ),
+                            cycle_id=str(
+                                terminal_delivery.get("cycle_id") or ""
+                            ),
+                            event_id=str(
+                                terminal_delivery.get("event_id") or ""
+                            ),
+                            current_contact_list_member_id=excluded_member_id,
+                            mode=dial_rule_mode,
+                            channel_label=channel_label,
+                        )
+                        supplier_resolution = resolved.runtime_payload()
                 except DialerSupplierV2EligibilityError as exc:
                     raise WorkflowExecutionError(
                         "select_contact_channel_supplier_eligibility_failed",
                         f"A Supplier V2 não confirmou o próximo telefone: {exc.code}.",
                     ) from exc
-                supplier_resolution = resolved.runtime_payload()
 
             assert supplier_resolution is not None
             supplier_decision = str(
@@ -5907,6 +6040,7 @@ async def _run_select_contact_channel(
         terminal_delivery is not None
         and supplier_resolution is not None
         and not decision_was_already_consumed
+        and not post_answer_retry
     ):
         _consume_next_voice_channel_decision(
             terminal_delivery=terminal_delivery,
@@ -5914,6 +6048,19 @@ async def _run_select_contact_channel(
             mode=str(dial_rule_mode or ""),
             resolution=supplier_resolution,
             consumed_at=updated_at,
+        )
+
+    if (
+        post_answer_retry
+        and post_answer_retry_registration is not None
+        and terminal_delivery is not None
+        and supplier_resolution is not None
+    ):
+        _activate_post_answer_retry_registration(
+            registration=post_answer_retry_registration,
+            terminal_delivery=terminal_delivery,
+            resolution=supplier_resolution,
+            activated_at=updated_at,
         )
 
     result = {
@@ -6414,6 +6561,7 @@ def _run_wait_for_event(
             None,
         )
         not_before: str | None = None
+        source_component_ref_id: str | None = None
         if (
             isinstance(activation_override, dict)
             and str(activation_override.get("card_cursor") or "") == current_card_uuid
@@ -6429,6 +6577,10 @@ def _run_wait_for_event(
             if override_not_before is not None:
                 pending_start_index = 0
                 not_before = override_not_before.isoformat()
+                raw_source_component_ref_id = str(
+                    activation_override.get("source_component_ref_id") or ""
+                ).strip()
+                source_component_ref_id = raw_source_component_ref_id or None
         timeout_at = (
             _wait_for_event_correlated_timeout_at(
                 workflow_meta=workflow_meta,
@@ -6450,6 +6602,7 @@ def _run_wait_for_event(
             "correlation_key": correlation_key,
             "pending_start_index": pending_start_index,
             "not_before": not_before,
+            "source_component_ref_id": source_component_ref_id,
             "blocked_at": current_time_utc.isoformat(),
             "timeout_at": timeout_at.isoformat(),
             "status": "waiting",
@@ -6498,6 +6651,11 @@ def _run_wait_for_event(
                 "received_at": callback.get("received_at"),
                 "data": copy.deepcopy(callback.get("data")) if isinstance(callback.get("data"), dict) else {},
             }
+            source_component_ref_id = str(
+                raw_state.get("source_component_ref_id") or ""
+            ).strip()
+            if source_component_ref_id:
+                output["source_component_ref_id"] = source_component_ref_id
             if correlation_key is not None:
                 output["correlation_key"] = correlation_key
             _store_wait_for_event_output(

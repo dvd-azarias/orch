@@ -159,6 +159,46 @@ class _EligibilityResult:
         return self.payload
 
 
+def test_post_answer_retry_evidence_requires_callback_tabulation() -> None:
+    runtime = _next_runtime()
+    registration = runtime["workflow_v2"]["dialer_supplier_v2"]
+    terminal = registration["terminal_delivery"]
+    terminal["outcome"] = "answered"
+    runtime["wait_for_event_last_result"] = {
+        "component_ref_id": "wait-tabulation",
+        "result": {
+            "status": "received",
+            "event_source": "internal",
+            "event_result": "tabulation",
+            "received_at": "2026-09-16T12:59:00+00:00",
+            "source_component_ref_id": SOURCE_DIALER_REF,
+            "data": {"outcome": "RECADO"},
+        },
+    }
+
+    assert (
+        workflow._post_answer_retry_evidence(
+            runtime_variables=runtime,
+            registration=registration,
+            terminal_delivery=terminal,
+            mode="flow_override",
+        )
+        is None
+    )
+
+    runtime["wait_for_event_last_result"]["result"]["event_source"] = "callback"
+    runtime["wait_for_event_last_result"]["result"]["event_result"] = "other"
+    assert (
+        workflow._post_answer_retry_evidence(
+            runtime_variables=runtime,
+            registration=registration,
+            terminal_delivery=terminal,
+            mode="flow_override",
+        )
+        is None
+    )
+
+
 def _definition(*, component: dict | None = None) -> dict:
     return {
         "components": [
@@ -529,6 +569,204 @@ async def test_next_voice_uses_supplier_authorization_and_consumes_decision_once
     assert replay.branch_label == "selected"
     assert len(resolved_calls) == 1
     assert fetch_candidate.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_flow_override_retries_same_phone_only_after_answered_tabulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _contact_row()
+    fetch_candidate = AsyncMock(return_value=candidate)
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+    monkeypatch.setattr(
+        workflow,
+        "rebind_person_session_to_contact_channel",
+        AsyncMock(return_value=True),
+    )
+    standard_resolver_calls: list[dict] = []
+    monkeypatch.setattr(
+        workflow,
+        "resolve_next_dialer_channel",
+        lambda **kwargs: standard_resolver_calls.append(kwargs),
+    )
+    retry_calls: list[dict] = []
+    retry_resolution = {
+        "decision": "retry_same_phone",
+        "reason": "post_answer_graph_retry",
+        "candidate": {
+            "contact_list_member_id": 77,
+            "contact_list_id": CONTACT_LIST_UUID,
+            "mailing_id": 1140,
+            "person_uuid": PERSON_UUID,
+            "channel_type": "voice",
+            "channel_label": "telefone_1",
+            "channel_address": "5511999990001",
+            "is_primary": True,
+        },
+        "source": {
+            "cycle_id": CYCLE_UUID,
+            "event_id": EVENT_UUID,
+            "component_ref_id": SOURCE_DIALER_REF,
+        },
+        "selector_component_ref_id": SELECT_REF,
+        "audit_event_id": "99999999-9999-4999-8999-999999999999",
+        "replayed": False,
+        "evaluated_at": "2026-09-16T13:00:00+00:00",
+    }
+
+    def _retry(**kwargs):  # noqa: ANN003
+        retry_calls.append(kwargs)
+        return _EligibilityResult(retry_resolution)
+
+    monkeypatch.setattr(
+        workflow,
+        "retry_dialer_after_answered_tabulation",
+        _retry,
+    )
+    monkeypatch.setattr(workflow, "get_current_workspace_uuid", lambda: "workspace-1")
+    runtime = _next_runtime()
+    registration = runtime["workflow_v2"]["dialer_supplier_v2"]
+    terminal = registration["terminal_delivery"]
+    terminal.update(
+        {
+            "outcome": "answered",
+            "decision": "finish_person",
+            "decision_source": "telephone_outcome",
+            "terminal_reason": "answered",
+        }
+    )
+    runtime["dialer_last_response"].update(
+        {"status": "answered", "branch": "answered"}
+    )
+    runtime["wait_for_event_last_result"] = {
+        "component_ref_id": "wait-tabulation",
+        "output_var": "wait_event",
+        "result": {
+            "status": "received",
+            "event_source": "callback",
+            "event_result": "tabulation",
+            "received_at": "2026-09-16T12:59:00+00:00",
+            "source_component_ref_id": SOURCE_DIALER_REF,
+            "data": {"outcome": "RECADO"},
+        },
+        "updated_at": "2026-09-16T12:59:00+00:00",
+    }
+
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode="flow_override",
+        ),
+        runtime_variables=runtime,
+        contact_row=candidate,
+        now=datetime(2026, 9, 16, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert execution.branch_label == "selected"
+    assert standard_resolver_calls == []
+    assert retry_calls[0]["tabulation"] == "RECADO"
+    assert retry_calls[0]["wait_component_ref_id"] == "wait-tabulation"
+    assert fetch_candidate.await_args.kwargs[
+        "excluded_contact_list_member_id"
+    ] is None
+    assert fetch_candidate.await_args.kwargs[
+        "authorized_contact_list_member_id"
+    ] == 77
+    assert registration["status"] == "ready"
+    assert "terminal_delivery" not in registration
+    retry_history = registration["post_answer_retry_history"]
+    assert retry_history[EVENT_UUID]["terminal_delivery"]["outcome"] == "answered"
+    assert runtime["workflow_v2"]["selected_contact_channel"][
+        "contact_list_member_id"
+    ] == 77
+    assert (
+        workflow._resolve_send_with_dialer_branch_label(
+            {
+                "ref_id": SOURCE_DIALER_REF,
+                "component_id": "send_with_dialer_handoff",
+                "parameters": {},
+            },
+            runtime,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_answered_tabulation_does_not_bypass_respect_dial_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _next_runtime()
+    runtime["workflow_v2"]["dialer_supplier_v2"]["terminal_delivery"].update(
+        {
+            "outcome": "answered",
+            "decision": "finish_person",
+            "terminal_reason": "answered",
+        }
+    )
+    runtime["dialer_last_response"].update(
+        {"status": "answered", "branch": "answered"}
+    )
+    runtime["wait_for_event_last_result"] = {
+        "component_ref_id": "wait-tabulation",
+        "result": {
+            "status": "received",
+            "received_at": "2026-09-16T12:59:00+00:00",
+            "source_component_ref_id": SOURCE_DIALER_REF,
+            "data": {"outcome": "RECADO"},
+        },
+    }
+    standard_calls: list[dict] = []
+
+    def _resolve(**kwargs):  # noqa: ANN003
+        standard_calls.append(kwargs)
+        return _EligibilityResult(
+            {
+                "decision": "blocked_by_policy",
+                "reason": "person_answered",
+                "candidate": None,
+                "source": {},
+                "authorization": None,
+                "selector_component_ref_id": SELECT_REF,
+                "evaluated_at": "2026-09-16T13:00:00+00:00",
+            }
+        )
+
+    monkeypatch.setattr(workflow, "resolve_next_dialer_channel", _resolve)
+    monkeypatch.setattr(
+        workflow,
+        "retry_dialer_after_answered_tabulation",
+        lambda **_kwargs: pytest.fail("post-answer retry must stay opt-in"),
+    )
+    monkeypatch.setattr(workflow, "get_current_workspace_uuid", lambda: "workspace-1")
+    monkeypatch.setattr(
+        workflow,
+        "fetch_select_contact_channel_candidate",
+        AsyncMock(return_value=None),
+    )
+
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            selection_strategy="next_eligible",
+            dial_rule_mode="respect_dial_rule",
+        ),
+        runtime_variables=runtime,
+        contact_row=_contact_row(),
+        now=datetime(2026, 9, 16, 13, 0, tzinfo=timezone.utc),
+    )
+
+    assert execution.branch_label == "blocked_by_policy"
+    assert standard_calls[0]["mode"] == "respect_dial_rule"
 
 
 @pytest.mark.asyncio

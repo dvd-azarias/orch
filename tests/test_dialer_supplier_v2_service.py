@@ -163,6 +163,35 @@ def _resolve_next_channel(**overrides: object):
     return service.resolve_next_dialer_channel(**values)  # type: ignore[arg-type]
 
 
+def _post_answer_response() -> dict:
+    return {
+        "data": {
+            "supplier_contract": "v2",
+            "decision": "retry_same_phone",
+            "reason": "post_answer_graph_retry",
+            "candidate": {
+                "contact_list_member_id": 71,
+                "contact_list_id": CONTACT_LIST_ID,
+                "mailing_id": 1140,
+                "person_uuid": PERSON_UUID,
+                "channel_type": "voice",
+                "channel_label": "telefone_1",
+                "channel_address": "5511975620806",
+                "is_primary": True,
+            },
+            "source": {
+                "cycle_id": CYCLE_ID,
+                "event_id": EVENT_ID,
+                "component_ref_id": COMPONENT_REF_ID,
+            },
+            "selector_component_ref_id": SELECTOR_REF_ID,
+            "audit_event_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "replayed": False,
+            "evaluated_at": "2026-09-16T13:00:00+00:00",
+        }
+    }
+
+
 def test_feature_flag_requires_workspace_and_flow_allowlists() -> None:
     settings = _settings()
     assert service.dialer_supplier_v2_enabled_for_context(
@@ -450,6 +479,90 @@ def test_resolve_next_channel_maps_supplier_policy_error(
 
     assert exc_info.value.code == "contact_supplier_v2_next_channel_source_mismatch"
     assert exc_info.value.retryable is False
+
+
+def test_post_answer_retry_posts_graph_evidence_and_parses_same_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(req, *, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _Response(_post_answer_response(), status=200)
+
+    monkeypatch.setattr(service.request, "urlopen", _urlopen)
+
+    result = service.retry_dialer_after_answered_tabulation(
+        workspace_uuid=WORKSPACE_UUID,
+        session_uuid=SESSION_UUID,
+        flow_uuid=FLOW_UUID,
+        flow_revision_id=REVISION_UUID,
+        source_component_ref_id=COMPONENT_REF_ID,
+        selector_component_ref_id=SELECTOR_REF_ID,
+        wait_component_ref_id="wait-tabulation",
+        cycle_id=CYCLE_ID,
+        event_id=EVENT_ID,
+        current_contact_list_member_id=71,
+        tabulation="RECADO",
+        tabulation_received_at="2026-09-16T12:59:00+00:00",
+        settings=_settings(),  # type: ignore[arg-type]
+    )
+
+    assert captured["url"] == (
+        "https://supplier.internal/v2/contact-supplier/dialer-post-answer/retry"
+    )
+    assert captured["headers"]["X-workspace-uuid"] == WORKSPACE_UUID  # type: ignore[index]
+    assert captured["body"] == {
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "source_component_ref_id": COMPONENT_REF_ID,
+        "selector_component_ref_id": SELECTOR_REF_ID,
+        "wait_component_ref_id": "wait-tabulation",
+        "cycle_id": CYCLE_ID,
+        "event_id": EVENT_ID,
+        "current_contact_list_member_id": 71,
+        "tabulation": "RECADO",
+        "tabulation_received_at": "2026-09-16T12:59:00+00:00",
+    }
+    assert result.decision == "retry_same_phone"
+    assert result.candidate["contact_list_member_id"] == 71
+
+
+def test_post_answer_retry_rejects_response_for_another_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _post_answer_response()
+    response["data"]["candidate"]["contact_list_member_id"] = 72
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(response, status=200),
+    )
+
+    with pytest.raises(service.DialerSupplierV2EligibilityError) as exc_info:
+        service.retry_dialer_after_answered_tabulation(
+            workspace_uuid=WORKSPACE_UUID,
+            session_uuid=SESSION_UUID,
+            flow_uuid=FLOW_UUID,
+            flow_revision_id=REVISION_UUID,
+            source_component_ref_id=COMPONENT_REF_ID,
+            selector_component_ref_id=SELECTOR_REF_ID,
+            wait_component_ref_id="wait-tabulation",
+            cycle_id=CYCLE_ID,
+            event_id=EVENT_ID,
+            current_contact_list_member_id=71,
+            tabulation="RECADO",
+            tabulation_received_at="2026-09-16T12:59:00+00:00",
+            settings=_settings(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.code == (
+        "dialer_supplier_v2_post_answer_invalid_response"
+    )
 
 
 def test_register_cycle_accepts_idempotent_replay(
