@@ -9,6 +9,7 @@ from app.services.fileapp_processed_file_service import FileAppProcessedFileErro
 from app.tasks.fileapp_ingest_tasks import (
     _associate_fileapp_mailing_task,
     _build_files_api_headers,
+    _format_tipo1_failure_error,
     _handle_step6_import_conflict_without_reupload,
     _is_retryable_step6_import_conflict,
     _is_retryable_step1_upload_failure,
@@ -385,6 +386,74 @@ def test_process_tipo1_wrapper_marks_inflight_then_failed(monkeypatch) -> None:
 
     assert result["status"] == "failed"
     assert state_changes == ["in_flight", "failed"]
+
+
+def test_process_tipo1_wrapper_persists_structured_failure_with_receipt(monkeypatch) -> None:
+    state_changes: list[str] = []
+    receipt_status = AsyncMock()
+    failure_alarm = AsyncMock()
+
+    async def _fake_process(**_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "status": "failed",
+            "reason": "step4_patch_mailing",
+            "message": "PATCH do mailing falhou (HTTP 503).",
+            "details": {"status_code": 503, "attempts": 3, "response_body": "sensitive-body"},
+        }
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._process_fileapp_tipo1_event_task", _fake_process)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._persist_process_tipo1_rescue_flow_state",
+        lambda **kwargs: state_changes.append(str(kwargs["state"])),
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_status",
+        receipt_status,
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._persist_tipo1_processing_failure_alarm",
+        failure_alarm,
+    )
+
+    result = process_fileapp_tipo1_event_task.run(
+        workspace_uuid="w1",
+        flow_uuid="flow-1",
+        payload={"file": {"id": "f-2", "original_name": "x.csv", "folder_path": "mailings/dev"}},
+        mapping_template_uuid="tmpl-1",
+        receipt_id=77,
+        ingest_origin="webhook",
+    )
+
+    assert result["status"] == "failed"
+    assert state_changes == ["in_flight", "failed"]
+    failure_alarm.assert_awaited_once()
+    receipt_status.assert_awaited_once_with(
+        workspace_uuid="w1",
+        receipt_id=77,
+        status="failed",
+        error="reason=step4_patch_mailing status_code=503 attempts=3 "
+        "message=PATCH do mailing falhou (HTTP 503).",
+    )
+
+
+def test_format_tipo1_failure_error_omits_response_body() -> None:
+    formatted = _format_tipo1_failure_error(
+        {
+            "status": "failed",
+            "reason": "step3_field_mappings_get",
+            "message": "Mapeamento ainda não disponível.",
+            "details": {
+                "status_code": 503,
+                "attempts": 3,
+                "response_body": "secret-payload",
+            },
+        }
+    )
+
+    assert "step3_field_mappings_get" in formatted
+    assert "status_code=503" in formatted
+    assert "attempts=3" in formatted
+    assert "secret-payload" not in formatted
 
 
 def test_process_tipo1_wrapper_step6_conflict_defers_without_retrying_pipeline(monkeypatch) -> None:

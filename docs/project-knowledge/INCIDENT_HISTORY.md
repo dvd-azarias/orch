@@ -1,5 +1,53 @@
 # Historico de Incidentes
 
+## 2026-09-22 — `generate_file` serial e rescue FileApp ampliavam latência para 10–15 minutos
+
+`STATUS`: ROOT CAUSE CONFIRMED / FIX IMPLEMENTED / ROLLOUT PENDING
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `253148c7-a85f-42a3-bc8b-5ffd9d885efe`
+
+`FLOW`: `652ee631-888e-46f9-843e-d80543051801`
+
+### Evidência e causa
+
+- A sessão `109030` terminou o flow produtor em aproximadamente um segundo, mas
+  a linha do job `79850bc2-ba05-4376-86e0-465ddd6f1b14` permaneceu pendente
+  atrás de 212 itens. A amostra física dos arquivos mostrou intervalo médio de
+  21,94 segundos.
+- O worker mantinha advisory lock por job e a mesma transação durante até 500
+  envios SFTP sequenciais. Cada linha abria conexão nova e executava `listdir`
+  da pasta inteira; os workers adicionais não processavam destinos distintos
+  do mesmo job.
+- Em 123 arquivos FileApp, a mediana até `PROCESSED` foi 0,172 segundo, mas o
+  p95 chegou a 608,833 segundos e o máximo a 857 segundos. O arquivo
+  `create_customer-108560-108560.csv` teve quatro tentativas parciais e levou
+  842,5 segundos; o rescue de 600 segundos virou o caminho de recuperação.
+
+### Correção preparada
+
+- Jobs imediatos reivindicam uma linha por task com `FOR UPDATE SKIP LOCKED`,
+  sem lock global. Um lock por alvo SFTP serializa apenas o mesmo arquivo;
+  agendado e recorrente preservam batch e lock por job.
+- O SFTP usa `stat` pontual em vez de listar a pasta. O scanner abre dez faixas
+  de dreno somente para jobs imediatos com linhas pendentes/processando.
+- As etapas 2–5 do FileApp fazem retries de 250 ms e 750 ms no mesmo
+  `mailing_uuid` para 429/5xx, timeout, indisponibilidade e consistência eventual
+  dos mappings. Erros 4xx falham imediatamente; falhas finais persistem motivo,
+  etapa, status e tentativas sem salvar o body da resposta no alarme.
+
+### Validação e pendências
+
+- Regressão ampliada FileApp/generate-file: `91 passed`; `compileall` e
+  `git diff --check` passaram.
+- Stack local isolada iniciou com todos os processos; os smokes `8553` e `8554`
+  terminaram em `state=3` e nenhuma stack local permaneceu ativa.
+- O alvo é p95 abaixo de 10 segundos e p99 abaixo de 30 segundos; a comprovação
+  exige canário real após rollout no workspace afetado.
+
 ## 2026-09-16 — Terminal Supplier V2 recusado por versão de mapa desconhecida
 
 `STATUS`: FIX VALIDATED LOCALLY / PRODUCTION ROLLOUT PENDING

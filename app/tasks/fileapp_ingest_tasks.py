@@ -264,6 +264,92 @@ async def _resolve_canonical_mailing_uuid_for_file(
     return resolved or None
 
 
+def _format_tipo1_failure_error(result: dict[str, Any]) -> str:
+    reason = str(result.get("reason") or "unknown_failure").strip() or "unknown_failure"
+    message = str(result.get("message") or "Tipo 1 processing failed").strip()
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    tokens = [f"reason={reason}"]
+    for key in ("status_code", "mailing_status", "attempts", "max_attempts", "error_type"):
+        value = details.get(key)
+        if value is not None and str(value).strip():
+            tokens.append(f"{key}={str(value).strip()}")
+    if message:
+        tokens.append(f"message={message}")
+    return " ".join(tokens)[:2000]
+
+
+def _safe_tipo1_failure_details(result: dict[str, Any]) -> dict[str, Any]:
+    raw_details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    safe_details = {
+        key: raw_details[key]
+        for key in (
+            "status_code",
+            "mailing_status",
+            "attempts",
+            "max_attempts",
+            "retry_delays_seconds",
+            "error_type",
+            "response_not_ready",
+        )
+        if key in raw_details
+    }
+    return {
+        "status": str(result.get("status") or "").strip(),
+        "reason": str(result.get("reason") or "").strip(),
+        "message": str(result.get("message") or "").strip()[:1000],
+        "details": safe_details,
+    }
+
+
+async def _persist_tipo1_processing_failure_alarm(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    payload: dict[str, Any],
+    mapping_template_uuid: str,
+    receipt_id: int,
+    ingest_origin: str,
+    result: dict[str, Any],
+) -> None:
+    file_data = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+    try:
+        async with get_session_factory()() as db_session:
+            bind_workspace_context(workspace_uuid)
+            await persist_alarm(
+                db_session,
+                level="error",
+                code="fileapp_tipo1_processing_failed",
+                message="Processamento FileApp tipo 1 falhou após retries rápidos no mesmo mailing.",
+                details={
+                    "workspace_uuid": workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "mapping_template_uuid": mapping_template_uuid,
+                    "receipt_id": receipt_id,
+                    "ingest_origin": ingest_origin,
+                    "failure": _safe_tipo1_failure_details(result),
+                    "file": {
+                        "id": str(file_data.get("id") or "").strip(),
+                        "folder_path": str(file_data.get("folder_path") or "").strip(),
+                        "original_name": str(file_data.get("original_name") or "").strip(),
+                    },
+                },
+                flow_uuid=flow_uuid,
+                app_name="ArquivosApp",
+                entity=str(file_data.get("id") or ""),
+                entity_type="file",
+                entity_address=str(file_data.get("folder_path") or ""),
+            )
+    except Exception:
+        logger.exception(
+            "fileapp tipo1 processing failure alarm persistence failed",
+            extra={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "receipt_id": receipt_id,
+            },
+        )
+
+
 async def _persist_step1_retry_alarm(
     *,
     workspace_uuid: str,
@@ -1468,12 +1554,26 @@ def process_fileapp_tipo1_event_task(
             ttl_seconds=86400,
         )
         if receipt_id is not None:
+            failure_error = None
+            if terminal_state != "done":
+                failure_error = _format_tipo1_failure_error(result)
+                asyncio.run(
+                    _persist_tipo1_processing_failure_alarm(
+                        workspace_uuid=workspace_uuid,
+                        flow_uuid=flow_uuid,
+                        payload=payload,
+                        mapping_template_uuid=mapping_template_uuid,
+                        receipt_id=receipt_id,
+                        ingest_origin=ingest_origin,
+                        result=result,
+                    )
+                )
             asyncio.run(
                 _mark_fileapp_ingest_receipt_status(
                     workspace_uuid=workspace_uuid,
                     receipt_id=receipt_id,
                     status="completed" if terminal_state == "done" else "failed",
-                    error=None if terminal_state == "done" else "Tipo 1 processing returned non-terminal success",
+                    error=failure_error,
                 )
             )
         return result

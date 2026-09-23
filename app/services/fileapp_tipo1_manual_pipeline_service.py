@@ -7,7 +7,7 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib import request
 from urllib.error import HTTPError, URLError
@@ -41,6 +41,7 @@ class FileAppTipo1ManualPipelineError(Exception):
 _FILE_DOWNLOAD_RETRY_ATTEMPTS = 5
 _FILE_DOWNLOAD_RETRY_INTERVAL_SECONDS = 15.0
 _AUTO_INGEST_ACTIVE_OR_DONE_STATUSES = {"INGESTING", "PROCESSED"}
+_TARGET_CORE_TRANSIENT_RETRY_DELAYS_SECONDS = (0.25, 0.75)
 
 
 def _build_target_core_headers(
@@ -89,6 +90,114 @@ def _json_request(
     with request.urlopen(req, timeout=timeout_seconds) as response:
         body = response.read().decode("utf-8", errors="replace")
         return int(response.status), body
+
+
+def _is_transient_target_core_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code <= 599
+
+
+async def _json_request_with_transient_retry(
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any] | None,
+    timeout_seconds: float,
+    step: str,
+    failure_message: str,
+    retry_response: Callable[[int, str], bool] | None = None,
+) -> tuple[int, str, int]:
+    delays = tuple(max(0.0, float(delay)) for delay in _TARGET_CORE_TRANSIENT_RETRY_DELAYS_SECONDS)
+    max_attempts = len(delays) + 1
+    last_details: dict[str, Any] = {}
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            status_code, body = await asyncio.to_thread(
+                _json_request,
+                method=method,
+                url=url,
+                headers=headers,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+            )
+            should_retry_response = bool(retry_response and retry_response(status_code, body))
+            if status_code < 400 and not should_retry_response:
+                return status_code, body, attempt
+            if status_code < 400 and should_retry_response and attempt >= max_attempts:
+                return status_code, body, attempt
+
+            last_details = {
+                "status_code": status_code,
+                "response_body": body,
+                "response_not_ready": should_retry_response,
+            }
+            retryable = _is_transient_target_core_status(status_code) or should_retry_response
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            status_code = int(exc.code)
+            last_details = {
+                "status_code": status_code,
+                "response_body": detail,
+                "error_type": type(exc).__name__,
+            }
+            retryable = _is_transient_target_core_status(status_code)
+        except (URLError, TimeoutError, OSError) as exc:
+            last_details = {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+            if isinstance(exc, URLError):
+                last_details["reason"] = str(exc.reason)
+            retryable = True
+
+        if not retryable or attempt >= max_attempts:
+            last_details.update(
+                {
+                    "attempts": attempt,
+                    "max_attempts": max_attempts,
+                    "retry_delays_seconds": list(delays),
+                }
+            )
+            status_suffix = (
+                f" (HTTP {int(last_details['status_code'])})"
+                if isinstance(last_details.get("status_code"), int)
+                else ""
+            )
+            raise FileAppTipo1ManualPipelineError(
+                step=step,
+                message=f"{failure_message}{status_suffix}.",
+                details=last_details,
+            )
+
+        await asyncio.sleep(delays[attempt - 1])
+
+    raise AssertionError("unreachable")
+
+
+def _field_mappings_response_not_ready(status_code: int, body: str) -> bool:
+    if status_code >= 400:
+        return False
+    try:
+        response = _decode_json(body)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    suggestion = data.get("put_suggestion") if isinstance(data.get("put_suggestion"), dict) else {}
+    mappings = suggestion.get("mappings")
+    return not isinstance(mappings, list) or not mappings
+
+
+def _put_mappings_response_not_ready(status_code: int, body: str) -> bool:
+    if status_code >= 400:
+        return False
+    try:
+        response = _decode_json(body)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    mailing_status = str(data.get("status") or "").strip().upper()
+    return mailing_status not in {"READY_TO_INGEST", *_AUTO_INGEST_ACTIVE_OR_DONE_STATUSES}
 
 
 def _multipart_encode(upload: FileUploadPayload) -> tuple[bytes, str]:
@@ -434,22 +543,15 @@ async def run_tipo1_manual_pipeline(
     )
 
     # Step 2
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="GET",
-            url=f"{base_url}/v2/mailings/mapping-templates",
-            headers=json_headers,
-            payload=None,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step2_templates",
-            message=f"Listagem de templates falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
+    status_code, body, request_attempts = await _json_request_with_transient_retry(
+        method="GET",
+        url=f"{base_url}/v2/mailings/mapping-templates",
+        headers=json_headers,
+        payload=None,
+        timeout_seconds=settings.sync_ws_timeout_seconds,
+        step="step2_templates",
+        failure_message="Listagem de templates falhou",
+    )
     templates_response = _decode_json(body)
     templates = templates_response.get("data")
     template_exists = False
@@ -459,9 +561,16 @@ async def run_tipo1_manual_pipeline(
         raise FileAppTipo1ManualPipelineError(
             step="step2_templates",
             message="mapping_template_id do flow não encontrado nos templates do workspace.",
-            details={"status_code": status_code},
+            details={"status_code": status_code, "attempts": request_attempts},
         )
-    step_results.append({"step": "step2_templates", "status_code": status_code, "mapping_template_uuid": mapping_template_uuid})
+    step_results.append(
+        {
+            "step": "step2_templates",
+            "status_code": status_code,
+            "mapping_template_uuid": mapping_template_uuid,
+            "attempts": request_attempts,
+        }
+    )
 
     # Step 4
     patch_payload = {
@@ -469,47 +578,36 @@ async def run_tipo1_manual_pipeline(
         "name": resolved_mailing_name,
         "description": resolved_description,
     }
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="PATCH",
-            url=f"{base_url}/v2/mailings/{mailing_uuid}",
-            headers=json_headers,
-            payload=patch_payload,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step4_patch_mailing",
-            message=f"PATCH do mailing falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
+    status_code, body, request_attempts = await _json_request_with_transient_retry(
+        method="PATCH",
+        url=f"{base_url}/v2/mailings/{mailing_uuid}",
+        headers=json_headers,
+        payload=patch_payload,
+        timeout_seconds=settings.sync_ws_timeout_seconds,
+        step="step4_patch_mailing",
+        failure_message="PATCH do mailing falhou",
+    )
     if status_code >= 400:
         raise FileAppTipo1ManualPipelineError(
             step="step4_patch_mailing",
             message="PATCH do mailing retornou status inválido.",
             details={"status_code": status_code, "response_body": body},
         )
-    step_results.append({"step": "step4_patch_mailing", "status_code": status_code})
+    step_results.append(
+        {"step": "step4_patch_mailing", "status_code": status_code, "attempts": request_attempts}
+    )
 
     # Step 3 (recarrega após aplicar template no PATCH)
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="GET",
-            url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
-            headers=json_headers,
-            payload=None,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step3_field_mappings_get",
-            message=f"Consulta de field-mappings falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
+    status_code, body, request_attempts = await _json_request_with_transient_retry(
+        method="GET",
+        url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
+        headers=json_headers,
+        payload=None,
+        timeout_seconds=settings.sync_ws_timeout_seconds,
+        step="step3_field_mappings_get",
+        failure_message="Consulta de field-mappings falhou",
+        retry_response=_field_mappings_response_not_ready,
+    )
     field_mappings_response = _decode_json(body)
     field_mappings_data = (
         field_mappings_response.get("data") if isinstance(field_mappings_response.get("data"), dict) else {}
@@ -524,34 +622,29 @@ async def run_tipo1_manual_pipeline(
         raise FileAppTipo1ManualPipelineError(
             step="step3_field_mappings_get",
             message="Consulta de field-mappings não retornou put_suggestion.mappings válido.",
-            details={"status_code": status_code},
+            details={"status_code": status_code, "attempts": request_attempts},
         )
     step_results.append(
         {
             "step": "step3_field_mappings_get",
             "status_code": status_code,
             "mappings_count": len(suggested_mappings),
+            "attempts": request_attempts,
         }
     )
 
     # Step 5
     put_payload = {"mappings": suggested_mappings}
-    try:
-        status_code, body = await asyncio.to_thread(
-            _json_request,
-            method="PUT",
-            url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
-            headers=json_headers,
-            payload=put_payload,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
-        )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step5_put_field_mappings",
-            message=f"PUT de field-mappings falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
+    status_code, body, request_attempts = await _json_request_with_transient_retry(
+        method="PUT",
+        url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
+        headers=json_headers,
+        payload=put_payload,
+        timeout_seconds=settings.sync_ws_timeout_seconds,
+        step="step5_put_field_mappings",
+        failure_message="PUT de field-mappings falhou",
+        retry_response=_put_mappings_response_not_ready,
+    )
     put_response = _decode_json(body)
     put_data = put_response.get("data") if isinstance(put_response.get("data"), dict) else {}
     put_status = str(put_data.get("status") or "").strip().upper()
@@ -560,9 +653,20 @@ async def run_tipo1_manual_pipeline(
         raise FileAppTipo1ManualPipelineError(
             step="step5_put_field_mappings",
             message="Mailing não atingiu estado válido de ingestão após PUT de field-mappings.",
-            details={"status_code": status_code, "mailing_status": put_status},
+            details={
+                "status_code": status_code,
+                "mailing_status": put_status,
+                "attempts": request_attempts,
+            },
         )
-    step_results.append({"step": "step5_put_field_mappings", "status_code": status_code, "mailing_status": put_status})
+    step_results.append(
+        {
+            "step": "step5_put_field_mappings",
+            "status_code": status_code,
+            "mailing_status": put_status,
+            "attempts": request_attempts,
+        }
+    )
 
     # Step 6
     import_task_id: str | None = None
