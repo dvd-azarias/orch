@@ -16,6 +16,7 @@ from app.services.channel_supplier_v2_service import (
     build_channel_dispatch_intent,
     channel_supplier_v2_callbacks_enabled_for_context,
     channel_supplier_v2_enabled_for_context,
+    get_channel_dispatch,
     parse_channel_callback_token,
     register_channel_dispatch,
 )
@@ -231,10 +232,9 @@ def test_callback_urls_are_generated_only_for_official_channel_events() -> None:
 
 
 class _Response:
-    status = 201
-
-    def __init__(self, body: bytes) -> None:
+    def __init__(self, body: bytes, *, status: int = 201) -> None:
         self._body = body
+        self.status = status
 
     def __enter__(self):
         return self
@@ -291,3 +291,65 @@ def test_register_channel_dispatch_uses_internal_v2_route_and_idempotency() -> N
     assert captured["headers"]["X-workspace-uuid"] == WORKSPACE_UUID
     assert result.dispatch_id == "13131313-1313-4313-8313-131313131313"
     assert result.state == "pending"
+
+
+def test_get_channel_dispatch_validates_identity_and_returns_acceptance() -> None:
+    settings = _settings()
+    intent = _intent(settings)
+    intent["dispatch_id"] = "13131313-1313-4313-8313-131313131313"
+    body = json.dumps(
+        {
+            "data": {
+                "id": intent["dispatch_id"],
+                **{
+                    key: intent[key]
+                    for key in (
+                        "session_uuid",
+                        "flow_uuid",
+                        "flow_revision_id",
+                        "component_ref_id",
+                        "contact_list_id",
+                        "contact_list_member_id",
+                        "channel",
+                        "dispatch_sequence",
+                        "envelope_checksum",
+                    )
+                },
+                "state": "accepted",
+                "provider_message_id": "provider-message-1",
+                "provider_status": "13",
+                "accepted_at": "2026-09-23T12:00:00+00:00",
+                "failed_at": None,
+                "uncertain_at": None,
+                "last_error_code": None,
+                "last_error_message": None,
+            }
+        }
+    ).encode()
+    captured = {}
+
+    def _urlopen(req, timeout):
+        captured["method"] = req.method
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["timeout"] = timeout
+        return _Response(body, status=200)
+
+    with patch(
+        "app.services.channel_supplier_v2_service.request.urlopen", _urlopen
+    ):
+        result = get_channel_dispatch(
+            workspace_uuid=WORKSPACE_UUID,
+            intent=intent,
+            settings=settings,
+        )
+
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith(
+        "/v2/contact-supplier/channel-dispatches/"
+        "13131313-1313-4313-8313-131313131313"
+    )
+    assert captured["headers"]["X-workspace-uuid"] == WORKSPACE_UUID
+    assert result.state == "accepted"
+    assert result.provider_message_id == "provider-message-1"
+    assert result.accepted_at == "2026-09-23T12:00:00+00:00"

@@ -224,7 +224,7 @@ def test_callback_without_provider_message_id_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_sms_lifecycle_event_advances_to_generic_wait(
+async def test_sms_lifecycle_event_is_preserved_without_advancing_send_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = {
@@ -250,7 +250,8 @@ async def test_first_sms_lifecycle_event_advances_to_generic_wait(
         blocking_stop_reason="blocked_send_with_sms",
     )
 
-    assert decision.terminal is True
+    assert decision.terminal is False
+    assert decision.changed is True
     assert decision.channel == "sms"
     assert runtime["callbacks_pending"][0]["event_name"] == "callback"
     assert runtime["callbacks_pending"][0]["result"] == "sms_event"
@@ -258,10 +259,58 @@ async def test_first_sms_lifecycle_event_advances_to_generic_wait(
     assert runtime["callbacks_pending"][0]["data"]["correlation_key"].startswith(
         "cdv2:sms:"
     )
+    assert "wait_for_event_activation_override" not in runtime["workflow_v2"]
+    assert mark.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sms_provider_acceptance_advances_without_fabricating_lifecycle_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = _intent("sms")
+    intent.update(
+        {
+            "status": "provider_accepted",
+            "dispatch_id": "13131313-1313-4313-8313-131313131313",
+            "provider_message_id": "provider-message-1",
+            "provider_status": "13",
+            "accepted_at": "2026-09-23T12:00:00+00:00",
+        }
+    )
+    runtime = {
+        "workflow_v2": {
+            "channel_dispatch_v2": intent,
+            "next_card_cursor": NEXT_REF_ID,
+        }
+    }
+    monkeypatch.setattr(
+        workflow,
+        "fetch_next_pending_channel_event",
+        AsyncMock(return_value=None),
+    )
+
+    decision = await workflow._consume_channel_supplier_v2_events(
+        object(),  # type: ignore[arg-type]
+        session_id=10,
+        runtime_variables=runtime,
+        blocking_stop_reason="blocked_send_with_sms",
+    )
+
+    assert decision.terminal is True
+    assert decision.branch_label == "next"
+    assert "callbacks_pending" not in runtime
+    assert runtime["send_with_sms_last_result"] == {
+        "component_ref_id": COMPONENT_REF_ID,
+        "dispatch_sequence": 1,
+        "dispatch_id": "13131313-1313-4313-8313-131313131313",
+        "event_type": "accepted",
+        "event_id": "provider-message-1",
+        "provider_status": "13",
+        "event_at": "2026-09-23T12:00:00+00:00",
+    }
     assert runtime["workflow_v2"]["wait_for_event_activation_override"][
         "card_cursor"
     ] == NEXT_REF_ID
-    assert mark.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -371,10 +420,19 @@ async def test_sms_mo_after_send_card_is_forwarded_without_reopening_card(
 
 
 @pytest.mark.asyncio
-async def test_sms_status_resumes_card_and_preserves_raced_mo_for_following_wait(
+async def test_sms_acceptance_resumes_card_and_preserves_raced_events_for_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     intent = _intent("sms")
+    intent.update(
+        {
+            "status": "provider_accepted",
+            "dispatch_id": "13131313-1313-4313-8313-131313131313",
+            "provider_message_id": "provider-message-1",
+            "provider_status": "13",
+            "accepted_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     runtime = {
         "workflow_v2": {
             "flow_id": FLOW_UUID,
@@ -468,6 +526,93 @@ async def test_sms_status_resumes_card_and_preserves_raced_mo_for_following_wait
         for call in clear_frozen.await_args_list
     )
     assert persisted[-1]["state"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sms_acceptance_enters_generic_wait_without_lifecycle_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = _intent("sms")
+    intent.update(
+        {
+            "status": "provider_accepted",
+            "dispatch_id": "13131313-1313-4313-8313-131313131313",
+            "provider_message_id": "provider-message-1",
+            "provider_status": "13",
+            "accepted_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    runtime = {
+        "workflow_v2": {
+            "flow_id": FLOW_UUID,
+            "revision_id": REVISION_UUID,
+            "channel_dispatch_v2": intent,
+            "blocking_execution": True,
+            "blocking_stop_reason": "blocked_send_with_sms",
+            "last_card_cursor": COMPONENT_REF_ID,
+            "next_card_cursor": NEXT_REF_ID,
+        },
+        "variables": {"payload": {}, "customs": {}},
+    }
+    runtime["variables"]["customs"]["sms_dispatch"] = {
+        "correlation_key": workflow.build_channel_dispatch_correlation_key(
+            session_uuid=SESSION_UUID,
+            flow_uuid=FLOW_UUID,
+            flow_revision_id=REVISION_UUID,
+            component_ref_id=COMPONENT_REF_ID,
+            channel="sms",
+            dispatch_sequence=1,
+        )
+    }
+    definition = {
+        "components": [
+            {
+                "ref_id": COMPONENT_REF_ID,
+                "component_id": "send_with_sms",
+                "parameters": {},
+            },
+            {
+                "ref_id": NEXT_REF_ID,
+                "component_id": "wait_for_event",
+                "parameters": {
+                    "event_source": "callback",
+                    "event_result": "sms_event",
+                    "correlation_key": "{{customs.sms_dispatch.correlation_key}}",
+                    "timeout_seconds": 300,
+                    "output_var": "sms_reply",
+                },
+            },
+        ],
+        "branches": [
+            {
+                "from": COMPONENT_REF_ID,
+                "to": NEXT_REF_ID,
+                "branch": "next",
+            },
+        ],
+    }
+    persisted, _mark, _clear_frozen = _configure_resume_execution(
+        monkeypatch,
+        runtime=runtime,
+        definition=definition,
+        next_card_uuid=NEXT_REF_ID,
+        events=[None],
+    )
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=10,
+    )
+
+    assert result.stopped_reason == "blocked_wait_for_event"
+    assert result.last_card_uuid == NEXT_REF_ID
+    assert "callbacks_pending" not in runtime
+    assert runtime["workflow_v2"]["blocking_stop_reason"] == (
+        "blocked_wait_for_event"
+    )
+    assert runtime["send_with_sms_last_result"]["event_type"] == "accepted"
+    assert persisted
 
 
 @pytest.mark.asyncio

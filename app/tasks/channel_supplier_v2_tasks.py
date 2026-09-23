@@ -18,6 +18,7 @@ from app.services.alarm_service import persist_alarm
 from app.services.channel_supplier_v2_service import (
     ChannelSupplierV2RegistrationError,
     channel_supplier_v2_enabled_for_context,
+    get_channel_dispatch,
     parse_channel_dispatch_intent,
     register_channel_dispatch,
 )
@@ -101,6 +102,14 @@ async def _register_channel_supplier_v2_dispatch_task(
             settings.channel_supplier_v2_registration_lease_seconds
         ),
     )
+    if prepared.get("status") == "registered":
+        return await _sync_registered_dispatch(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            session_id=session_id,
+            intent=prepared["intent"],
+            settings=settings,
+        )
     if prepared.get("status") != "claimed":
         return prepared
     intent = prepared["intent"]
@@ -194,7 +203,13 @@ async def _register_channel_supplier_v2_dispatch_task(
             "replayed": result.replayed,
         },
     )
-    return {"status": "registered", "dispatch_id": result.dispatch_id}
+    return await _sync_registered_dispatch(
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        session_id=session_id,
+        intent=registration,
+        settings=settings,
+    )
 
 
 async def _claim_registration(
@@ -246,7 +261,11 @@ async def _claim_registration(
             current_status = str(intent.get("status") or "").lower()
             current_attempts = int(intent.get("attempts") or 0)
             if current_status == "registered":
-                return {"status": "registered", "dispatch_id": intent.get("dispatch_id")}
+                return {
+                    "status": "registered",
+                    "dispatch_id": intent.get("dispatch_id"),
+                    "intent": intent,
+                }
             if current_status == "failed":
                 return {"status": "failed"}
             effective_attempt = max(attempt, current_attempts + 1)
@@ -313,6 +332,105 @@ async def _store_error(
     )
 
 
+async def _sync_registered_dispatch(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    session_id: int,
+    intent: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(
+            get_channel_dispatch,
+            workspace_uuid=workspace_uuid,
+            intent=intent,
+            settings=settings,
+        )
+    except ChannelSupplierV2RegistrationError as exc:
+        logger.warning(
+            "channel Supplier V2 dispatch state unavailable",
+            extra={
+                "event": "orch.channel_supplier_v2.dispatch_state.unavailable",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+                "dispatch_id": intent.get("dispatch_id"),
+                "error_code": exc.code,
+                "retryable": exc.retryable,
+            },
+        )
+        return {
+            "status": "registered",
+            "dispatch_id": intent.get("dispatch_id"),
+            "reason": exc.code,
+        }
+
+    if result.state in {"pending", "dispatching"}:
+        return {
+            "status": "registered",
+            "dispatch_id": result.dispatch_id,
+            "dispatch_state": result.state,
+        }
+
+    registration = dict(intent)
+    registration.update(result.runtime_payload())
+    registration.update(
+        {
+            "status": f"provider_{result.state}",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    transitioned = await _transition_registered_dispatch(
+        workspace_uuid=workspace_uuid,
+        session_id=session_id,
+        idempotency_key=str(intent["idempotency_key"]),
+        registration=registration,
+    )
+    if result.state == "accepted" and transitioned:
+        from app.tasks.workflow_tasks import (
+            resume_channel_supplier_v2_acceptance_task,
+        )
+
+        resume_channel_supplier_v2_acceptance_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_execute_queue,
+            routing_key=settings.celery_execute_queue,
+        )
+        logger.info(
+            "channel Supplier V2 provider acceptance scheduled for workflow resume",
+            extra={
+                "event": "orch.channel_supplier_v2.acceptance.resume_scheduled",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+                "dispatch_id": result.dispatch_id,
+            },
+        )
+    elif result.state in {"failed", "uncertain"} and transitioned:
+        logger.error(
+            "channel Supplier V2 dispatch reached a non-accepted terminal state",
+            extra={
+                "event": "orch.channel_supplier_v2.dispatch_state.terminal_failure",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+                "dispatch_id": result.dispatch_id,
+                "dispatch_state": result.state,
+                "error_code": result.last_error_code,
+            },
+        )
+    return {
+        "status": registration["status"],
+        "dispatch_id": result.dispatch_id,
+        "transitioned": transitioned,
+    }
+
+
 async def _patch_registration(
     *,
     workspace_uuid: str,
@@ -330,6 +448,48 @@ async def _patch_registration(
                 text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
                 {"class_id": _WORKFLOW_LOCK_CLASS_ID, "object_id": int(session_id)},
             )
+            return await patch_session_channel_supplier_v2_registration(
+                db_session,
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+                registration=registration,
+            )
+
+
+async def _transition_registered_dispatch(
+    *,
+    workspace_uuid: str,
+    session_id: int,
+    idempotency_key: str,
+    registration: dict[str, Any],
+) -> bool:
+    _safe_workspace_uuid, schema = bind_workspace_context(workspace_uuid)
+    safe_schema = schema.replace('"', '""')
+    session_factory = get_session_factory()
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+            await db_session.execute(
+                text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
+                {"class_id": _WORKFLOW_LOCK_CLASS_ID, "object_id": int(session_id)},
+            )
+            state = await fetch_session_workflow_state(
+                db_session,
+                session_id=session_id,
+            )
+            runtime = state.get("runtime_variables") if isinstance(state, dict) else None
+            workflow = runtime.get("workflow_v2") if isinstance(runtime, dict) else None
+            current = (
+                workflow.get("channel_dispatch_v2")
+                if isinstance(workflow, dict)
+                else None
+            )
+            if (
+                not isinstance(current, dict)
+                or str(current.get("idempotency_key") or "") != idempotency_key
+                or str(current.get("status") or "").lower() != "registered"
+            ):
+                return False
             return await patch_session_channel_supplier_v2_registration(
                 db_session,
                 session_id=session_id,
@@ -458,6 +618,11 @@ async def _list_reconcilable_channel_supplier_v2_dispatches(
                             secs => :pending_retry_recovery_seconds
                         )
                     )
+                    OR (
+                        runtime_variables #>> '{workflow_v2,channel_dispatch_v2,status}' = 'registered'
+                        AND runtime_variables #>> '{workflow_v2,channel_dispatch_v2,channel}' = 'sms'
+                        AND runtime_variables #>> '{workflow_v2,blocking_stop_reason}' = 'blocked_send_with_sms'
+                    )
               )
             ORDER BY updated_at ASC, id ASC
             LIMIT :limit
@@ -480,4 +645,5 @@ __all__ = [
     "_register_channel_supplier_v2_dispatch_task",
     "_reconcile_pending_channel_supplier_v2_dispatches_task",
     "_list_reconcilable_channel_supplier_v2_dispatches",
+    "_sync_registered_dispatch",
 ]

@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-09-23 — Aceite do provedor conclui o card SMS sem consumir lifecycle
+
+### REQUEST / CLASSIFICATION
+
+Impedir que uma sessão permaneça bloqueada no `send_with_sms` quando o provedor
+já aceitou o envio, sem transformar o ACK técnico em DLR, MO ou status.
+`ALPHA_FIX_REQUIRED`, restrito ao SMS opt-in da Supplier V2; Supplier V1 e RCS
+permanecem inalterados.
+
+### CHANGE / SAFETY
+
+- o reconciliador consulta o dispatch durável já registrado no Target Core;
+- somente `accepted` muda a intenção para `provider_accepted` e agenda uma
+  retomada na fila de execução;
+- lock e compare-and-set garantem uma única retomada mesmo sob replay;
+- `pending|dispatching` continuam esperando; `failed|uncertain` ficam
+  observáveis e não percorrem `next`;
+- a conclusão do card não fabrica callback. DLR/MO/status continuam no ledger e
+  são consumidos exclusivamente pelo `wait_for_event` correlacionado;
+- nenhum schema, fila, card, Supplier V1 ou contrato RCS foi modificado.
+
+### VALIDATION / ROLLBACK
+
+- `65 passed` na regressão focada final, cobrindo aceite, dispatch ainda
+  pendente, falha, replay, corrida entre aceite/callback, SMS, RCS e ledger;
+  deploy e canário real permanecem pendentes;
+- rollback exige reverter coordenadamente a leitura Target e o reconciliador
+  ORCH. Sem migration ou compensação de dados.
+
 ## 2026-09-22 — Correção de latência `generate_file` + FileApp
 
 ### REQUEST / CLASSIFICATION

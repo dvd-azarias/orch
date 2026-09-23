@@ -3681,6 +3681,50 @@ async def _consume_channel_supplier_v2_events(
     changed = False
     sms_should_resume = False
 
+    if (
+        channel == "sms"
+        and blocking_stop_reason == expected_block
+        and str(intent.get("status") or "").strip().lower()
+        == "provider_accepted"
+    ):
+        try:
+            correlation_key = build_channel_dispatch_correlation_key(
+                session_uuid=str(intent.get("session_uuid") or ""),
+                flow_uuid=str(intent.get("flow_uuid") or ""),
+                flow_revision_id=str(intent.get("flow_revision_id") or ""),
+                component_ref_id=str(intent.get("component_ref_id") or ""),
+                channel=channel,
+                dispatch_sequence=int(intent.get("dispatch_sequence") or 0),
+            )
+        except (ChannelSupplierV2RegistrationError, TypeError, ValueError):
+            correlation_key = ""
+        if correlation_key:
+            accepted_at = (
+                _parse_iso_datetime(intent.get("accepted_at"))
+                or datetime.now(timezone.utc)
+            )
+            runtime_variables["send_with_sms_last_result"] = {
+                "component_ref_id": intent.get("component_ref_id"),
+                "dispatch_sequence": intent.get("dispatch_sequence"),
+                "dispatch_id": intent.get("dispatch_id"),
+                "event_type": "accepted",
+                "event_id": str(intent.get("provider_message_id") or ""),
+                "provider_status": intent.get("provider_status"),
+                "event_at": accepted_at.isoformat(),
+            }
+            workflow_meta = _ensure_workflow_meta(runtime_variables)
+            next_cursor = _read_next_cursor(runtime_variables)
+            requested_at = _parse_iso_datetime(intent.get("requested_at"))
+            if next_cursor and requested_at is not None:
+                workflow_meta["wait_for_event_activation_override"] = {
+                    "card_cursor": next_cursor,
+                    "not_before": requested_at.isoformat(),
+                    "correlation_key": correlation_key,
+                    "source_component_ref_id": intent.get("component_ref_id"),
+                }
+            changed = True
+            sms_should_resume = True
+
     for _ in range(100):
         event = await fetch_next_pending_channel_event(
             db_session,
@@ -3745,19 +3789,6 @@ async def _consume_channel_supplier_v2_events(
                 channel=channel,
             )
             changed = True
-            if blocking_stop_reason != expected_block:
-                continue
-            workflow_meta = _ensure_workflow_meta(runtime_variables)
-            next_cursor = _read_next_cursor(runtime_variables)
-            requested_at = _parse_iso_datetime(intent.get("requested_at"))
-            if next_cursor and requested_at is not None:
-                workflow_meta["wait_for_event_activation_override"] = {
-                    "card_cursor": next_cursor,
-                    "not_before": requested_at.isoformat(),
-                    "correlation_key": correlation_key,
-                    "source_component_ref_id": intent.get("component_ref_id"),
-                }
-            sms_should_resume = True
             continue
 
         if blocking_stop_reason != expected_block:
@@ -10207,6 +10238,13 @@ async def execute_workflow_m2_for_session(
             if has_pending_channel_supplier_events or (
                 blocking_stop_reason == "blocked_send_with_rcs"
                 and active_channel == "rcs"
+            ) or (
+                blocking_stop_reason == "blocked_send_with_sms"
+                and active_channel == "sms"
+                and str(active_channel_intent.get("status") or "")
+                .strip()
+                .lower()
+                == "provider_accepted"
             ):
                 channel_supplier_resume = await _consume_channel_supplier_v2_events(
                     db_session,
