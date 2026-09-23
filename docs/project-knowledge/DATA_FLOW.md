@@ -325,13 +325,15 @@ ORCH executa a revisão fixada e renderiza o card
   -> Supplier V2 revalida revisão/card/membro/marcador e persiste o outbox
   -> emissor realiza o POST ao provedor
   -> aceite explícito vira accepted; ambiguidade vira uncertain sem reenvio
-  -> sessão permanece bloqueada até callback correlacionado
+  -> ORCH reconcilia o estado durável do dispatch
+  -> accepted libera somente a saída next do card SMS
 ```
 
 O Target consulta a revisão publicada somente para comprovar que os campos
 estáticos cifrados pertencem ao card pinado; ele não renderiza o grafo nem
-escolhe destinatário. Com o Gate 2 desligado, aceite HTTP nunca libera a sessão
-e o comportamento anterior permanece integralmente preservado.
+escolhe destinatário. A rota interna de leitura expõe somente o estado durável
+e o ACK sanitizado do dispatch. Com o Gate 2 desligado, o comportamento anterior
+permanece integralmente preservado.
 
 Com `CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED=true`, o ORCH substitui os callbacks
 estáticos do card por três URLs próprias, assinadas e exclusivas do dispatch:
@@ -343,9 +345,14 @@ publica a retomada. Identificador do provedor, sessão, canal e tipo normalizado
 formam a deduplicação; callback histórico fica auditado como tardio e nunca
 reabre card ou sessão.
 
-O card SMS expõe somente `next`/`Próximo`. O primeiro callback válido libera
-essa transição; DLR, MO e status viram eventos `callback/sms_event` no inbox da
-sessão. `data.status` distingue `sent`, `delivered`, `not_delivered`,
+O card SMS expõe somente `next`/`Próximo`. O reconciliador do ORCH consulta o
+dispatch registrado e somente o estado durável `accepted` libera essa
+transição. A mudança `registered -> provider_accepted` é protegida por lock e
+compare-and-set; replay não agenda outra retomada. Estados `pending` e
+`dispatching` mantêm a sessão bloqueada; `failed` e `uncertain` são registrados
+sem fingir sucesso. DLR, MO e status não liberam mais o card: eles viram eventos
+`callback/sms_event` no inbox da sessão e pertencem ao `wait_for_event`
+seguinte. `data.status` distingue `sent`, `delivered`, `not_delivered`,
 `response`, `failed` e telemetria ainda desconhecida. O card grava uma chave
 opaca em `customs.<output_var>.correlation_key`; um `wait_for_event` seguinte
 usa essa chave para consumir somente eventos do dispatch exato, inclusive os

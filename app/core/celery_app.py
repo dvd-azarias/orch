@@ -129,6 +129,7 @@ celery_app.conf.update(
         "app.tasks.workflow.reconcile_pending_channel_events": {"queue": settings.celery_dispatch_queue},
         "app.tasks.workflow.beat_heartbeat": {"queue": settings.celery_heartbeat_queue},
         "app.tasks.workflow.advance_session": {"queue": settings.celery_execute_queue},
+        "app.tasks.workflow.resume_channel_supplier_v2_acceptance": {"queue": settings.celery_execute_queue},
         "app.tasks.workflow.link_identidade_person_mailing": {"queue": settings.celery_execute_queue},
         "app.tasks.switch_bot_flow.process_handoff": {"queue": settings.celery_switch_bot_flow_queue},
         "app.tasks.dialer_supplier_v2.register_cycle": {"queue": settings.celery_dialer_supplier_v2_queue},

@@ -110,6 +110,32 @@ class ChannelDispatchRegistrationResult:
         }
 
 
+@dataclass(frozen=True)
+class ChannelDispatchStatusResult:
+    dispatch_id: str
+    state: str
+    provider_message_id: str | None
+    provider_status: str | None
+    accepted_at: str | None
+    failed_at: str | None
+    uncertain_at: str | None
+    last_error_code: str | None
+    last_error_message: str | None
+
+    def runtime_payload(self) -> dict[str, Any]:
+        return {
+            "dispatch_id": self.dispatch_id,
+            "state": self.state,
+            "provider_message_id": self.provider_message_id,
+            "provider_status": self.provider_status,
+            "accepted_at": self.accepted_at,
+            "failed_at": self.failed_at,
+            "uncertain_at": self.uncertain_at,
+            "last_error_code": self.last_error_code,
+            "last_error_message": self.last_error_message,
+        }
+
+
 def channel_supplier_v2_enabled_for_context(
     *, settings: Settings, workspace_uuid: str, flow_uuid: str
 ) -> bool:
@@ -671,6 +697,123 @@ def register_channel_dispatch(
     )
 
 
+def get_channel_dispatch(
+    *,
+    workspace_uuid: str,
+    intent: Mapping[str, Any],
+    settings: Settings | None = None,
+) -> ChannelDispatchStatusResult:
+    resolved = settings or get_settings()
+    workspace = _required_uuid(workspace_uuid, "workspace_uuid")
+    parsed = parse_channel_dispatch_intent(intent)
+    dispatch_id = _required_uuid(parsed.get("dispatch_id"), "dispatch_id")
+    base_url = str(resolved.target_core_supplier_api_base_url or "").strip().rstrip("/")
+    bearer = str(resolved.target_core_api_bearer_token or "").strip()
+    if not base_url or not bearer:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_target_config_missing",
+            "A integração interna com o Target Core não está configurada.",
+            retryable=False,
+        )
+    req = request.Request(
+        url=f"{base_url}/v2/contact-supplier/channel-dispatches/{dispatch_id}",
+        method="GET",
+    )
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", f"Bearer {bearer}")
+    req.add_header("X-WORKSPACE-UUID", workspace)
+    status_code = 599
+    response_body = b""
+    try:
+        with request.urlopen(
+            req,
+            timeout=float(resolved.channel_supplier_v2_http_timeout_seconds),
+        ) as response:  # noqa: S310 - internal configured endpoint
+            status_code = int(response.status)
+            response_body = response.read(_MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        status_code = int(exc.code)
+        response_body = exc.read(_MAX_RESPONSE_BYTES + 1)
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_unavailable",
+            "A Supplier V2 está indisponível para consultar o dispatch.",
+            retryable=True,
+        ) from exc
+    if len(response_body) > _MAX_RESPONSE_BYTES:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_response_too_large",
+            "A resposta da Supplier V2 excedeu o limite seguro.",
+            retryable=True,
+            status_code=status_code,
+        )
+    if status_code != 200:
+        raise ChannelSupplierV2RegistrationError(
+            _extract_error_code(response_body) or "channel_supplier_v2_http_error",
+            "A Supplier V2 recusou a consulta do dispatch.",
+            retryable=status_code in _RETRYABLE_STATUS_CODES,
+            status_code=status_code,
+        )
+    try:
+        payload = json.loads(response_body.decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            raise ValueError("missing data")
+        for field in (
+            "session_uuid",
+            "flow_uuid",
+            "flow_revision_id",
+            "component_ref_id",
+            "contact_list_id",
+            "contact_list_member_id",
+            "channel",
+            "dispatch_sequence",
+            "envelope_checksum",
+        ):
+            if str(data[field]) != str(parsed[field]):
+                raise ValueError(f"mismatch:{field}")
+        if _required_uuid(data["id"], "dispatch_id") != dispatch_id:
+            raise ValueError("mismatch:id")
+        state = str(data.get("state") or "").strip().lower()
+        if state not in {"pending", "dispatching", "accepted", "failed", "uncertain"}:
+            raise ValueError("invalid state")
+    except (UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ChannelSupplierV2RegistrationError(
+            "channel_supplier_v2_invalid_response",
+            "A Supplier V2 devolveu um envelope incompatível.",
+            retryable=True,
+        ) from exc
+    return ChannelDispatchStatusResult(
+        dispatch_id=dispatch_id,
+        state=state,
+        provider_message_id=(
+            str(data.get("provider_message_id"))
+            if data.get("provider_message_id") is not None
+            else None
+        ),
+        provider_status=(
+            str(data.get("provider_status"))
+            if data.get("provider_status") is not None
+            else None
+        ),
+        accepted_at=(str(data.get("accepted_at")) if data.get("accepted_at") else None),
+        failed_at=(str(data.get("failed_at")) if data.get("failed_at") else None),
+        uncertain_at=(
+            str(data.get("uncertain_at")) if data.get("uncertain_at") else None
+        ),
+        last_error_code=(
+            str(data.get("last_error_code"))
+            if data.get("last_error_code") is not None
+            else None
+        ),
+        last_error_message=(
+            str(data.get("last_error_message"))
+            if data.get("last_error_message") is not None
+            else None
+        ),
+    )
+
+
 def _extract_error_code(response_body: bytes) -> str | None:
     try:
         payload = json.loads(response_body.decode("utf-8"))
@@ -689,6 +832,7 @@ def _extract_error_code(response_body: bytes) -> str | None:
 
 __all__ = [
     "ChannelDispatchRegistrationResult",
+    "ChannelDispatchStatusResult",
     "ChannelSupplierV2RegistrationError",
     "build_channel_dispatch_intent",
     "build_channel_dispatch_correlation_key",
@@ -698,5 +842,6 @@ __all__ = [
     "channel_supplier_v2_enabled_for_context",
     "parse_channel_callback_token",
     "parse_channel_dispatch_intent",
+    "get_channel_dispatch",
     "register_channel_dispatch",
 ]

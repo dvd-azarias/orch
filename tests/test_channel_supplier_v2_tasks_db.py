@@ -42,13 +42,28 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
             )
             now = datetime.now(timezone.utc)
             rows = [
-                (1, "pending", now - timedelta(hours=1)),
-                (2, "registering", now - timedelta(hours=2)),
-                (3, "registering", now),
-                (4, "pending_retry", now - timedelta(hours=1)),
-                (5, "pending_retry", now),
+                (1, "pending", None, None, now - timedelta(hours=1)),
+                (2, "registering", None, None, now - timedelta(hours=2)),
+                (3, "registering", None, None, now),
+                (4, "pending_retry", None, None, now - timedelta(hours=1)),
+                (5, "pending_retry", None, None, now),
+                (
+                    6,
+                    "registered",
+                    "sms",
+                    "blocked_send_with_sms",
+                    now - timedelta(minutes=30),
+                ),
+                (
+                    7,
+                    "registered",
+                    "rcs",
+                    "blocked_send_with_rcs",
+                    now - timedelta(minutes=30),
+                ),
+                (8, "registered", "sms", None, now - timedelta(minutes=30)),
             ]
-            for session_id, status, updated_at in rows:
+            for session_id, status, channel, blocking_reason, updated_at in rows:
                 await db_session.execute(
                     text(
                         """
@@ -71,7 +86,9 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
                                     "channel_dispatch_v2": {
                                         "status": status,
                                         "attempts": session_id,
-                                    }
+                                        "channel": channel,
+                                    },
+                                    "blocking_stop_reason": blocking_reason,
                                 }
                             }
                         ),
@@ -91,4 +108,5 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
                 {"id": 2, "flow_uuid": FLOW_UUID, "attempts": 2},
                 {"id": 1, "flow_uuid": FLOW_UUID, "attempts": 1},
                 {"id": 4, "flow_uuid": FLOW_UUID, "attempts": 4},
+                {"id": 6, "flow_uuid": FLOW_UUID, "attempts": 6},
             ]

@@ -41,6 +41,7 @@ _IDENTIDADE_PERSON_FLOW_LINK_LOCK_CLASS_ID = 92022
 _SOURCE_LIST_MEMBERSHIP_FLOW_LINK_LOCK_CLASS_ID = 92023
 _DIALER_SUPPLIER_V2_TERMINAL_LOCK_RETRY_MAX_SECONDS = 30
 _CHANNEL_SUPPLIER_V2_CALLBACK_LOCK_RETRY_MAX_SECONDS = 30
+_CHANNEL_SUPPLIER_V2_ACCEPTANCE_LOCK_RETRY_MAX_SECONDS = 30
 
 
 @celery_app.task(name="app.tasks.workflow.advance_session", ignore_result=True)
@@ -150,6 +151,56 @@ def resume_channel_supplier_v2_callback_task(
     )
     raise self.retry(
         exc=RuntimeError("channel_supplier_v2_callback_session_locked"),
+        countdown=countdown,
+    )
+
+
+@celery_app.task(
+    name="app.tasks.workflow.resume_channel_supplier_v2_acceptance",
+    bind=True,
+    ignore_result=True,
+    max_retries=7,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def resume_channel_supplier_v2_acceptance_task(
+    self,
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    session_id: int,
+) -> dict[str, Any]:
+    """Resume an SMS card after durable provider acceptance."""
+
+    stopped_reason = asyncio.run(
+        _advance_session_task(
+            workspace_uuid=workspace_uuid,
+            flow_uuid=flow_uuid,
+            session_id=session_id,
+        )
+    )
+    if stopped_reason != "session_execution_locked":
+        return {"status": "completed", "stopped_reason": stopped_reason}
+
+    retries = max(0, int(self.request.retries or 0))
+    countdown = min(
+        _CHANNEL_SUPPLIER_V2_ACCEPTANCE_LOCK_RETRY_MAX_SECONDS,
+        2**retries,
+    )
+    logger.warning(
+        "channel Supplier V2 acceptance resume delayed by session lock",
+        extra={
+            "event": "orch.channel_supplier_v2.acceptance_resume.retry",
+            "supplier_version": "v2",
+            "workspace_uuid": workspace_uuid,
+            "flow_uuid": flow_uuid,
+            "session_id": session_id,
+            "retry": retries + 1,
+            "countdown_seconds": countdown,
+        },
+    )
+    raise self.retry(
+        exc=RuntimeError("channel_supplier_v2_acceptance_session_locked"),
         countdown=countdown,
     )
 
