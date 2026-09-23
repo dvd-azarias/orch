@@ -156,6 +156,60 @@ def _is_permission_like_error(exc: Exception) -> bool:
     )
 
 
+def _is_missing_sftp_path_error(exc: Exception) -> bool:
+    if isinstance(exc, FileNotFoundError) or getattr(exc, "errno", None) == 2:
+        return True
+    message = str(exc or "").lower()
+    return "no such file" in message or "not found" in message or "errno 2" in message
+
+
+def _sftp_path_exists(sftp: Any, path: str) -> bool:
+    try:
+        sftp.stat(path)
+        return True
+    except Exception as exc:
+        if _is_missing_sftp_path_error(exc):
+            return False
+        raise
+
+
+def _resolved_sftp_file_name(
+    *,
+    destination_config: dict[str, Any],
+    format_config: dict[str, Any],
+    session_id: int,
+) -> str:
+    file_name = str(destination_config.get("file_name") or "export.csv").strip()
+    write_mode = str(format_config.get("write_mode") or "create").strip().lower()
+    if write_mode == "create_per_session":
+        return _append_session_suffix(file_name, session_id)
+    return file_name
+
+
+def _build_sftp_target_lock_key(
+    *,
+    destination_config: dict[str, Any],
+    format_config: dict[str, Any],
+    session_id: int,
+) -> str:
+    target_name = _resolved_sftp_file_name(
+        destination_config=destination_config,
+        format_config=format_config,
+        session_id=session_id,
+    )
+    destination_path = _safe_relpath(str(destination_config.get("path") or ""))
+    return ":".join(
+        (
+            "generate_file_target",
+            str(destination_config.get("sftp_host") or "").strip().lower(),
+            str(destination_config.get("sftp_port") or "22").strip(),
+            str(destination_config.get("sftp_user") or "").strip(),
+            destination_path,
+            target_name,
+        )
+    )
+
+
 def _build_row_buffer_payload(
     *,
     row_payload: dict[str, Any],
@@ -324,30 +378,59 @@ async def upsert_job_and_buffer_row(
     }
 
 
-async def list_due_job_ids(
+async def list_due_jobs(
     db_session: AsyncSession,
     *,
     workspace_uuid: str,
     limit: int = 200,
-) -> list[str]:
+) -> list[dict[str, str]]:
     safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
     schema = workspace_schema_from_uuid(safe_workspace_uuid).replace('"', '""')
     await db_session.execute(text(f'SET LOCAL search_path TO "{schema}"'))
     result = await db_session.execute(
         text(
             f"""
-            SELECT id::text AS id
-              FROM {JOB_TABLE}
-             WHERE active = TRUE
-               AND next_run_at IS NOT NULL
-               AND next_run_at <= NOW()
-             ORDER BY next_run_at ASC
+            SELECT j.id::text AS id, j.mode
+              FROM {JOB_TABLE} j
+             WHERE j.active = TRUE
+               AND j.next_run_at IS NOT NULL
+               AND j.next_run_at <= NOW()
+               AND (
+                    LOWER(COALESCE(j.mode, '')) <> 'imediato'
+                    OR EXISTS (
+                        SELECT 1
+                          FROM {ROW_BUFFER_TABLE} b
+                         WHERE b.job_id = j.id
+                           AND b.status IN ('pending', 'processing')
+                    )
+               )
+             ORDER BY j.next_run_at ASC
              LIMIT :limit
             """
         ),
         {"limit": max(1, min(limit, 1000))},
     )
-    return [str(row["id"]) for row in result.mappings().all()]
+    return [
+        {
+            "job_id": str(row["id"]),
+            "mode": str(row.get("mode") or "imediato").strip().lower(),
+        }
+        for row in result.mappings().all()
+    ]
+
+
+async def list_due_job_ids(
+    db_session: AsyncSession,
+    *,
+    workspace_uuid: str,
+    limit: int = 200,
+) -> list[str]:
+    due_jobs = await list_due_jobs(
+        db_session,
+        workspace_uuid=workspace_uuid,
+        limit=limit,
+    )
+    return [job["job_id"] for job in due_jobs]
 
 
 async def _load_job(
@@ -578,10 +661,12 @@ def _sftp_write(
     import paramiko
 
     destination_path = _safe_relpath(str(destination_config.get("path") or ""))
-    file_name = str(destination_config.get("file_name") or "export.csv").strip()
     write_mode = str(format_config.get("write_mode") or "create").strip().lower()
-    if write_mode == "create_per_session":
-        file_name = _append_session_suffix(file_name, session_id)
+    file_name = _resolved_sftp_file_name(
+        destination_config=destination_config,
+        format_config=format_config,
+        session_id=session_id,
+    )
     encoding = str(format_config.get("encoding") or "utf-8").strip().lower()
     line_break = str(format_config.get("line_break") or "\n")
 
@@ -601,17 +686,17 @@ def _sftp_write(
             current = ""
             for chunk in [part for part in destination_path.split("/") if part]:
                 current = f"{current}/{chunk}" if current else chunk
-                try:
-                    sftp.listdir(current)
-                except Exception:
-                    sftp.mkdir(current)
+                if not _sftp_path_exists(sftp, current):
+                    try:
+                        sftp.mkdir(current)
+                    except Exception:
+                        if not _sftp_path_exists(sftp, current):
+                            raise
 
         remote_dir = destination_path or "."
-        existing = set(sftp.listdir(remote_dir))
         target_name = file_name
-        file_exists = target_name in existing
-
         remote_file = f"{remote_dir}/{target_name}" if remote_dir != "." else target_name
+        file_exists = _sftp_path_exists(sftp, remote_file)
         payload = payload_text.encode(encoding)
 
         try:
@@ -619,9 +704,12 @@ def _sftp_write(
                 if allow_create_collision_fallback:
                     for sequence in range(1, 10_000):
                         candidate_name = _append_internal_suffix(file_name, sequence)
-                        if candidate_name in existing:
+                        candidate_remote_file = (
+                            f"{remote_dir}/{candidate_name}" if remote_dir != "." else candidate_name
+                        )
+                        if _sftp_path_exists(sftp, candidate_remote_file):
                             continue
-                        remote_file = f"{remote_dir}/{candidate_name}" if remote_dir != "." else candidate_name
+                        remote_file = candidate_remote_file
                         with sftp.open(remote_file, "wb") as file_handle:
                             file_handle.write(payload)
                         target_name = candidate_name
@@ -651,12 +739,11 @@ def _sftp_write(
             if write_mode not in {"overwrite", "append"} or not _is_permission_like_error(exc):
                 raise
 
-            refreshed_names = set(sftp.listdir(remote_dir))
             for sequence in range(1, 10_000):
                 candidate_name = _append_internal_suffix(file_name, sequence)
-                if candidate_name in refreshed_names:
-                    continue
                 candidate_remote_file = f"{remote_dir}/{candidate_name}" if remote_dir != "." else candidate_name
+                if _sftp_path_exists(sftp, candidate_remote_file):
+                    continue
                 try:
                     with sftp.open(candidate_remote_file, "wb") as file_handle:
                         file_handle.write(payload)
@@ -740,22 +827,29 @@ async def process_generate_file_job(
     if job is None:
         return {"job_id": job_id, "rows_selected": 0, "rows_sent": 0, "status": "job_not_found"}
 
-    lock_key = f"generate_file_job:{job_id}"
-    safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
-    schema = workspace_schema_from_uuid(safe_workspace_uuid).replace('"', '""')
-    await db_session.execute(text(f'SET LOCAL search_path TO "{schema}"'))
-    lock_result = await db_session.execute(
-        text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key)) AS acquired"),
-        {"lock_key": lock_key},
-    )
-    lock_row = lock_result.mappings().first() or {}
-    if not bool(lock_row.get("acquired")):
-        return {"job_id": job_id, "rows_selected": 0, "rows_sent": 0, "status": "locked"}
+    mode = str(job.get("mode") or "imediato").strip().lower()
+    is_batch_mode = mode in {"agendado", "recorrente"}
+    if is_batch_mode:
+        lock_key = f"generate_file_job:{job_id}"
+        safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
+        schema = workspace_schema_from_uuid(safe_workspace_uuid).replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{schema}"'))
+        lock_result = await db_session.execute(
+            text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key)) AS acquired"),
+            {"lock_key": lock_key},
+        )
+        lock_row = lock_result.mappings().first() or {}
+        if not bool(lock_row.get("acquired")):
+            return {"job_id": job_id, "rows_selected": 0, "rows_sent": 0, "status": "locked"}
 
-    rows = await _pick_pending_rows(db_session, workspace_uuid=workspace_uuid, job_id=job_id)
+    rows = await _pick_pending_rows(
+        db_session,
+        workspace_uuid=workspace_uuid,
+        job_id=job_id,
+        limit=500 if is_batch_mode else 1,
+    )
     if not rows:
         scheduling = job.get("scheduling_config") if isinstance(job.get("scheduling_config"), dict) else {}
-        mode = str(job.get("mode") or "imediato").strip().lower()
         if mode in {"agendado", "recorrente"}:
             await _mark_next_run(
                 db_session,
@@ -776,9 +870,6 @@ async def process_generate_file_job(
     failed_ids: list[str] = []
     last_error = ""
     last_result: dict[str, Any] | None = None
-    mode = str(job.get("mode") or "imediato").strip().lower()
-    is_batch_mode = mode in {"agendado", "recorrente"}
-
     if is_batch_mode:
         grouped_rows: dict[
             tuple[str, str, str, str, str, str],
@@ -897,6 +988,15 @@ async def process_generate_file_job(
                 payload_row, row_destination_config = _extract_row_runtime_payload(
                     payload_jsonb,
                     default_destination_config=destination_config,
+                )
+                target_lock_key = _build_sftp_target_lock_key(
+                    destination_config=row_destination_config,
+                    format_config=format_config,
+                    session_id=int(row["session_id"]),
+                )
+                await db_session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": target_lock_key},
                 )
                 text_payload = _serialize_rows(
                     format_type=format_type,

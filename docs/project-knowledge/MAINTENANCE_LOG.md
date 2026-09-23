@@ -1,5 +1,30 @@
 # Maintenance Log
 
+## 2026-09-22 — Correção de latência `generate_file` + FileApp
+
+### REQUEST / CLASSIFICATION
+
+Eliminar o atraso de 10–30 minutos no caminho `generate_file -> SFTP -> FileApp`
+do flow `652ee631-888e-46f9-843e-d80543051801`. `ALPHA_FIX_REQUIRED`, sem
+migration, nova fila ou alteração de contrato externo.
+
+### CHANGE / SAFETY
+
+- Modo imediato passa a processar uma linha por task, com lock por arquivo;
+  agendado/recorrente mantêm batch e lock por job.
+- `listdir` SFTP foi substituído por `stat`; recuperação de backlog ganhou dez
+  faixas autocontidas de dreno, sem fan-out para jobs vazios.
+- FileApp ganhou até três tentativas rápidas nas etapas 2–5, sempre no mailing
+  já criado, e observabilidade estruturada da falha final.
+
+### VALIDATION / ROLLBACK
+
+- `91 passed` na regressão ampliada; `compileall` e `git diff --check` passaram.
+- Stack local completa com filas `*_f5_local`; smokes canônicos terminaram em
+  `state=3` (`8553`, `8554`) e os processos foram encerrados ao término.
+- Rollback é somente de código. O rollout deve medir canário real e abortar em
+  caso de duplicação, aumento de erro SFTP ou p99 acima de 30 segundos.
+
 ## 2026-09-21 — Retomada do mesmo telefone após tabulação
 
 ### REQUEST / CLASSIFICATION

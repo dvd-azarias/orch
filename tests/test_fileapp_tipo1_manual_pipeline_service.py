@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from urllib.error import URLError
+import io
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -385,6 +386,107 @@ async def test_run_tipo1_manual_pipeline_fetches_field_mappings_after_patch(monk
     patch_idx = calls.index(("PATCH", "http://target-core-api.otima.io/v2/mailings/mailing-uuid-1"))
     get_mappings_idx = calls.index(("GET", "http://target-core-api.otima.io/v2/mailings/mailing-uuid-1/field-mappings"))
     assert get_mappings_idx > patch_idx
+
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_recovers_transients_without_reupload(monkeypatch) -> None:
+    calls = {"upload": 0, "patch": 0, "get_mappings": 0, "put_mappings": 0}
+    sleep_calls: list[float] = []
+
+    def _fake_download(*, url, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+        return b"CPF,telefone\n20000000000,5521975670000\n"
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        calls["upload"] += 1
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            calls["patch"] += 1
+            if calls["patch"] == 1:
+                raise HTTPError(url, 503, "unavailable", {}, io.BytesIO(b'{"detail":"busy"}'))
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            calls["get_mappings"] += 1
+            if calls["get_mappings"] == 1:
+                return 200, '{"data":{"put_suggestion":{"mappings":[]}}}'
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"is_ignored":false}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            calls["put_mappings"] += 1
+            if calls["put_mappings"] == 1:
+                return 200, '{"data":{"status":"PENDING_FIELD_MAPPING"}}'
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            return 200, '{"data":{"task_id":"import-task-1"}}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(service, "_download_file_bytes", _fake_download)
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+                "original_name": "mailing.csv",
+                "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        workspace_api_key=None,
+        defer_step7_link_flow=True,
+    )
+
+    assert result["status"] == "done"
+    assert calls == {"upload": 1, "patch": 2, "get_mappings": 2, "put_mappings": 2}
+    assert sleep_calls == [0.25, 0.25, 0.25]
+    steps = {step["step"]: step for step in result["steps"]}
+    assert steps["step4_patch_mailing"]["attempts"] == 2
+    assert steps["step3_field_mappings_get"]["attempts"] == 2
+    assert steps["step5_put_field_mappings"]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_target_core_retry_fails_fast_for_non_retryable_http_400(monkeypatch) -> None:
+    calls = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def _fake_json_request(**kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        raise HTTPError(kwargs["url"], 400, "bad request", {}, io.BytesIO(b'{"detail":"invalid"}'))
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+    monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service._json_request_with_transient_retry(
+            method="PATCH",
+            url="http://target-core-api.otima.io/v2/mailings/mailing-uuid-1",
+            headers={},
+            payload={},
+            timeout_seconds=5,
+            step="step4_patch_mailing",
+            failure_message="PATCH do mailing falhou",
+        )
+
+    assert calls["count"] == 1
+    assert sleep_calls == []
+    assert exc_info.value.step == "step4_patch_mailing"
+    assert exc_info.value.details["status_code"] == 400
+    assert exc_info.value.details["attempts"] == 1
 
 
 def test_build_file_event_mailing_identity_uses_slug_and_suffix() -> None:
