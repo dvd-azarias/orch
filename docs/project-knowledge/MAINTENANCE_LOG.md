@@ -2122,3 +2122,11 @@ Impedir que uma falha SQL depois do processamento deixe o receipt aberto sem rep
 - Testes focados de receipts/tasks: `24 passed`.
 - `git diff --check` passou.
 - Três receipts comprovadamente inconsistentes foram reparados individualmente; nenhum arquivo foi reenviado.
+
+### ROLLOUT
+
+- PR `#205` integrada no merge `9b6a7e7` e implantada em `10.1.20.237`.
+- Somente os cinco workers FileApp foram reiniciados em rolling restart; health Celery permaneceu `200` e o hash do `.env` não mudou.
+- A task de recuperação foi registrada e novos arquivos concluíram normalmente.
+- A auditoria de três horas encontrou 339/339 envios, receipts concluídos, source lists e vínculos ativos. As quatro ocorrências acima de 60 segundos eram anteriores ao deploy; os 30 receipts posteriores mais recentes concluíram em até 19,126 segundos.
+- Não houve replay, limpeza em massa ou alteração da dívida histórica de contatos.

@@ -552,7 +552,7 @@ No ORCH, o relay passou a chamar `/v5/runner/tokens/{token}/whatsapp/session`; o
 
 ## 2026-09-23 — Receipts FileApp ficaram abertos após falha SQL transitória
 
-`STATUS`: CONTENÇÃO CONCLUÍDA / FIX PREPARED
+`STATUS`: CONTENÇÃO CONCLUÍDA / FIX IMPLANTADO E VALIDADO
 
 `SEVERITY`: high
 
@@ -567,3 +567,5 @@ Uma inspeção operacional usou um GUC read-only em escopo de sessão através d
 A correção agenda uma task leve e exata quando somente a escrita terminal falha. Ela aceita apenas `completed|failed`, não sobrescreve um terminal oposto mais novo e não repete ingestão ou efeitos externos.
 
 Sob carga, a fotografia de 17:00 BRT mostrou 310/310 arquivos enviados, 310/310 receipts concluídos e 310/310 vínculos ativos em três horas. A raiz SFTP ainda continha 12.902 arquivos antigos; isso foi separado como dívida de limpeza e não autorizou replay em massa.
+
+O merge `9b6a7e7` foi implantado em `10.1.20.237` com restart rolling somente dos cinco workers FileApp e preservação do `.env`. A task `app.tasks.fileapp.recover_ingest_receipt_status` foi registrada no runtime. Na auditoria posterior, 339/339 arquivos da janela de três horas estavam enviados, com receipt `completed`, source list e vínculo ativo. As quatro latências acima de 60 segundos terminaram antes do deploy; os 30 receipts mais recentes observados depois dele concluíram em no máximo 19,126 segundos. Nenhum arquivo ou efeito downstream foi repetido.
