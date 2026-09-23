@@ -2103,3 +2103,22 @@ migration, fila, endpoint ou chamada externa.
   o `send_with_email` ser publicado em um flow controlado.
 - Após a coleta das evidências, a stack isolada foi encerrada pelo script canônico; API, workers e
   Beats terminaram reportados como `down`.
+
+## 2026-09-23 — Recuperação terminal de receipt FileApp
+
+### REQUEST / CLASSIFICATION
+
+Impedir que uma falha SQL depois do processamento deixe o receipt aberto sem repetir os efeitos FileApp. `ALPHA_FIX_REQUIRED`.
+
+### DESIGN / SAFETY
+
+- A escrita terminal normal continua no mesmo ponto do fluxo.
+- Se ela falhar, uma task dedicada recebe somente workspace, receipt, estado terminal e erro.
+- A recuperação não sobrescreve terminal oposto e usa no máximo 12 retries com delays limitados.
+- Nenhum caminho repete download, upload, importação, associação, sessão ou discagem.
+
+### VALIDATION
+
+- Testes focados de receipts/tasks: `24 passed`.
+- `git diff --check` passou.
+- Três receipts comprovadamente inconsistentes foram reparados individualmente; nenhum arquivo foi reenviado.

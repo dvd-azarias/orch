@@ -14,6 +14,7 @@ from app.tasks.fileapp_ingest_tasks import (
     _is_retryable_step6_import_conflict,
     _is_retryable_step1_upload_failure,
     _list_files_in_folder,
+    _mark_terminal_fileapp_ingest_receipt_status,
     _process_fileapp_tipo1_event_task,
     ingest_fileapp_event_task,
     process_fileapp_tipo1_event_task,
@@ -386,6 +387,76 @@ def test_process_tipo1_wrapper_marks_inflight_then_failed(monkeypatch) -> None:
 
     assert result["status"] == "failed"
     assert state_changes == ["in_flight", "failed"]
+
+
+def test_terminal_receipt_update_schedules_exact_recovery_after_db_failure(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _DummySettings:
+        celery_s3_files_ingest_queue = "orch_fileapp_ingest_events"
+
+    class _RecoveryTask:
+        id = "recovery-123"
+
+    async def _failed_update(**_kwargs):  # type: ignore[no-untyped-def]
+        return False
+
+    def _fake_apply_async(*, kwargs, queue, routing_key, countdown):  # type: ignore[no-untyped-def]
+        captured.update(
+            {
+                "kwargs": kwargs,
+                "queue": queue,
+                "routing_key": routing_key,
+                "countdown": countdown,
+            }
+        )
+        return _RecoveryTask()
+
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_status", _failed_update)
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks.get_settings", lambda: _DummySettings())
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.recover_fileapp_ingest_receipt_status_task.apply_async",
+        _fake_apply_async,
+    )
+
+    _mark_terminal_fileapp_ingest_receipt_status(
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        receipt_id=77,
+        status="completed",
+    )
+
+    assert captured == {
+        "kwargs": {
+            "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            "receipt_id": 77,
+            "status": "completed",
+            "error": None,
+        },
+        "queue": "orch_fileapp_ingest_events",
+        "routing_key": "orch_fileapp_ingest_events",
+        "countdown": 30,
+    }
+
+
+def test_terminal_receipt_update_does_not_enqueue_recovery_after_success(monkeypatch) -> None:
+    async def _successful_update(**_kwargs):  # type: ignore[no-untyped-def]
+        return True
+
+    recovery_publish = AsyncMock()
+    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_status", _successful_update)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks.recover_fileapp_ingest_receipt_status_task.apply_async",
+        recovery_publish,
+    )
+
+    _mark_terminal_fileapp_ingest_receipt_status(
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        receipt_id=77,
+        status="failed",
+        error="pipeline failed",
+    )
+
+    recovery_publish.assert_not_called()
 
 
 def test_process_tipo1_wrapper_persists_structured_failure_with_receipt(monkeypatch) -> None:
