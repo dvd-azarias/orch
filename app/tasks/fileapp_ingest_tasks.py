@@ -42,6 +42,7 @@ from app.repositories.orch_fileapp_ingest_receipts_repository import (
     claim_fileapp_ingest_receipt,
     mark_fileapp_ingest_receipt_enqueued,
     mark_fileapp_ingest_receipt_status,
+    recover_fileapp_ingest_receipt_terminal_status,
 )
 from app.services.alarm_service import persist_alarm
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
@@ -51,6 +52,7 @@ logger = get_logger(__name__)
 _RETRY_DELAYS = (30, 120, 300)
 _STEP1_UPLOAD_RETRY_DELAYS = (15, 30, 60, 120, 300, 600)
 _STEP6_IMPORT_RETRY_DELAYS = (5, 15, 30, 60, 120, 300)
+_RECEIPT_STATUS_RECOVERY_DELAYS = (30, 60, 120, 300, 600)
 
 
 async def _mark_fileapp_ingest_receipt_status(
@@ -59,7 +61,7 @@ async def _mark_fileapp_ingest_receipt_status(
     receipt_id: int,
     status: str,
     error: str | None = None,
-) -> None:
+) -> bool:
     """Best-effort receipt lifecycle update; it must never hide FileApp processing."""
     try:
         _, workspace_schema = bind_workspace_context(workspace_uuid)
@@ -72,10 +74,139 @@ async def _mark_fileapp_ingest_receipt_status(
                 error=error,
             )
             await db_session.commit()
+        return True
     except Exception:
         logger.exception(
             "fileapp ingest receipt lifecycle update failed",
             extra={"workspace_uuid": workspace_uuid, "receipt_id": receipt_id, "status": status},
+        )
+        return False
+
+
+async def _recover_fileapp_ingest_receipt_terminal_status(
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+    status: str,
+    error: str | None = None,
+) -> bool:
+    _, workspace_schema = bind_workspace_context(workspace_uuid)
+    async with get_session_factory()() as db_session:
+        await db_session.execute(text(f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'))
+        updated = await recover_fileapp_ingest_receipt_terminal_status(
+            db_session,
+            receipt_id=receipt_id,
+            status=status,
+            error=error,
+        )
+        await db_session.commit()
+    return updated
+
+
+@celery_app.task(
+    name="app.tasks.fileapp.recover_ingest_receipt_status",
+    bind=True,
+    ignore_result=True,
+    max_retries=12,
+)
+def recover_fileapp_ingest_receipt_status_task(
+    self,
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    try:
+        updated = asyncio.run(
+            _recover_fileapp_ingest_receipt_terminal_status(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                status=status,
+                error=error,
+            )
+        )
+    except Exception as exc:
+        retries = int(self.request.retries or 0)
+        countdown = _RECEIPT_STATUS_RECOVERY_DELAYS[
+            min(retries, len(_RECEIPT_STATUS_RECOVERY_DELAYS) - 1)
+        ]
+        raise self.retry(exc=exc, countdown=countdown)
+
+    if not updated:
+        logger.warning(
+            "fileapp receipt terminal recovery skipped a newer terminal state",
+            extra={
+                "event": "orch.fileapp.receipt_status_recovery.skipped",
+                "workspace_uuid": workspace_uuid,
+                "receipt_id": receipt_id,
+                "status": status,
+            },
+        )
+        return {"status": "skipped", "receipt_id": receipt_id}
+
+    logger.info(
+        "fileapp receipt terminal status recovered",
+        extra={
+            "event": "orch.fileapp.receipt_status_recovery.completed",
+            "workspace_uuid": workspace_uuid,
+            "receipt_id": receipt_id,
+            "status": status,
+        },
+    )
+    return {"status": "recovered", "receipt_id": receipt_id}
+
+
+def _mark_terminal_fileapp_ingest_receipt_status(
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+    status: str,
+    error: str | None = None,
+) -> None:
+    updated = asyncio.run(
+        _mark_fileapp_ingest_receipt_status(
+            workspace_uuid=workspace_uuid,
+            receipt_id=receipt_id,
+            status=status,
+            error=error,
+        )
+    )
+    if updated:
+        return
+
+    settings = get_settings()
+    try:
+        task = recover_fileapp_ingest_receipt_status_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "receipt_id": receipt_id,
+                "status": status,
+                "error": error,
+            },
+            queue=settings.celery_s3_files_ingest_queue,
+            routing_key=settings.celery_s3_files_ingest_queue,
+            countdown=_RECEIPT_STATUS_RECOVERY_DELAYS[0],
+        )
+        logger.warning(
+            "fileapp receipt terminal recovery scheduled",
+            extra={
+                "event": "orch.fileapp.receipt_status_recovery.scheduled",
+                "workspace_uuid": workspace_uuid,
+                "receipt_id": receipt_id,
+                "status": status,
+                "task_id": task.id,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "fileapp receipt terminal recovery publish failed",
+            extra={
+                "event": "orch.fileapp.receipt_status_recovery.publish_failed",
+                "workspace_uuid": workspace_uuid,
+                "receipt_id": receipt_id,
+                "status": status,
+            },
         )
 
 
@@ -1493,7 +1624,12 @@ def process_fileapp_tipo1_event_task(
         )
     except Exception:
         if receipt_id is not None:
-            asyncio.run(_mark_fileapp_ingest_receipt_status(workspace_uuid=workspace_uuid, receipt_id=receipt_id, status="failed", error="Tipo 1 processing task failed"))
+            _mark_terminal_fileapp_ingest_receipt_status(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                status="failed",
+                error="Tipo 1 processing task failed",
+            )
         _persist_process_tipo1_rescue_flow_state(
             workspace_uuid=workspace_uuid,
             flow_uuid=flow_uuid,
@@ -1535,13 +1671,11 @@ def process_fileapp_tipo1_event_task(
             ttl_seconds=86400,
         )
         if receipt_id is not None:
-            asyncio.run(
-                _mark_fileapp_ingest_receipt_status(
-                    workspace_uuid=workspace_uuid,
-                    receipt_id=receipt_id,
-                    status="completed" if terminal_state == "done" else "failed",
-                    error=None if terminal_state == "done" else "Tipo 1 import conflict processing failed",
-                )
+            _mark_terminal_fileapp_ingest_receipt_status(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                status="completed" if terminal_state == "done" else "failed",
+                error=None if terminal_state == "done" else "Tipo 1 import conflict processing failed",
             )
         return handled_result
     else:
@@ -1568,13 +1702,11 @@ def process_fileapp_tipo1_event_task(
                         result=result,
                     )
                 )
-            asyncio.run(
-                _mark_fileapp_ingest_receipt_status(
-                    workspace_uuid=workspace_uuid,
-                    receipt_id=receipt_id,
-                    status="completed" if terminal_state == "done" else "failed",
-                    error=failure_error,
-                )
+            _mark_terminal_fileapp_ingest_receipt_status(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                status="completed" if terminal_state == "done" else "failed",
+                error=failure_error,
             )
         return result
 
@@ -1654,13 +1786,11 @@ def process_fileapp_tipo1_event_task(
             ttl_seconds=86400,
         )
         if receipt_id is not None:
-            asyncio.run(
-                _mark_fileapp_ingest_receipt_status(
-                    workspace_uuid=workspace_uuid,
-                    receipt_id=receipt_id,
-                    status="failed",
-                    error="Tipo 1 retries exhausted",
-                )
+            _mark_terminal_fileapp_ingest_receipt_status(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                status="failed",
+                error="Tipo 1 retries exhausted",
             )
         return failed_result
 

@@ -549,3 +549,21 @@ Somente consultas read-only a `orch_sessions`, `orch_channel_events`, `orch_sess
 ### Correcao preparada
 
 No ORCH, o relay passou a chamar `/v5/runner/tokens/{token}/whatsapp/session`; o payload original, cache do token, retries, guard de `session_id` e branch de excecao permaneceram inalterados. A correcao ainda depende de deploy e novo canario E2E.
+
+## 2026-09-23 — Receipts FileApp ficaram abertos após falha SQL transitória
+
+`STATUS`: CONTENÇÃO CONCLUÍDA / FIX PREPARED
+
+`SEVERITY`: high
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`WORKSPACE`: `253148c7-a85f-42a3-bc8b-5ffd9d885efe`
+
+`FLOW`: `652ee631-888e-46f9-843e-d80543051801`
+
+Uma inspeção operacional usou um GUC read-only em escopo de sessão através do PgBouncer e contaminou conexões reutilizadas entre 10:23:55 e 10:38:20 BRT. Nove arquivos da janela foram auditados: todos possuíam downstream e arquivo em `processados`; somente três receipts ficaram abertos porque a gravação terminal falhou. Esses três receipts foram reparados para `completed`, sem replay.
+
+A correção agenda uma task leve e exata quando somente a escrita terminal falha. Ela aceita apenas `completed|failed`, não sobrescreve um terminal oposto mais novo e não repete ingestão ou efeitos externos.
+
+Sob carga, a fotografia de 17:00 BRT mostrou 310/310 arquivos enviados, 310/310 receipts concluídos e 310/310 vínculos ativos em três horas. A raiz SFTP ainda continha 12.902 arquivos antigos; isso foi separado como dívida de limpeza e não autorizou replay em massa.

@@ -107,3 +107,38 @@ async def mark_fileapp_ingest_receipt_status(
         ),
         {"receipt_id": receipt_id, "status": status, "error": error},
     )
+
+
+async def recover_fileapp_ingest_receipt_terminal_status(
+    db_session: AsyncSession,
+    *,
+    receipt_id: int,
+    status: str,
+    error: str | None = None,
+) -> bool:
+    """Persist a delayed terminal state without overwriting a newer terminal decision."""
+    if status not in {"completed", "failed"}:
+        raise ValueError("Receipt recovery accepts only completed or failed status.")
+
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_fileapp_ingest_receipts
+            SET status = :status,
+                completed_at = CASE
+                    WHEN :status = 'completed' THEN COALESCE(completed_at, NOW())
+                    ELSE completed_at
+                END,
+                last_error = :error,
+                updated_at = NOW()
+            WHERE id = :receipt_id
+              AND (
+                    status IN ('accepted', 'enqueued', 'processing')
+                    OR status = :status
+                  )
+            RETURNING id
+            """
+        ),
+        {"receipt_id": receipt_id, "status": status, "error": error},
+    )
+    return result.scalar_one_or_none() is not None

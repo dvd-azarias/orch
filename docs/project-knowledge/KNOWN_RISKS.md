@@ -24,7 +24,7 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 ## R2 — Lock Redis do pos-processamento FileApp quebrado
 
-`STATUS`: CONFIRMED STATIC
+`STATUS`: RESOLVED IN CURRENT CODE / SUPERSEDED BY CANDIDATE STARVATION
 
 `IMPACT`: high
 
@@ -32,11 +32,11 @@ Baseline estatica de 2026-08-24. Nenhum destes riscos foi corrigido durante o on
 
 `AFFECTED AREA`: FileApp reconcile post-process
 
-`DESCRIPTION`: `_try_acquire_fileapp_post_process_lock` retorna `True` apenas sem Redis e retorna implicitamente `None` com Redis; o bloco de lock ficou inalcançavel em outro helper. Candidatos sao ignorados.
+`DESCRIPTION`: historicamente, `_try_acquire_fileapp_post_process_lock` retornava `True` apenas sem Redis e retornava implicitamente `None` com Redis. O helper atual e a revisao de producao `2a1475b` retornam o resultado de `redis.set(..., nx=True)` corretamente. A auditoria de 2026-09-23 mostrou outro gap: as tasks executam, mas o recorte observado permaneceu em `candidates_scanned=0`/`moved=0` enquanto ainda existiam arquivos concluídos na raiz.
 
-`MITIGATION`: caminho principal tenta pos-processar inline; reconciliador nao pode ser considerado recovery confiavel.
+`MITIGATION`: o caminho principal continua pos-processando inline e permaneceu saudavel sob carga. O reconciliador ainda nao pode ser considerado recovery confiavel ate a selecao de candidatos ser alinhada aos arquivos fisicamente presentes na pasta monitorada.
 
-`DETECTION`: candidatos elegiveis sem movimento; reconciliador reporta zero apesar de registros; teste direto do helper retorna `None`.
+`DETECTION`: comparar arquivos fisicamente presentes, receipts/source lists e contadores `candidates_scanned`/`moved`; nao inferir falha atual do helper de lock.
 
 `V2`: helper testado sem monkeypatch e lock encapsulado.
 

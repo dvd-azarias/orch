@@ -48,6 +48,7 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     existir uma pessoa local canônica. A adoção grava
     `workflow_v2.person_adoption` e atualiza o escopo de contato sem fabricar
     membro, endereço ou `linked_actuator`; `lookup_only`/`not_found` não adotam.
+30. A escrita terminal do receipt FileApp é uma confirmação local separada dos efeitos downstream. Se ela falhar depois de a importação concluir, o ORCH deve repetir somente a atualização daquele receipt, nunca o arquivo, mailing, vínculo, sessão ou contato. A recuperação aceita apenas `completed|failed`, não sobrescreve um terminal oposto e usa a fila FileApp existente com retries limitados.
     Depois da adoção, `source_list_membership` é permitido, mas seletor e
     consumidor continuam fail-closed até existir membro contextual real.
     UUID/identificador divergente termina com
