@@ -277,3 +277,5 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `docs/project-knowledge/FLOW_SESSION_SCOPE_CONTRACT.md` — contrato normativo Person/Channel, seleção de canal, Dial Rule, validações 422 e ordem segura para retomar o canário multidialer e o flow completo.
 - `docs/project-knowledge/JOURNEY_TRACKING.md` — contrato read-only, privacidade, guardrails, UI, rollout e retorno ao flow completo do Rastreamento de Jornadas.
 - `docs/project-knowledge/CONTACT_CHANNEL_MANAGEMENT.md` — contrato, normalização, idempotência, projeção primária legada, segurança, testes e sequência de homologação do card genérico de canais.
+- `docs/project-knowledge/ORCHESTRATION_REPORTING_PLAN.md` — frente pausada aguardando o contrato da Metrics API. Persistência, consultas e UI locais foram canceladas; preservar a taxonomia e adaptar somente a futura emissão de eventos do ORCH. Não existe backfill de dados anteriores.
+- `docs/project-knowledge/METRICS_REPORTING_HANDOFF_PENDING.md` — handoff obrigatório para retomar a integração de eventos com a Metrics API sem reaproveitar indevidamente o protótipo local.

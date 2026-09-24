@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone
 from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 
-from app.core.database import get_session_factory
 from app.core.config import get_settings
-from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
+from app.core.database import get_session_factory
 from app.core.workspace import workspace_schema_from_uuid
+from app.repositories.orch_channel_reporting_repository import activate_channel_reporting
 from app.services.billing_snapshot_service import (
     backfill_billing_snapshot_outbox_batch,
     count_missing_billing_snapshots,
     rearm_exhausted_billing_snapshots,
 )
+from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
 from app.services.workspace_service import list_completed_workspaces
 
 
@@ -49,6 +50,32 @@ async def _run_migrate_workspace(workspace_uuid: str) -> int:
     print(
         f"{result.workspace_uuid} schema={result.schema} "
         f"applied={result.applied_versions} skipped={result.skipped_versions}"
+    )
+    return 0
+
+
+async def _run_reporting_activate_workspace(
+    workspace_uuid: str,
+    activated_by: str,
+) -> int:
+    operator = str(activated_by or "").strip()
+    if not operator:
+        raise ValueError("activated_by não pode ser vazio.")
+    schema = workspace_schema_from_uuid(workspace_uuid)
+    safe_schema = schema.replace('"', '""')
+    session_factory = get_session_factory()
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+            state = await activate_channel_reporting(
+                db_session,
+                activated_by=operator,
+            )
+
+    print(
+        f"workspace={workspace_uuid} schema={schema} status={state['status']} "
+        f"coverage_started_at={state['coverage_started_at']} "
+        f"newly_activated={str(bool(state['newly_activated'])).lower()}"
     )
     return 0
 
@@ -124,6 +151,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Aplica migrations do orch em um workspace específico.",
     )
     migrate_workspace_parser.add_argument("workspace_uuid", help="UUID do workspace alvo.")
+    reporting_activate_parser = subparsers.add_parser(
+        "reporting-activate-workspace",
+        help=(
+            "Ativa o reporting future-only em um workspace e fixa o instante mínimo de cobertura."
+        ),
+    )
+    reporting_activate_parser.add_argument("workspace_uuid", help="UUID do workspace alvo.")
+    reporting_activate_parser.add_argument(
+        "--activated-by",
+        required=True,
+        help="Identidade operacional responsável pelo cutover.",
+    )
     billing_backfill_parser = subparsers.add_parser(
         "billing-backfill",
         help="LEGADO: cria snapshots unitarios na outbox 0020; nao usar no billing batch.",
@@ -148,6 +187,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_migrate_all())
     if args.command == "migrate-workspace":
         return asyncio.run(_run_migrate_workspace(args.workspace_uuid))
+    if args.command == "reporting-activate-workspace":
+        return asyncio.run(
+            _run_reporting_activate_workspace(
+                args.workspace_uuid,
+                args.activated_by,
+            )
+        )
     if args.command == "billing-backfill":
         return asyncio.run(
             _run_billing_backfill(

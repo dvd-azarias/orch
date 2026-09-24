@@ -1,0 +1,78 @@
+{
+  "summary_zero_actions": {
+    "api_version": "v1",
+    "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+    "flow_uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+    "period": {
+      "from": "2026-09-24T12:00:00Z",
+      "to": "2026-09-25T00:00:00Z",
+      "timezone": "America/Sao_Paulo",
+      "time_basis": "mixed_declared_per_metric"
+    },
+    "as_of": "2026-09-24T12:00:00Z",
+    "data_quality": {
+      "coverage": "complete_since_cutover",
+      "coverage_started_at": "2026-09-24T12:00:00Z",
+      "actions": 0,
+      "warnings": []
+    },
+    "data": {
+      "sessions_started": 1,
+      "sessions_with_actions": 0,
+      "sessions_without_actions": 1,
+      "actions_requested": 0,
+      "unique_people": 0,
+      "by_channel": [],
+      "funnel": {
+        "requested": 0,
+        "provider_accepted": 0,
+        "delivered_or_connected": 0,
+        "engaged": 0
+      }
+    }
+  },
+  "action_whatsapp_read": {
+    "action_id": "29f4450c-8555-42df-9efc-37bd58eec64c",
+    "source_kind": "whatsapp_outbound",
+    "source_id": "provider-message-001",
+    "session_uuid": "c9bdbd81-fe05-4d60-9938-5ba790241ae7",
+    "flow_uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+    "flow_revision_id": "daf60ba5-79e4-4f5d-b4fb-1382e41a4ad3",
+    "component_ref_id": "5fb60096-9fb5-57a5-978b-47de921a0ae8",
+    "component_kind": "send_whatsapp_template",
+    "action_sequence": 1,
+    "channel": "whatsapp",
+    "person_uuid": "c178c9b9-a27b-4f6f-88c0-8f77fb5c718a",
+    "destination_display": "••••0806",
+    "lifecycle_status": "completed",
+    "native_outcome": "read",
+    "provider_reference": "provider-message-001",
+    "milestones": {
+      "accepted_at": null,
+      "sent_at": "2026-09-24T12:56:11Z",
+      "delivered_at": "2026-09-24T12:56:12Z",
+      "engaged_at": "2026-09-24T12:56:25Z",
+      "failed_at": null
+    },
+    "requested_at": "2026-09-24T12:56:10Z",
+    "updated_at": "2026-09-24T12:56:25Z"
+  },
+  "action_voice_attempt": {
+    "action_id": "67213058-f637-4d58-9837-8d011483f264",
+    "source_kind": "supplier_v2_dial_attempt",
+    "source_id": "67213058-f637-4d58-9837-8d011483f264",
+    "session_uuid": "c9bdbd81-fe05-4d60-9938-5ba790241ae7",
+    "flow_uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+    "flow_revision_id": "daf60ba5-79e4-4f5d-b4fb-1382e41a4ad3",
+    "component_ref_id": "c3dd47e9-5b16-5559-881f-a3a832fb13c1",
+    "component_kind": "send_with_dialer_handoff",
+    "action_sequence": 1,
+    "channel": "voice",
+    "destination_display": "••••0806",
+    "lifecycle_status": "failed",
+    "native_outcome": "technical_failure",
+    "provider_reference": "GW02-1790211217.198202",
+    "requested_at": "2026-09-24T12:53:37.721599Z",
+    "updated_at": "2026-09-24T12:53:37.782220Z"
+  }
+}
