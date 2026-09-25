@@ -45,6 +45,18 @@ Garantir mudanças de schema com segurança em ambiente multi-workspace (`ws_*`)
 - Rollback operacional e por flag, preservando dados; nao fazer `DROP` das tabelas durante incidente.
 - `0022` cria um indice regular em `orch_sessions(created_at, id)`. Como migrations rodam em transacao, medir tamanho/tempo/lock no LAB e definir timeout ou janela antes de `migrate-all`; nao aplicar cegamente em workspace volumoso.
 
+## Nota operacional — telemetria de jornadas `0023`
+
+- Cria somente sete tabelas `orch_journey_*` e seus indices; nao altera nem
+  indexa tabelas existentes.
+- A configuracao singleton nasce com `enabled=true` e `retention_days=30`, com
+  teto 30. Isso e default de produto, mas a migration isolada nao coleta dados:
+  writers e publisher pertencem a gates posteriores.
+- A cobertura por flow e criada lazy no primeiro fato novo, usando esse
+  instante como `coverage_started_at`; nao existe backfill.
+- Antes de `migrate-all`, aplicar somente no workspace HighComm, conferir as
+  sete tabelas, defaults, constraints e indices e registrar tempo/lock.
+
 ## Fluxo obrigatório para criar/alterar tabelas
 
 1. Criar novo arquivo SQL em `sql/` com próximo número sequencial (`006_...sql`, `007_...sql`, etc.).

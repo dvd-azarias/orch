@@ -447,18 +447,28 @@ mensagens/segundo, ausencia de ACK e substituicao pela maior
 
 ### Gate 2 — migrations e projecoes aditivas
 
-- [ ] Desenhar migration conforme o playbook oficial.
-- [ ] Criar cobertura/configuracao, projecao de sessoes, fatos de etapa,
+- [x] Desenhar migration conforme o playbook oficial.
+- [x] Criar cobertura/configuracao, projecao de sessoes, fatos de etapa,
   actions, eventos normalizados e estado de entrega do snapshot.
-- [ ] Criar unicidades e indices orientados a flow, periodo, sessao e canal.
-- [ ] Validar `retention_days` entre 1 e 30, com padrao/teto 30, e implementar
-  limpeza incremental sem backfill.
-- [ ] Deixar cobertura `pending` e feature flags desligadas por padrao.
-- [ ] Validar rollback sem tocar tabelas funcionais nem dados anteriores.
-- [ ] Provar que nenhuma rotina de backfill foi criada.
+- [x] Criar unicidades e indices orientados a flow, periodo, sessao e canal.
+- [x] Validar `retention_days` entre 1 e 30, com padrao/teto 30.
+- [ ] Implementar a limpeza incremental sem backfill no gate de runtime.
+- [x] Deixar a configuracao do produto ativa por padrao, com cobertura de flow
+  lazy no primeiro fato novo; a migration isolada nao possui writer.
+- [x] Validar idempotencia e rollback sem tocar tabelas funcionais nem dados
+  anteriores.
+- [x] Provar que nenhuma rotina de backfill foi criada.
+- [ ] Depois do merge, aplicar somente no workspace HighComm e validar objetos,
+  defaults, constraints e indices antes de considerar `migrate-all`.
 
-**Criterio de saida:** estruturas vazias e reversiveis, sem ativacao de
-workspace e sem alterar o comportamento das sessoes.
+**Criterio de saida:** estruturas vazias e reversiveis, defaults confirmados no
+workspace canario e nenhum comportamento de sessao alterado.
+
+**Evidencia local:** migration `0023_create_orch_journey_metrics_tables`
+executada duas vezes no mesmo schema PostgreSQL temporario sob rollback; sete
+tabelas, configuracao `enabled=true`, retencao 30, cobertura lazy ativa e
+constraint de teto 30 confirmadas. Testes estaticos e de parser/migration:
+`7 passed`. Nenhum workspace real recebeu a migration.
 
 ### Gate 3 — instrumentacao de sessao e etapas
 
