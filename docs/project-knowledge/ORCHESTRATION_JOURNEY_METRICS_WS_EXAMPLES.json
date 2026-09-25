@@ -1,5 +1,5 @@
 {
-  "contract_version": "0.2-draft",
+  "contract_version": "0.2.0",
   "delivery_semantics": {
     "source_of_truth": "orch",
     "external_message_types": [
@@ -7,7 +7,18 @@
     ],
     "retention_days_default": 30,
     "retention_days_maximum": 30,
-    "latest_snapshot_wins": true
+    "latest_snapshot_wins": true,
+    "transport": {
+      "action": "broadcast:dashboard",
+      "target_application": "metrics",
+      "room_scope": "user",
+      "flow_filter": "ui_from_payload",
+      "compression": false,
+      "payload_limit_bytes": null,
+      "rate_limit_messages_per_second": 400,
+      "ack": false,
+      "replacement_rule": "highest_snapshot_sequence"
+    }
   },
   "examples": {
     "today_snapshot": {

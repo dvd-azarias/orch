@@ -15,9 +15,9 @@ evidencia correspondente neste arquivo.
 
 ## Status atual
 
-- **Frente ativa:** Gate 1 — contrato snapshot-only com a Metrics.
-- **Ultimo gate concluido:** Gate 0 — redirecionamento, memoria e retorno,
-  encerrado em 2026-09-25 sem alteracao de runtime, banco, PDIAL ou flow.
+- **Frente ativa:** Gate 2 — migrations e projecoes aditivas.
+- **Ultimo gate concluido:** Gate 1 — contrato snapshot-only aceito pela
+  Metrics/SYNC em 2026-09-25, sem alteracao de runtime, banco, PDIAL ou flow.
 - **Classificacao:** `ALPHA_FIX_OPTIONAL`, com beneficio operacional direto
   para suporte e diagnostico. Mudancas de runtime devem permanecer pequenas,
   aditivas e protegidas.
@@ -49,10 +49,10 @@ evidencia correspondente neste arquivo.
 5. O Beat apenas agenda flows `dirty`. Persistencia de fatos, agregacao e
    envio pertencem a fronteiras dedicadas; indisponibilidade da Metrics nao
    pode impedir o andamento das sessoes.
-6. O roteamento fisico atualmente comprovado e por workspace. A separacao
-   inicial sera logica por `type` e por
-   `topic=orchestration.journey.{workspace_uuid}.{flow_uuid}`. Sala fisica
-   por flow depende de confirmacao do contrato da Metrics/SYNC.
+6. O envelope e roteado ao workspace e a sala fisica e por usuario. Nao existe
+   sala por flow; a separacao usa `type`,
+   `topic=orchestration.journey.{workspace_uuid}.{flow_uuid}` e o filtro da UI
+   sobre as dimensoes do payload.
 7. `orch_session_metrics` nao sera varrida para produzir snapshots. As
    projecoes novas existem justamente para evitar agregacao repetida sobre
    dezenas de milhoes de linhas.
@@ -61,6 +61,10 @@ evidencia correspondente neste arquivo.
 9. O transporte adota `latest-state delivery`: mudancas proximas sao
    agrupadas, somente o snapshot mais novo permanece pendente e reconexao ou
    heartbeat republicam o estado atual.
+10. O SYNC nao comprime nem declara limite formal de payload, aceita ate 400
+    mensagens/segundo, nao fornece ACK e a Metrics substitui o snapshot pela
+    maior `snapshot_sequence`. O ORCH deve impor budgets internos abaixo
+    desses limites antes do rollout.
 
 ## Funil canonico de jornada
 
@@ -415,31 +419,31 @@ primaria de acionamentos.
 
 ### Gate 1 — contrato snapshot-only com a Metrics
 
-- [ ] Congelar o envelope `broadcast:dashboard` e autenticacao SYNC.
-- [ ] Congelar `orchestration_journey_snapshot` e todos os blocos da imagem.
-- [ ] Congelar ORCH como fonte duravel, Metrics como consumidora de exibicao e
+- [x] Congelar o envelope `broadcast:dashboard` e autenticacao SYNC.
+- [x] Congelar `orchestration_journey_snapshot` e todos os blocos da imagem.
+- [x] Congelar ORCH como fonte duravel, Metrics como consumidora de exibicao e
   ausencia de fatos incrementais no contrato externo.
-- [ ] Definir sequencia, coalescencia, ACK observacional, retry, heartbeat e
+- [x] Definir sequencia, coalescencia, ausencia de ACK, retry, heartbeat e
   limite de payload.
-- [ ] Confirmar se existe sala fisica por flow; ate la, usar tipo/topico
-  logico sob o roteamento comprovado por workspace.
-- [ ] Confirmar rate limit, backpressure e regra de substituicao pela maior
+- [x] Confirmar sala fisica por usuario e filtro de flow pela UI sobre o
+  payload.
+- [x] Confirmar rate limit e regra de substituicao pela maior
   `snapshot_sequence`.
-- [ ] Congelar timezone, coortes, denominadores, desfechos, conversao,
+- [x] Congelar timezone, coortes, denominadores, desfechos, conversao,
   abandono, saude e limites de atraso/travamento.
-- [ ] Congelar retencao configuravel entre 1 e 30 dias e o comportamento de
+- [x] Congelar retencao configuravel entre 1 e 30 dias e o comportamento de
   callbacks posteriores a expiracao.
-- [ ] Validar o fixture de snapshot com a equipe da Metrics antes de escrever
+- [x] Validar o fixture de snapshot com a equipe da Metrics antes de escrever
   runtime.
 
 **Criterio de saida:** contrato versionado aceito pelos dois lados, sem
 ambiguidade de grao, periodo, sala ou idempotencia.
 
-**Proposta ORCH pronta para revisao:**
-`ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md`, com fixtures em
-`ORCHESTRATION_JOURNEY_METRICS_WS_EXAMPLES.json`. A aceitacao da Metrics e as
-cinco confirmacoes sobre envelope/sala, limite/compressao, rate limit,
-ACK observacional e schema/substituicao permanecem pendentes.
+**Resultado:** concluido em 2026-09-25. A Metrics/SYNC confirmou envelope,
+sala por usuario, ausencia de compressao/limite formal de payload, teto de 400
+mensagens/segundo, ausencia de ACK e substituicao pela maior
+`snapshot_sequence`. O contrato aceito e `0.2.0`, com fixture em
+`ORCHESTRATION_JOURNEY_METRICS_WS_EXAMPLES.json`.
 
 ### Gate 2 — migrations e projecoes aditivas
 
