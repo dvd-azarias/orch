@@ -2,7 +2,7 @@
 
 ## Estado
 
-- Versao proposta: `0.2-draft`.
+- Versao aceita: `0.2.0`.
 - Data: 2026-09-25.
 - Fonte duravel e produtora: ORCH.
 - Consumidor de visualizacao: Metrics API/UI.
@@ -12,8 +12,8 @@
 - Escopo historico: somente fatos posteriores ao `coverage_started_at` e ainda
   dentro da retencao efetiva.
 - Backfill: inexistente.
-- Gate: proposta corretiva do Gate 1; nao implementar runtime antes da
-  confirmacao dos itens em **Confirmacoes pendentes da Metrics/SYNC**.
+- Gate 1: concluido em 2026-09-25 com as confirmacoes da Metrics/SYNC.
+- Proximo gate: migrations e projecoes aditivas, ainda sem ativacao.
 
 Este documento complementa `ORCHESTRATION_REPORTING_PLAN.md`. A versao
 `0.1-draft` propunha fatos incrementais externos e persistencia pela Metrics.
@@ -131,15 +131,15 @@ Envelope de publicacao:
 }
 ```
 
-O roteamento fisico comprovado termina no workspace. A separacao por jornada
-e logica:
+O roteamento fisico termina na sala do usuario dentro do workspace. A
+separacao por jornada e logica:
 
 ```text
 topic = orchestration.journey.{workspace_uuid}.{flow_uuid}
 ```
 
-Uma sala fisica por flow somente sera adotada se a Metrics/SYNC confirmar esse
-recurso e seu contrato.
+Nao existe sala fisica por flow. O payload sempre declara o flow e a UI da
+Metrics aplica o filtro em tela.
 
 ## Contrato externo unico
 
@@ -351,17 +351,33 @@ O status nativo e preservado internamente ao lado da categoria normalizada.
   `message.payload.workspace.uuid`.
 - Dado de outro workspace nunca e aceito por fallback.
 
-## Confirmacoes pendentes da Metrics/SYNC
+## Decisoes confirmadas pela Metrics/SYNC
 
-1. O envelope `broadcast:dashboard` e o roteamento por
-   `target_workspace_uuid` estao corretos? Existe sala fisica por flow?
-2. Qual o tamanho maximo de frame/payload e a compressao suportada?
-3. Qual o limite de mensagens por segundo e como o gateway sinaliza
-   backpressure?
-4. Existe ACK correlacionado a `message_id`? Ele sera usado apenas para
-   observabilidade da entrega.
-5. A Metrics aceita `orchestration_journey_snapshot`, os campos do fixture e a
-   regra de substituicao pela maior `snapshot_sequence`?
+1. O envelope `broadcast:dashboard`, `target_application=metrics` e
+   `target_workspace_uuid` esta correto. A sala e por usuario; o filtro de
+   flow e responsabilidade da UI sobre as dimensoes do payload.
+2. O SYNC nao usa compressao e nao declara limite formal de payload. O ORCH
+   ainda deve impor budget proprio, medir bytes e impedir snapshots sem limite
+   operacional.
+3. O limite informado e `400 mensagens/segundo`. O publisher deve operar
+   abaixo do teto, coalescer mudancas e preservar margem para os demais
+   produtores.
+4. Nao existe ACK correlacionado a `message_id`. `ws.send()` sera registrado
+   apenas como tentativa aceita pelo socket; reconexao e heartbeat republicam
+   o snapshot atual.
+5. A Metrics aceita `orchestration_journey_snapshot` e substitui o estado
+   anterior quando recebe uma `snapshot_sequence` maior.
 
-O Gate 1 somente termina depois de essas cinco confirmacoes serem incorporadas
-e o fixture `0.2-draft` ser aceito pela equipe consumidora.
+Consequencias operacionais:
+
+- nao registrar status `delivered` para publicacao WebSocket;
+- nao esperar ACK nem manter uma versao intermediaria apenas por sua ausencia;
+- expor `last_socket_send_at`, erro, tentativa, dirty age e sequencias
+  construida/enviada;
+- manter snapshot por flow/janela mesmo que a sala seja por usuario;
+- usar limite interno configuravel de payload e vazao antes do rollout, ainda
+  que o SYNC nao imponha tamanho maximo formal.
+
+O Gate 1 esta encerrado. O Gate 2 pode desenhar migrations e projecoes, mas
+deve manter cobertura `pending`, flags desligadas, zero backfill e nenhuma
+ativacao de workspace.

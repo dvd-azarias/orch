@@ -2232,3 +2232,34 @@ não a Metrics, será a fonte durável da telemetria de jornadas.
   estado de entrega coalescível e novos critérios dos Gates 1–9.
 - O Gate 1 continua aberto; nenhuma migration ou implementação deve começar
   antes do aceite das cinco confirmações pela equipe consumidora.
+
+## 2026-09-25 — Gate 1 da telemetria Metrics encerrado
+
+### REQUEST / CLASSIFICATION
+
+Incorporar as respostas da Metrics/SYNC ao contrato snapshot-only e liberar o
+desenho do Gate 2. `ALPHA_FIX_OPTIONAL`, exclusivamente documental.
+
+### CONTRACT CONFIRMED
+
+- Envelope: `broadcast:dashboard`, `target_application=metrics` e
+  `target_workspace_uuid` confirmados.
+- Roteamento: sala por usuário; o flow é dimensão do payload e filtro da UI,
+  sem sala física própria.
+- Transporte: sem compressão e sem limite formal de payload; o ORCH ainda
+  deverá impor budget interno.
+- Vazão: teto informado de 400 mensagens/segundo; o publisher deverá operar
+  abaixo desse valor e coalescer mudanças.
+- Confirmação: não existe ACK; sucesso de `ws.send()` não será chamado de
+  entrega. Reconexão e heartbeat republicam o estado atual.
+- Consumo: a Metrics aceita `orchestration_journey_snapshot` e substitui o
+  estado anterior pela maior `snapshot_sequence`.
+
+### RESULT / SAFETY
+
+- O contrato foi promovido de `0.2-draft` para `0.2.0`.
+- Gate 1 concluído e Gate 2 definido como frente ativa.
+- Nenhum código, migration, banco, serviço, configuração, PDIAL ou flow foi
+  alterado.
+- Gate 2 deve criar estruturas vazias, reversíveis, `pending`, sem backfill e
+  com flags desligadas antes de qualquer ativação.
