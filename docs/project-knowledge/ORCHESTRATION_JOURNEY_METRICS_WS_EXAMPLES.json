@@ -1,0 +1,338 @@
+{
+  "contract_version": "0.1-draft",
+  "examples": {
+    "stage_entered": {
+      "action": "broadcast:dashboard",
+      "payload": {
+        "target_application": "metrics",
+        "target_workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        "message": {
+          "type": "orchestration_journey_event",
+          "topic": "orchestration.journey.ba7eb0ec-e565-447c-8c11-8f870cf72a60.f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+          "meta": {
+            "version": "1.0.0",
+            "message_id": "08a78480-1124-4a63-9e93-813c1850f293",
+            "event_id": "326c00b9-3cce-5c89-a6af-a66a2ccb48e8",
+            "stream_position": 123,
+            "occurred_at": "2026-09-25T12:00:00.000Z",
+            "recorded_at": "2026-09-25T12:00:00.100Z",
+            "sent_at": "2026-09-25T12:00:00.500Z",
+            "source_application": "orch"
+          },
+          "payload": {
+            "event_type": "stage_entered",
+            "workspace": {
+              "uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+            },
+            "flow": {
+              "uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+              "revision_id": "d7fef67f-47a8-4529-8a23-17130e88aa02",
+              "revision_version": 9
+            },
+            "session": {
+              "uuid": "7c87bd9a-a2c1-4e7f-b4f3-31cc468c6518",
+              "scope": "person"
+            },
+            "component": {
+              "ref_id": "1bc74ea1-79d3-44f0-8437-1ae500f867df",
+              "kind": "identidade"
+            },
+            "stage": {
+              "id": "identificacao",
+              "ordinal": 2,
+              "visit_number": 1,
+              "previous_id": null
+            }
+          }
+        }
+      }
+    },
+    "today_snapshot": {
+      "action": "broadcast:dashboard",
+      "payload": {
+        "target_application": "metrics",
+        "target_workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        "message": {
+          "type": "orchestration_journey_snapshot",
+          "topic": "orchestration.journey.ba7eb0ec-e565-447c-8c11-8f870cf72a60.f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+          "meta": {
+            "version": "1.0.0",
+            "message_id": "dc03a1ec-5636-4d56-97d0-1f75893935c4",
+            "snapshot_id": "64c06d82-8ca7-4c70-9494-a554816eb20b",
+            "snapshot_sequence": 42,
+            "sent_at": "2026-09-25T12:00:05.000Z",
+            "source_application": "orch"
+          },
+          "payload": {
+            "as_of": "2026-09-25T12:00:05.000Z",
+            "workspace": {
+              "uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+              "name": "HighComm"
+            },
+            "flow": {
+              "uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+              "name": "Canario multicanal Bradesco",
+              "revision_ids": [
+                "d7fef67f-47a8-4529-8a23-17130e88aa02"
+              ]
+            },
+            "window": {
+              "kind": "today",
+              "from": "2026-09-25T03:00:00.000Z",
+              "to": "2026-09-25T12:00:05.000Z",
+              "timezone": "America/Sao_Paulo"
+            },
+            "summary": {
+              "sessions_started": 10,
+              "sessions_in_progress": 2,
+              "sessions_completed": 7,
+              "sessions_abandoned": 1,
+              "sessions_stalled": 1,
+              "conversion": {
+                "value": 4,
+                "rate": 0.4,
+                "denominator": 10
+              },
+              "average_duration_seconds": 184.2
+            },
+            "active_progress": {
+              "basis": "stage_rank",
+              "sessions": 2,
+              "by_highest_stage": {
+                "entrada": 0,
+                "identificacao": 0,
+                "qualificacao": 1,
+                "abordagem": 1,
+                "proposta": 0,
+                "decisao": 0,
+                "desfecho": 0
+              }
+            },
+            "health": {
+              "precedence": [
+                "error",
+                "awaiting_intervention",
+                "stalled",
+                "delayed",
+                "normal"
+              ],
+              "delayed_after_seconds": 300,
+              "stalled_after_seconds": 600,
+              "counts": {
+                "error": 0,
+                "awaiting_intervention": 0,
+                "stalled": 1,
+                "delayed": 0,
+                "normal": 1
+              }
+            },
+            "funnel": [
+              {
+                "stage_id": "entrada",
+                "ordinal": 1,
+                "configured": false,
+                "configured_cards": 0,
+                "reached_sessions": 0,
+                "visit_count": 0,
+                "transitioned_out_sessions": 0,
+                "completed_here": 0,
+                "abandoned_here": 0,
+                "abandonment_rate": null
+              },
+              {
+                "stage_id": "identificacao",
+                "ordinal": 2,
+                "configured": true,
+                "configured_cards": 1,
+                "reached_sessions": 10,
+                "visit_count": 10,
+                "transitioned_out_sessions": 9,
+                "completed_here": 0,
+                "abandoned_here": 1,
+                "abandonment_rate": 0.1
+              },
+              {
+                "stage_id": "qualificacao",
+                "ordinal": 3,
+                "configured": true,
+                "configured_cards": 2,
+                "reached_sessions": 9,
+                "visit_count": 9,
+                "transitioned_out_sessions": 9,
+                "completed_here": 0,
+                "abandoned_here": 0,
+                "abandonment_rate": 0.0
+              },
+              {
+                "stage_id": "abordagem",
+                "ordinal": 4,
+                "configured": true,
+                "configured_cards": 10,
+                "reached_sessions": 9,
+                "visit_count": 18,
+                "transitioned_out_sessions": 7,
+                "completed_here": 0,
+                "abandoned_here": 0,
+                "abandonment_rate": 0.0
+              },
+              {
+                "stage_id": "proposta",
+                "ordinal": 5,
+                "configured": false,
+                "configured_cards": 0,
+                "reached_sessions": 0,
+                "visit_count": 0,
+                "transitioned_out_sessions": 0,
+                "completed_here": 0,
+                "abandoned_here": 0,
+                "abandonment_rate": null
+              },
+              {
+                "stage_id": "decisao",
+                "ordinal": 6,
+                "configured": false,
+                "configured_cards": 0,
+                "reached_sessions": 0,
+                "visit_count": 0,
+                "transitioned_out_sessions": 0,
+                "completed_here": 0,
+                "abandoned_here": 0,
+                "abandonment_rate": null
+              },
+              {
+                "stage_id": "desfecho",
+                "ordinal": 7,
+                "configured": true,
+                "configured_cards": 2,
+                "reached_sessions": 7,
+                "visit_count": 7,
+                "transitioned_out_sessions": 0,
+                "completed_here": 7,
+                "abandoned_here": 0,
+                "abandonment_rate": 0.0
+              }
+            ],
+            "stage_dropoffs": [
+              {
+                "stage_id": "identificacao",
+                "entered_sessions": 10,
+                "abandoned_sessions": 1,
+                "abandonment_rate": 0.1
+              }
+            ],
+            "channels": [
+              {
+                "channel": "voice",
+                "available": true,
+                "actions": 8,
+                "sessions": 6,
+                "unique_people": 6,
+                "native_outcomes": {
+                  "answered": 3,
+                  "machine": 2,
+                  "no_answer": 2,
+                  "invalid_number": 1
+                }
+              },
+              {
+                "channel": "sms",
+                "available": true,
+                "actions": 3,
+                "sessions": 3,
+                "unique_people": 3,
+                "native_outcomes": {
+                  "accepted": 3,
+                  "delivered": 2,
+                  "unknown": 1
+                }
+              },
+              {
+                "channel": "rcs",
+                "available": true,
+                "actions": 2,
+                "sessions": 2,
+                "unique_people": 2,
+                "native_outcomes": {
+                  "delivered": 1,
+                  "read": 1
+                }
+              },
+              {
+                "channel": "whatsapp",
+                "available": true,
+                "actions": 4,
+                "sessions": 4,
+                "unique_people": 4,
+                "native_outcomes": {
+                  "sent": 4,
+                  "delivered": 3,
+                  "read": 2,
+                  "failed": 1
+                }
+              },
+              {
+                "channel": "email",
+                "available": false,
+                "actions": null,
+                "sessions": null,
+                "unique_people": null,
+                "native_outcomes": null
+              }
+            ],
+            "outcomes": [
+              {
+                "id": "cpc",
+                "label": "CPC",
+                "count": 4,
+                "normalized_class": "success"
+              },
+              {
+                "id": "recado",
+                "label": "Recado",
+                "count": 2,
+                "normalized_class": "neutral"
+              },
+              {
+                "id": "improdutiva",
+                "label": "Improdutiva",
+                "count": 1,
+                "normalized_class": "unsuccessful"
+              }
+            ],
+            "duration": {
+              "sample": 7,
+              "average_seconds": 184.2,
+              "median_seconds": 160.0,
+              "p90_seconds": 310.0,
+              "p95_seconds": 355.0,
+              "buckets": {
+                "lt_60": 1,
+                "60_300": 4,
+                "300_600": 2,
+                "gte_600": 0
+              }
+            },
+            "alerts": [
+              {
+                "type": "session_stalled",
+                "severity": "warning",
+                "count": 1,
+                "threshold_seconds": 600
+              }
+            ],
+            "data_quality": {
+              "coverage": "complete_since_cutover",
+              "coverage_started_at": "2026-09-25T11:00:00.000Z",
+              "stage_coverage": {
+                "configured_cards": 15,
+                "staged_cards": 15,
+                "rate": 1.0
+              },
+              "warnings": []
+            }
+          }
+        }
+      }
+    }
+  }
+}

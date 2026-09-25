@@ -2159,3 +2159,41 @@ Impedir que uma falha SQL depois do processamento deixe o receipt aberto sem rep
 - A task de recuperação foi registrada e novos arquivos concluíram normalmente.
 - A auditoria de três horas encontrou 339/339 envios, receipts concluídos, source lists e vínculos ativos. As quatro ocorrências acima de 60 segundos eram anteriores ao deploy; os 30 receipts posteriores mais recentes concluíram em até 19,126 segundos.
 - Não houve replay, limpeza em massa ou alteração da dívida histórica de contatos.
+
+## 2026-09-25 — Redirecionamento dos relatórios para telemetria Metrics
+
+### REQUEST / CLASSIFICATION
+
+Produzir pelo ORCH os dados do dashboard de jornadas usando o transporte
+WebSocket/SYNC já empregado pelo PDIAL, sem atribuir ao PDIAL a responsabilidade
+de calcular ou publicar métricas de orquestração. `ALPHA_FIX_OPTIONAL`, aditivo,
+desligado por padrão e com retorno obrigatório ao flow canário e ao fluxo
+completo.
+
+### DECISION / SAFETY
+
+- A Metrics API e sua UI passam a ser consumidoras. A API read-only, o BFF e a
+  UI própria previstos no plano anterior deixam de ser backlog.
+- O ORCH produzirá fatos incrementais `orchestration_journey_event` e snapshots
+  `orchestration_journey_snapshot` por worker/fila dedicados e outbox durável.
+- O Beat será apenas coordenador de flows com fatos novos; não fará agregação
+  pesada nem envio direto.
+- O evento e o produtor `dialer_metrics` permanecem independentes e intocados.
+- O funil canônico usa `entrada`, `identificacao`, `qualificacao`, `abordagem`,
+  `proposta`, `decisao` e `desfecho`, resolvidos na revisão fixada da sessão.
+- Não haverá histórico, backfill ou inferência anterior ao marco zero.
+- `orch_session_metrics` não será varrida para snapshots; o volume já auditado
+  torna essa estratégia inadequada para produção.
+
+### VALIDATION
+
+- Gate 0 exclusivamente documental concluído em
+  `ORCHESTRATION_REPORTING_PLAN.md` e `PROJECT_BRAIN.md`.
+- A proposta `0.1-draft` do contrato e os exemplos JSON foram registrados em
+  `ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` e
+  `ORCHESTRATION_JOURNEY_METRICS_WS_EXAMPLES.json`; ACK, sala, tamanho e rate
+  limit dependem de aceite da Metrics/SYNC.
+- Nenhum código, migration, banco, serviço, configuração, PDIAL ou flow foi
+  alterado neste gate.
+- O Gate 1 permanece aberto para congelar o contrato bilateral com a Metrics
+  antes de qualquer instrumentação de runtime.
