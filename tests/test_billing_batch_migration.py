@@ -8,7 +8,9 @@ from app.services.migration_service import MIGRATIONS
 def test_billing_batch_migration_is_registered_after_legacy() -> None:
     versions = [version for version, _path in MIGRATIONS]
     assert "0020_create_orch_billing_usage_snapshots" in versions
-    assert versions[-1] == "0022_create_orch_billing_batch_tables"
+    assert versions.index("0022_create_orch_billing_batch_tables") > versions.index(
+        "0020_create_orch_billing_usage_snapshots"
+    )
 
 
 def test_billing_batch_migration_has_required_tables_constraints_and_indexes() -> None:

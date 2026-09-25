@@ -25,6 +25,13 @@
 | `orch_billing_events` | workspace | event store idempotente do billing batch |
 | `orch_billing_snapshots` | workspace | outbox agregado, leases, retry e payload imutavel |
 | `orch_billing_reprocess_requests` | workspace | auditoria de reprocessamento operacional |
+| `orch_journey_settings` | workspace | ativacao padrao e retencao de 1 a 30 dias da telemetria de jornadas |
+| `orch_journey_flow_coverage` | workspace | marco zero e pausa/atividade por flow |
+| `orch_journey_sessions` | workspace | projecao compacta das sessoes instrumentadas |
+| `orch_journey_stage_visits` | workspace | visitas e transicoes pelas sete etapas canonicas |
+| `orch_journey_channel_actions` | workspace | uma tentativa externa real por acionamento |
+| `orch_journey_channel_action_events` | workspace | ciclo de vida normalizado de cada acionamento |
+| `orch_journey_snapshot_delivery` | workspace | snapshot mais recente e estado coalescivel de publicacao WS |
 | `orch_alembic_version` | workspace | controle de migrations do ORCH |
 | `target.orch_flow_aliases` | central | alias curto para workspace/flow |
 
@@ -41,13 +48,18 @@
 
 ## Migrations
 
-Lista executavel: `0001` a `0015`, depois `0018` a `0022`.
+Lista executavel: `0001` a `0015`, depois `0018` a `0023`.
 
 - `0016/0017` permanecem como arquivos historicos, mas foram retiradas do pipeline porque alteravam enum de outro sistema.
 - Todas as pendencias de um workspace rodam numa transacao.
 - `migrate-all` percorre workspaces `completed` sequencialmente; falha interrompe os seguintes, sem reverter workspaces ja concluidos.
 - Nao ha checksum, head unico, lock de migracao ou detector de drift de arquivo.
 - `0022` cria `idx_orch_sessions_billing_created_at (created_at, id)` para evitar full scan do billing. Como o pipeline e transacional, o build nao usa `CONCURRENTLY` e exige medicao no LAB/janela operacional para workspaces grandes.
+- `0023` cria somente sete objetos `orch_journey_*` e seus indices. Nao altera
+  nem indexa tabelas existentes. `orch_journey_settings` nasce com
+  `enabled=true` e retencao 30; a cobertura de flow e criada de forma lazy no
+  primeiro fato novo, sem backfill. A migration ainda depende de merge e
+  aplicacao controlada no workspace HighComm.
 - O parser SQL e simples e nao suporta genericamente dollar-quoted blocks.
 - Paths de SQL sao relativos ao diretorio de execucao.
 

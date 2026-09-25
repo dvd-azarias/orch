@@ -2263,3 +2263,37 @@ desenho do Gate 2. `ALPHA_FIX_OPTIONAL`, exclusivamente documental.
   alterado.
 - Gate 2 deve criar estruturas vazias, reversíveis, `pending`, sem backfill e
   com flags desligadas antes de qualquer ativação.
+
+## 2026-09-25 — Gate 2 local: schema da telemetria de jornadas
+
+### REQUEST / CLASSIFICATION
+
+Criar a persistência aditiva que tornará o ORCH fonte durável dos snapshots de
+jornada. `ALPHA_FIX_OPTIONAL`; migration sem writer, task, serviço ou ativação
+de banco real nesta entrega.
+
+### DESIGN / SAFETY
+
+- Migration `0023` cria sete tabelas `orch_journey_*`: configuração, cobertura
+  por flow, projeção de sessão, visitas de etapa, actions, eventos de action e
+  estado coalescível de snapshot.
+- `orch_journey_settings` nasce com `enabled=true`, retenção 30 e constraint
+  entre 1 e 30 dias.
+- A cobertura do flow nasce lazy, `active`, no primeiro fato novo; como ainda
+  não existe writer, a migration isolada não inicia coleta ou publicação.
+- Nenhuma tabela existente é alterada ou recebe índice novo. Não existe
+  backfill, scan de `orch_session_metrics`, publisher, worker ou callback.
+- Etapa e ordinal possuem mapping rígido; loops usam `visit_number`; action é
+  tentativa externa real; snapshot registra apenas `last_socket_send_at`, pois
+  o SYNC não fornece ACK.
+
+### VALIDATION / NEXT
+
+- Migration executada duas vezes no mesmo schema PostgreSQL temporário e
+  revertida integralmente.
+- Sete tabelas, defaults ativos, teto de retenção, inserção de sessão/visita,
+  action/evento e snapshot foram comprovados: `7 passed` na regressão focada.
+- `py_compile` e `git diff --check` passaram.
+- Nenhum workspace real foi migrado. Após merge, aplicar somente no workspace
+  HighComm, validar catálogo/constraints/índices e só então decidir sobre
+  `migrate-all`.
