@@ -2197,3 +2197,38 @@ completo.
   alterado neste gate.
 - O Gate 1 permanece aberto para congelar o contrato bilateral com a Metrics
   antes de qualquer instrumentação de runtime.
+
+## 2026-09-25 — Correção snapshot-only da telemetria Metrics
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a fronteira de persistência antes de iniciar migrations: o ORCH, e
+não a Metrics, será a fonte durável da telemetria de jornadas.
+`ALPHA_FIX_OPTIONAL`, exclusivamente documental neste gate.
+
+### DECISION / SAFETY
+
+- Fatos normalizados de sessão, etapa, acionamento e evento permanecem dentro
+  do ORCH por período configurável entre 1 e 30 dias, com padrão e teto 30.
+- O único contrato externo passa a ser
+  `orchestration_journey_snapshot`; a proposta externa
+  `orchestration_journey_event` foi retirada antes de qualquer runtime.
+- A entrega usa estado coalescível por flow/janela: somente a versão mais nova
+  precisa permanecer pendente. Reconexão e heartbeat republicam o snapshot
+  reconstruído das projeções duráveis.
+- A Metrics apenas apresenta o último snapshot. Ela não precisa persistir
+  fatos, deduplicar callbacks ou reconstruir períodos.
+- ACK passa a ser observacional, não requisito de integridade. Permanecem cinco
+  confirmações do SYNC/Metrics: envelope/sala, tamanho/compressão, rate limit e
+  backpressure, ACK e aceite do schema/substituição por sequência.
+- PDIAL, `dialer_metrics`, runtime, banco, configuração, serviços e flows
+  permanecem intocados.
+
+### VALIDATION
+
+- Contrato e fixture atualizados para `0.2-draft` e sem mensagem incremental
+  externa.
+- Plano mestre ajustado para retenção, limpeza incremental, latest-state,
+  estado de entrega coalescível e novos critérios dos Gates 1–9.
+- O Gate 1 continua aberto; nenhuma migration ou implementação deve começar
+  antes do aceite das cinco confirmações pela equipe consumidora.

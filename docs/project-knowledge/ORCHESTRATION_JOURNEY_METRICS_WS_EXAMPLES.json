@@ -1,52 +1,15 @@
 {
-  "contract_version": "0.1-draft",
+  "contract_version": "0.2-draft",
+  "delivery_semantics": {
+    "source_of_truth": "orch",
+    "external_message_types": [
+      "orchestration_journey_snapshot"
+    ],
+    "retention_days_default": 30,
+    "retention_days_maximum": 30,
+    "latest_snapshot_wins": true
+  },
   "examples": {
-    "stage_entered": {
-      "action": "broadcast:dashboard",
-      "payload": {
-        "target_application": "metrics",
-        "target_workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
-        "message": {
-          "type": "orchestration_journey_event",
-          "topic": "orchestration.journey.ba7eb0ec-e565-447c-8c11-8f870cf72a60.f77b70f0-849b-4d11-9ccc-449b3c4ba981",
-          "meta": {
-            "version": "1.0.0",
-            "message_id": "08a78480-1124-4a63-9e93-813c1850f293",
-            "event_id": "326c00b9-3cce-5c89-a6af-a66a2ccb48e8",
-            "stream_position": 123,
-            "occurred_at": "2026-09-25T12:00:00.000Z",
-            "recorded_at": "2026-09-25T12:00:00.100Z",
-            "sent_at": "2026-09-25T12:00:00.500Z",
-            "source_application": "orch"
-          },
-          "payload": {
-            "event_type": "stage_entered",
-            "workspace": {
-              "uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
-            },
-            "flow": {
-              "uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
-              "revision_id": "d7fef67f-47a8-4529-8a23-17130e88aa02",
-              "revision_version": 9
-            },
-            "session": {
-              "uuid": "7c87bd9a-a2c1-4e7f-b4f3-31cc468c6518",
-              "scope": "person"
-            },
-            "component": {
-              "ref_id": "1bc74ea1-79d3-44f0-8437-1ae500f867df",
-              "kind": "identidade"
-            },
-            "stage": {
-              "id": "identificacao",
-              "ordinal": 2,
-              "visit_number": 1,
-              "previous_id": null
-            }
-          }
-        }
-      }
-    },
     "today_snapshot": {
       "action": "broadcast:dashboard",
       "payload": {
@@ -56,15 +19,16 @@
           "type": "orchestration_journey_snapshot",
           "topic": "orchestration.journey.ba7eb0ec-e565-447c-8c11-8f870cf72a60.f77b70f0-849b-4d11-9ccc-449b3c4ba981",
           "meta": {
-            "version": "1.0.0",
+            "version": "0.2.0",
             "message_id": "dc03a1ec-5636-4d56-97d0-1f75893935c4",
             "snapshot_id": "64c06d82-8ca7-4c70-9494-a554816eb20b",
             "snapshot_sequence": 42,
             "sent_at": "2026-09-25T12:00:05.000Z",
-            "source_application": "orch"
+            "source_application": "orch",
+            "generated_at": "2026-09-25T12:00:04.900Z"
           },
           "payload": {
-            "as_of": "2026-09-25T12:00:05.000Z",
+            "as_of": "2026-09-25T12:00:04.900Z",
             "workspace": {
               "uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
               "name": "HighComm"
@@ -79,7 +43,7 @@
             "window": {
               "kind": "today",
               "from": "2026-09-25T03:00:00.000Z",
-              "to": "2026-09-25T12:00:05.000Z",
+              "to": "2026-09-25T12:00:04.900Z",
               "timezone": "America/Sao_Paulo"
             },
             "summary": {
@@ -161,7 +125,7 @@
                 "transitioned_out_sessions": 9,
                 "completed_here": 0,
                 "abandoned_here": 0,
-                "abandonment_rate": 0.0
+                "abandonment_rate": 0
               },
               {
                 "stage_id": "abordagem",
@@ -173,7 +137,7 @@
                 "transitioned_out_sessions": 7,
                 "completed_here": 0,
                 "abandoned_here": 0,
-                "abandonment_rate": 0.0
+                "abandonment_rate": 0
               },
               {
                 "stage_id": "proposta",
@@ -209,7 +173,7 @@
                 "transitioned_out_sessions": 0,
                 "completed_here": 7,
                 "abandoned_here": 0,
-                "abandonment_rate": 0.0
+                "abandonment_rate": 0
               }
             ],
             "stage_dropoffs": [
@@ -302,9 +266,9 @@
             "duration": {
               "sample": 7,
               "average_seconds": 184.2,
-              "median_seconds": 160.0,
-              "p90_seconds": 310.0,
-              "p95_seconds": 355.0,
+              "median_seconds": 160,
+              "p90_seconds": 310,
+              "p95_seconds": 355,
               "buckets": {
                 "lt_60": 1,
                 "60_300": 4,
@@ -326,10 +290,39 @@
               "stage_coverage": {
                 "configured_cards": 15,
                 "staged_cards": 15,
-                "rate": 1.0
+                "rate": 1
               },
-              "warnings": []
-            }
+              "warnings": [],
+              "retention_complete": true
+            },
+            "retention": {
+              "retention_days": 30,
+              "maximum_days": 30,
+              "coverage_started_at": "2026-09-25T11:00:00.000Z",
+              "oldest_available_at": "2026-09-25T11:00:00.000Z"
+            },
+            "time_series": [
+              {
+                "from": "2026-09-25T10:00:00.000-03:00",
+                "to": "2026-09-25T11:00:00.000-03:00",
+                "timezone": "America/Sao_Paulo",
+                "granularity": "hour",
+                "sessions_started": 0,
+                "sessions_completed": 0,
+                "actions": 0,
+                "conversions": 0
+              },
+              {
+                "from": "2026-09-25T11:00:00.000-03:00",
+                "to": "2026-09-25T12:00:00.000-03:00",
+                "timezone": "America/Sao_Paulo",
+                "granularity": "hour",
+                "sessions_started": 10,
+                "sessions_completed": 7,
+                "actions": 17,
+                "conversions": 4
+              }
+            ]
           }
         }
       }

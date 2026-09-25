@@ -2,27 +2,92 @@
 
 ## Estado
 
-- Versao proposta: `0.1-draft`.
+- Versao proposta: `0.2-draft`.
 - Data: 2026-09-25.
-- Produtor: ORCH.
-- Consumidor: Metrics API/UI.
+- Fonte duravel e produtora: ORCH.
+- Consumidor de visualizacao: Metrics API/UI.
 - Transporte: WebSocket SYNC ja usado por `dialer_metrics`.
-- Escopo: somente fatos posteriores ao `coverage_started_at` do workspace.
-- Historico/backfill: inexistente.
-- Gate: proposta do Gate 1; nao implementar runtime antes da confirmacao dos
-  itens em **Decisoes pendentes da Metrics/SYNC**.
+- Contrato externo: somente `orchestration_journey_snapshot`.
+- Retencao ORCH: configuravel por workspace entre 1 e 30 dias; padrao 30.
+- Escopo historico: somente fatos posteriores ao `coverage_started_at` e ainda
+  dentro da retencao efetiva.
+- Backfill: inexistente.
+- Gate: proposta corretiva do Gate 1; nao implementar runtime antes da
+  confirmacao dos itens em **Confirmacoes pendentes da Metrics/SYNC**.
 
-Este documento complementa `ORCHESTRATION_REPORTING_PLAN.md`. O contrato REST
-anterior permanece referencia de graos e canais, mas nao e uma entrega ativa.
+Este documento complementa `ORCHESTRATION_REPORTING_PLAN.md`. A versao
+`0.1-draft` propunha fatos incrementais externos e persistencia pela Metrics.
+Essa fronteira foi substituida: o ORCH guarda os fatos e a Metrics apenas
+recebe uma projecao pronta para exibicao.
+
+O contrato REST anterior permanece referencia historica de graos e canais,
+mas nao e uma entrega ativa.
 
 ## Fronteira de responsabilidade
 
-- O ORCH registra fatos duraveis, gera snapshots e publica mensagens.
-- O Beat somente agenda flows com dados novos.
-- Um worker e uma fila exclusivos drenam a outbox.
-- A Metrics deduplica, persiste, agrega periodos arbitrarios e serve sua UI.
-- O PDIAL nao calcula, agenda ou publica telemetria de jornada.
-- `dialer_metrics` permanece independente e inalterado.
+### ORCH
+
+- persiste fatos normalizados de sessao, etapa, acionamento e evento de canal;
+- aplica marco zero, retencao, limpeza e isolamento por workspace;
+- mantem projecoes compactas e calcula snapshots deterministas;
+- marca flows alterados como `dirty` e agrupa mudancas proximas;
+- publica e republica o snapshot mais recente;
+- conserva toda a verdade necessaria para reconstruir o snapshot enquanto os
+  fatos estiverem dentro da retencao.
+
+### Metrics/UI
+
+- recebe snapshots prontos pelo SYNC;
+- exibe o snapshot mais novo de cada workspace/flow/janela;
+- nao precisa persistir fatos, reconstruir jornadas, tratar callbacks tardios
+  ou deduplicar eventos internos;
+- descarta snapshots antigos quando receber uma sequencia maior.
+
+### SYNC
+
+- autentica e transporta o envelope ate a Metrics;
+- nao e fonte da verdade nem mecanismo de retencao;
+- suas confirmacoes e limites servem para operacao do publisher, nao para
+  integridade dos fatos.
+
+O PDIAL nao calcula, agenda ou publica telemetria de jornada. O produtor e o
+evento `dialer_metrics` permanecem independentes e inalterados.
+
+## Persistencia interna e retencao
+
+Os fatos internos nao sao mensagens WebSocket. O desenho minimo contempla:
+
+- cobertura/configuracao do workspace;
+- projecao compacta de cada sessao;
+- visitas e transicoes de etapa;
+- uma action por tentativa externa real;
+- eventos normalizados ligados a action;
+- estado de agregacao e entrega do snapshot por flow/janela.
+
+Politica de retencao:
+
+1. `retention_days` e configuravel por workspace entre `1` e `30`.
+2. O valor padrao e `30`.
+3. O limite absoluto de `30` deve existir em validacao e configuracao de
+   seguranca; nenhum workspace o amplia silenciosamente.
+4. Reduzir a retencao torna os fatos excedentes elegiveis para limpeza.
+5. Aumentar a retencao nao recria dados ja removidos e nao executa backfill.
+6. Limpeza ocorre em lotes pequenos, com indice temporal, sem bloquear o
+   runtime funcional.
+7. O marco `coverage_started_at` nunca e apagado pela limpeza.
+8. O snapshot declara `oldest_available_at`, `retention_days` e eventuais
+   lacunas em `data_quality`.
+9. Callback tardio referente a action ja expirada nao recria historia; ele e
+   descartado da telemetria com contador/alarme diagnostico, sem alterar a
+   decisao funcional do canal.
+
+Os relogios canonicos continuam separados:
+
+- sessao: inicio efetivo da sessao;
+- etapa: instante da entrada/saida registrada;
+- action: instante da tentativa real;
+- evento de canal: ocorrido, recebido e processado;
+- snapshot: `as_of`, `generated_at` e `sent_at`.
 
 ## Transporte comprovado
 
@@ -76,107 +141,40 @@ topic = orchestration.journey.{workspace_uuid}.{flow_uuid}
 Uma sala fisica por flow somente sera adotada se a Metrics/SYNC confirmar esse
 recurso e seu contrato.
 
-## Contratos complementares
-
-### `orchestration_journey_event`
-
-Fato incremental e imutavel. Permite historico, filtros arbitrarios e
-reprocessamento idempotente.
-
-```json
-{
-  "type": "orchestration_journey_event",
-  "topic": "orchestration.journey.<workspace_uuid>.<flow_uuid>",
-  "meta": {
-    "version": "1.0.0",
-    "message_id": "<uuid>",
-    "event_id": "<uuid-deterministico>",
-    "stream_position": 123,
-    "occurred_at": "2026-09-25T12:00:00.000Z",
-    "recorded_at": "2026-09-25T12:00:00.100Z",
-    "sent_at": "2026-09-25T12:00:00.500Z",
-    "source_application": "orch"
-  },
-  "payload": {
-    "event_type": "stage_entered",
-    "workspace": {"uuid": "<workspace_uuid>"},
-    "flow": {
-      "uuid": "<flow_uuid>",
-      "revision_id": "<revision_uuid>",
-      "revision_version": 9
-    },
-    "session": {
-      "uuid": "<session_uuid>",
-      "scope": "person"
-    },
-    "component": {
-      "ref_id": "<component_ref_id>",
-      "kind": "identidade"
-    },
-    "stage": {
-      "id": "identificacao",
-      "ordinal": 2,
-      "visit_number": 1,
-      "previous_id": "entrada"
-    }
-  }
-}
-```
-
-Tipos iniciais:
-
-- `session_started`;
-- `stage_entered`;
-- `session_waiting`;
-- `session_resumed`;
-- `session_completed`;
-- `session_abandoned`;
-- `session_failed`;
-- `channel_action_created`;
-- `channel_action_status_changed`.
-
-`stage_entered` carrega a etapa anterior e torna desnecessario emitir um
-segundo fato `stage_transitioned`. Uma nova visita ao mesmo card/etapa recebe
-novo `visit_number`, mas a Metrics conta a sessao apenas uma vez em
-`reached_sessions`.
-
-Identidade proposta do evento:
-
-```text
-UUIDv5(
-  workspace_uuid,
-  source_kind + source_id + event_type + native_status + visit_or_sequence
-)
-```
-
-O `stream_position` e crescente no workspace e pode conter lacunas. Ordem de
-negocio usa `occurred_at`; diagnostico preserva `recorded_at` e `sent_at`.
+## Contrato externo unico
 
 ### `orchestration_journey_snapshot`
 
-Estado agregado para carga inicial, reconciliacao e heartbeat. Nao substitui
-os fatos incrementais.
+Estado agregado, reconstruivel e substituivel. Nao transporta os fatos internos
+nem exige que a Metrics mantenha um event store.
 
 ```json
 {
   "type": "orchestration_journey_snapshot",
   "topic": "orchestration.journey.<workspace_uuid>.<flow_uuid>",
   "meta": {
-    "version": "1.0.0",
+    "version": "0.2.0",
     "message_id": "<uuid>",
     "snapshot_id": "<uuid>",
     "snapshot_sequence": 42,
+    "generated_at": "2026-09-25T12:00:04.900Z",
     "sent_at": "2026-09-25T12:00:05.000Z",
     "source_application": "orch"
   },
   "payload": {
-    "as_of": "2026-09-25T12:00:05.000Z",
+    "as_of": "2026-09-25T12:00:04.900Z",
     "workspace": {"uuid": "<workspace_uuid>"},
     "flow": {"uuid": "<flow_uuid>", "name": "<flow_name>"},
+    "retention": {
+      "retention_days": 30,
+      "maximum_days": 30,
+      "coverage_started_at": "2026-09-25T11:00:00.000Z",
+      "oldest_available_at": "2026-09-25T11:00:00.000Z"
+    },
     "window": {
       "kind": "today",
       "from": "2026-09-25T03:00:00.000Z",
-      "to": "2026-09-25T12:00:05.000Z",
+      "to": "2026-09-25T12:00:04.900Z",
       "timezone": "America/Sao_Paulo"
     },
     "summary": {},
@@ -187,15 +185,47 @@ os fatos incrementais.
     "channels": [],
     "outcomes": [],
     "duration": {},
+    "time_series": [],
     "alerts": [],
     "data_quality": {}
   }
 }
 ```
 
-O snapshot inicial usa a janela `today`. Periodos customizados, ontem, 7 e 30
-dias sao calculados pela Metrics sobre os fatos persistidos, e nao geram uma
-combinacao infinita de snapshots no ORCH.
+Cada snapshot representa uma janela declarada. A primeira entrega usa `today`
+para acompanhamento operacional. Janelas adicionais de ate 30 dias somente
+serao habilitadas depois de medir custo e tamanho. Para filtros de calendario,
+o snapshot pode carregar buckets fechados em `time_series`; nao publica linhas
+individuais de pessoa, address, mensagem ou sessao.
+
+O contrato de uma eventual solicitacao sob demanda nao faz parte desta versao.
+Sem contrato de request pelo SYNC, o ORCH publica apenas as janelas configuradas
+e nao tenta antecipar combinacoes arbitrarias de filtros.
+
+## Semantica de entrega
+
+O objetivo e **latest-state delivery**, nao entrega duravel de cada mutacao:
+
+1. uma gravacao interna marca o flow/janela como `dirty`;
+2. mudancas proximas sao agrupadas por um debounce curto;
+3. o worker constroi o snapshot a partir das projecoes duraveis;
+4. `snapshot_sequence` cresce monotonicamente por workspace/flow/janela;
+5. somente o snapshot mais novo precisa permanecer pendente;
+6. nova mudanca substitui uma versao ainda nao enviada;
+7. desconexao, restart ou heartbeat republicam o estado atual;
+8. falha de WebSocket nunca bloqueia nem reverte a sessao funcional.
+
+Nao existe outbox imutavel por evento externo. O estado de entrega conserva no
+minimo `dirty_since`, versao construida, versao enviada, ultima tentativa,
+proxima tentativa, erro e lease. O snapshot e sempre reconstruivel do banco.
+
+`ws.send()` bem-sucedido comprova apenas aceite pelo socket local. Um ACK
+correlacionado a `message_id`, se existir, melhora observabilidade; sua ausencia
+nao causa perda de dados porque o snapshot atual e republicado periodicamente.
+
+A Metrics deve substituir o snapshot corrente somente quando receber uma
+`snapshot_sequence` maior para a mesma chave
+`workspace + flow + window.kind + window.from + timezone`.
 
 ## Sete etapas canonicas
 
@@ -224,7 +254,7 @@ Cada item de `funnel` inclui:
 Etapa nao usada na revisao aparece com `configured=false` e zero. Etapa usada,
 mas sem sessao no periodo, aparece com `configured=true` e zero.
 
-## Semantica dos blocos do snapshot
+## Semantica dos blocos
 
 ### `summary`
 
@@ -243,8 +273,8 @@ exclusivos. Todo indicador declara denominador.
 ### `active_progress`
 
 Para grafos com branches e loops, o ORCH nao inventa percentual por numero de
-cards. Cada sessao publica `current_stage`, `highest_stage` e
-`basis=stage_rank`. Se a UI representar percentual, deve declarar essa base.
+cards. Cada sessao contribui com etapa atual e maior etapa. A agregacao declara
+`basis=stage_rank`.
 
 ### `health`
 
@@ -261,27 +291,28 @@ Esperar callback automatico nao significa intervencao humana. Os thresholds
 
 ### `channels`
 
-O grao e tentativa externa real:
+O grao interno e tentativa externa real:
 
 - WhatsApp: uma mensagem outbound;
 - SMS/RCS: um dispatch V2;
 - Voz: uma tentativa de discagem;
 - E-mail: `available=false` ate existir emissor homologado.
 
-Cada canal informa `actions`, `sessions`, `unique_people`, estados nativos,
-marcos cumulativos, falhas e desconhecidos. Card visitado nao cria action.
+Cada canal informa contagens de actions, sessoes, pessoas pseudonimizadas,
+estados nativos, marcos cumulativos, falhas e desconhecidos. Card visitado nao
+cria action.
 
 ### `outcomes`
 
 Colecao dinamica; nao codificar `acordo`, `recusa` ou `recado` globalmente.
-Prioridade proposta:
+Prioridade:
 
 1. resultado explicito de `finish_flow`;
 2. tabulacao/disposicao normalizada;
 3. falha ou abandono;
 4. `unknown`.
 
-O status nativo e preservado ao lado da categoria normalizada.
+O status nativo e preservado internamente ao lado da categoria normalizada.
 
 ### `duration`
 
@@ -290,48 +321,47 @@ O status nativo e preservado ao lado da categoria normalizada.
 - opcionalmente permanencia por etapa;
 - amostra e denominador obrigatorios.
 
+### `time_series`
+
+- buckets agregados dentro da janela;
+- timezone e granularidade declarados;
+- buckets semiabertos `[from, to)`;
+- somente medidas aditivas podem ser somadas pela UI;
+- percentis e medias de janelas diferentes nunca sao combinados pela UI sem
+  numerador/amostra suficiente.
+
 ### `alerts`
 
 - sem progresso alem do threshold;
 - espera humana acima do threshold;
 - erro tecnico terminal ou recorrente;
 - repeticao anormal de identificacao/etapa;
-- backlog ou atraso de publicacao da propria telemetria.
+- atraso de agregacao/publicacao;
+- callback recebido depois da expiracao dos fatos relacionados.
 
 ## Privacidade e isolamento
 
 - Nenhum texto de mensagem, prompt, corpo, token, segredo ou payload bruto.
 - Nenhum address em claro.
-- `person_uuid` somente se o contrato Metrics exigir; para distinct count,
-  preferir identificador pseudonimizado com sal por workspace.
-- Toda mensagem declara workspace, flow e revisao.
+- Snapshot agregado nao lista `person_uuid` nem `session_uuid`.
+- Distinct count usa identificador pseudonimizado com sal por workspace apenas
+  dentro do ORCH; o identificador nao precisa ser publicado.
+- Toda mensagem declara workspace, flow e revisoes cobertas.
 - Consumidor deve rejeitar divergencia entre `target_workspace_uuid` externo e
   `message.payload.workspace.uuid`.
 - Dado de outro workspace nunca e aceito por fallback.
 
-## Entrega, ACK e idempotencia
+## Confirmacoes pendentes da Metrics/SYNC
 
-- Outbox preserva payload imutavel e publica `at-least-once`.
-- Metrics deduplica evento por `event_id`.
-- Snapshot mais novo substitui o anterior pela maior `snapshot_sequence` do
-  mesmo workspace/flow/janela.
-- Socket `send()` bem-sucedido nao comprova consumo. A linha so pode ser
-  confirmada definitivamente com ACK correlacionado a `message_id`; sem ACK,
-  o contrato deve definir retencao/reconciliacao explicita.
-- Evento atrasado atualiza o periodo de `occurred_at`, preservando os demais
-  relogios; nunca e silenciosamente movido para `received_at`.
+1. O envelope `broadcast:dashboard` e o roteamento por
+   `target_workspace_uuid` estao corretos? Existe sala fisica por flow?
+2. Qual o tamanho maximo de frame/payload e a compressao suportada?
+3. Qual o limite de mensagens por segundo e como o gateway sinaliza
+   backpressure?
+4. Existe ACK correlacionado a `message_id`? Ele sera usado apenas para
+   observabilidade da entrega.
+5. A Metrics aceita `orchestration_journey_snapshot`, os campos do fixture e a
+   regra de substituicao pela maior `snapshot_sequence`?
 
-## Decisoes pendentes da Metrics/SYNC
-
-1. Existe ACK de `broadcast:dashboard` por `message_id`? Qual o envelope?
-2. Existe sala fisica ou assinatura por flow, ou somente por workspace?
-3. Qual o tamanho maximo de mensagem e compressao suportada?
-4. Qual a politica do servidor para mensagem duplicada?
-5. A Metrics aceita fatos individuais e snapshots, ou exige batch de fatos?
-6. Qual o limite de mensagens/segundo por workspace e por conexao?
-7. A Metrics armazenara os fatos para periodos customizados e callbacks
-   atrasados?
-8. Quais versoes de contrato podem coexistir e como sinalizar deprecacao?
-
-O Gate 1 somente termina depois de essas respostas serem incorporadas e os
-fixtures serem aceitos pela equipe consumidora.
+O Gate 1 somente termina depois de essas cinco confirmacoes serem incorporadas
+e o fixture `0.2-draft` ser aceito pela equipe consumidora.

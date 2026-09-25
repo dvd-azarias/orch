@@ -3,7 +3,8 @@
 Plano iniciado em 2026-09-23 para uma visao analitica de sessoes,
 acionamentos e eventos de canal. Em 2026-09-25, o produto foi redirecionado:
 a Metrics API e sua UI passam a ser consumidoras dos dados, e o ORCH fica
-responsavel por produzir fatos duraveis e snapshots de reconciliacao pelo
+responsavel por persistir fatos duraveis por ate 30 dias e publicar snapshots
+reconciliaveis pelo
 mesmo transporte WebSocket/SYNC ja comprovado pelo PDIAL, sem atribuir essa
 responsabilidade ao PDIAL.
 
@@ -14,15 +15,16 @@ evidencia correspondente neste arquivo.
 
 ## Status atual
 
-- **Frente ativa:** Gate 1 — contrato de eventos e snapshots com a Metrics.
+- **Frente ativa:** Gate 1 — contrato snapshot-only com a Metrics.
 - **Ultimo gate concluido:** Gate 0 — redirecionamento, memoria e retorno,
   encerrado em 2026-09-25 sem alteracao de runtime, banco, PDIAL ou flow.
 - **Classificacao:** `ALPHA_FIX_OPTIONAL`, com beneficio operacional direto
   para suporte e diagnostico. Mudancas de runtime devem permanecer pequenas,
   aditivas e protegidas.
 - **Escopo autorizado:** contrato com a Metrics, persistencia/projecoes
-  minimas, instrumentacao idempotente, outbox, worker e fila exclusivos,
-  publicacao WebSocket, snapshots, homologacao canaria e rollout controlado.
+  minimas, retencao configuravel de 1 a 30 dias, instrumentacao idempotente,
+  estado coalescivel de entrega, worker e fila exclusivos, publicacao
+  WebSocket, snapshots, homologacao canaria e rollout controlado.
 - **Fora do escopo:** construir UI de relatorios no repositorio de Gestao de
   Extensoes, BFF/GETs para essa UI, backfill, atribuicao comercial, custos,
   BI externo e grandes refatoracoes do runtime.
@@ -37,17 +39,16 @@ evidencia correspondente neste arquivo.
    denominadores, canais, idempotencia, privacidade e marco zero.
 2. As antigas entregas de API read-only, BFF e UI propria ficam canceladas;
    seus documentos viram referencia semantica, nao backlog de implementacao.
-3. O ORCH produz dois contratos complementares:
-   `orchestration_journey_event` para fatos incrementais e
-   `orchestration_journey_snapshot` para carga inicial, reconciliacao e
-   heartbeat.
+3. O ORCH guarda internamente os fatos incrementais e publica um unico
+   contrato externo: `orchestration_journey_snapshot`. A Metrics nao precisa
+   persistir nem reconstruir jornadas.
 4. O transporte reutiliza `broadcast:dashboard`,
    `target_application=metrics` e `target_workspace_uuid`, mas o produtor e
    um worker do ORCH. O evento `dialer_metrics` e seu produtor PDIAL nao sao
    alterados.
-5. O Beat apenas agenda flows com fatos novos. Calculo, persistencia e envio
-   pertencem a fila e worker dedicados; indisponibilidade da Metrics nao pode
-   impedir o andamento das sessoes.
+5. O Beat apenas agenda flows `dirty`. Persistencia de fatos, agregacao e
+   envio pertencem a fronteiras dedicadas; indisponibilidade da Metrics nao
+   pode impedir o andamento das sessoes.
 6. O roteamento fisico atualmente comprovado e por workspace. A separacao
    inicial sera logica por `type` e por
    `topic=orchestration.journey.{workspace_uuid}.{flow_uuid}`. Sala fisica
@@ -55,6 +56,11 @@ evidencia correspondente neste arquivo.
 7. `orch_session_metrics` nao sera varrida para produzir snapshots. As
    projecoes novas existem justamente para evitar agregacao repetida sobre
    dezenas de milhoes de linhas.
+8. A retencao efetiva e configuravel por workspace entre 1 e 30 dias, com
+   padrao e teto absoluto de 30. Aumentar o periodo nao recria dados removidos.
+9. O transporte adota `latest-state delivery`: mudancas proximas sao
+   agrupadas, somente o snapshot mais novo permanece pendente e reconexao ou
+   heartbeat republicam o estado atual.
 
 ## Funil canonico de jornada
 
@@ -126,10 +132,11 @@ Esta frente e uma pausa controlada, nao uma troca do objetivo principal.
 2. Depois de API, workers e integracoes estarem na mesma versao e passarem no
    smoke, um comando administrativo ativa o relatorio naquele workspace.
 3. A ativacao grava `coverage_started_at` uma unica vez e e auditavel.
-4. A API rejeita `from < coverage_started_at` com `422` e informa o primeiro
-   instante consultavel; nao corta periodo silenciosamente.
-5. A UI desabilita datas anteriores e mostra permanentemente `Dados
-   disponiveis desde ...`.
+4. Nenhum snapshot inclui periodo anterior ao maior valor entre
+   `coverage_started_at` e `oldest_available_at`; nao corta periodo
+   silenciosamente.
+5. Cada snapshot declara permanentemente `coverage_started_at`,
+   `oldest_available_at`, `retention_days` e avisos de qualidade.
 6. Callback nao cria acionamento. Ele somente atualiza uma action previamente
    registrada pelo novo mecanismo; callback antigo sem action fica fora do
    relatorio.
@@ -174,7 +181,6 @@ dados suficientes para os seguintes filtros:
 - flow com autocomplete por nome;
 - periodo: hoje, ontem, 7 dias, 30 dias ou intervalo customizado;
 - revisao do flow;
-- pessoa, identificador ou address;
 - estado da sessao;
 - canal, com multi-selecao;
 - card/componente;
@@ -214,7 +220,7 @@ dados suficientes para os seguintes filtros:
 
 ```text
 Runtime ORCH
-  -> projecoes e outbox no schema do workspace
+  -> fatos/projecoes com retencao no schema do workspace
       -> fila/worker exclusivo de telemetria
           -> WebSocket/SYNC broadcast:dashboard
               -> Metrics API
@@ -223,11 +229,12 @@ Runtime ORCH
 
 - A Metrics nao acessa diretamente o banco do ORCH.
 - Credenciais WebSocket permanecem fora do Git.
-- Eventos incrementais fornecem historico filtravel; snapshots fornecem carga
-  inicial, heartbeat e reconciliacao.
-- O envio e `at-least-once`; a Metrics deduplica por `event_id` e substitui
-  snapshots pela sequencia monotonica do mesmo flow/janela.
-- Ausencia temporaria de Metrics conserva a outbox e nao bloqueia a sessao.
+- Fatos incrementais permanecem internos ao ORCH; somente snapshots agregados
+  atravessam o WebSocket.
+- O envio e `latest-state`: a Metrics substitui o snapshot pela maior sequencia
+  monotonica do mesmo flow/janela.
+- Ausencia temporaria da Metrics preserva os fatos e o estado `dirty`, mas nao
+  bloqueia a sessao nem exige reter cada versao intermediaria do snapshot.
 - Nenhum corpo de mensagem, token, credencial ou payload bruto e publicado.
 - O PDIAL e o evento `dialer_metrics` permanecem contratos independentes.
 
@@ -251,8 +258,9 @@ compreende:
 - `orch_journey_stage_facts`: primeira/ultima entrada, visitas, permanencia e
   transicoes por sessao/revisao/etapa;
 - `orch_channel_actions`: uma tentativa externa real por linha;
-- `orch_journey_metrics_outbox`: evento/snapshot imutavel, lease, tentativas,
-  proxima tentativa e confirmacao de envio.
+- `orch_journey_snapshot_delivery`: estado coalescivel por flow/janela,
+  `dirty_since`, versoes construida/enviada, lease, tentativas, proxima
+  tentativa e ultimo erro.
 
 O ledger `orch_channel_actions` conserva:
 
@@ -269,6 +277,11 @@ O ledger `orch_channel_actions` conserva:
 Uma tabela de controle registra `coverage_started_at`. Somente actions criadas
 pelo runtime novo depois desse instante entram na telemetria. As fontes atuais
 foram auditadas apenas para desenhar a fronteira; elas nao serao importadas.
+
+A mesma tabela registra `retention_days`, validado entre 1 e 30. A limpeza
+remove fatos expirados em lotes pequenos e ordem referencial, preserva o marco
+zero e nunca executa backfill. Reduzir a retencao torna dados antigos elegiveis
+para limpeza; aumentar a retencao vale somente para fatos ainda existentes.
 
 Uma falha de gravacao de telemetria deve usar savepoint, registrar alarme e
 preservar o comportamento funcional da sessao. O modo ativo nao pode esconder
@@ -400,20 +413,24 @@ primaria de acionamentos.
 **Resultado:** concluido em 2026-09-25 por este documento e pelo indice no
 `PROJECT_BRAIN.md`.
 
-### Gate 1 — contrato de eventos e snapshots com a Metrics
+### Gate 1 — contrato snapshot-only com a Metrics
 
 - [ ] Congelar o envelope `broadcast:dashboard` e autenticacao SYNC.
-- [ ] Congelar `orchestration_journey_event` e seus tipos incrementais.
 - [ ] Congelar `orchestration_journey_snapshot` e todos os blocos da imagem.
-- [ ] Definir `event_id`, sequencia, ACK, deduplicacao, retry e limite de
-  payload.
+- [ ] Congelar ORCH como fonte duravel, Metrics como consumidora de exibicao e
+  ausencia de fatos incrementais no contrato externo.
+- [ ] Definir sequencia, coalescencia, ACK observacional, retry, heartbeat e
+  limite de payload.
 - [ ] Confirmar se existe sala fisica por flow; ate la, usar tipo/topico
   logico sob o roteamento comprovado por workspace.
+- [ ] Confirmar rate limit, backpressure e regra de substituicao pela maior
+  `snapshot_sequence`.
 - [ ] Congelar timezone, coortes, denominadores, desfechos, conversao,
   abandono, saude e limites de atraso/travamento.
-- [ ] Definir comportamento de eventos atrasados e fora de ordem.
-- [ ] Validar exemplos de sessao, etapa, action e snapshot com a equipe da
-  Metrics antes de escrever runtime.
+- [ ] Congelar retencao configuravel entre 1 e 30 dias e o comportamento de
+  callbacks posteriores a expiracao.
+- [ ] Validar o fixture de snapshot com a equipe da Metrics antes de escrever
+  runtime.
 
 **Criterio de saida:** contrato versionado aceito pelos dois lados, sem
 ambiguidade de grao, periodo, sala ou idempotencia.
@@ -421,13 +438,17 @@ ambiguidade de grao, periodo, sala ou idempotencia.
 **Proposta ORCH pronta para revisao:**
 `ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md`, com fixtures em
 `ORCHESTRATION_JOURNEY_METRICS_WS_EXAMPLES.json`. A aceitacao da Metrics e as
-respostas sobre ACK, sala, limite e rate limit permanecem pendentes.
+cinco confirmacoes sobre envelope/sala, limite/compressao, rate limit,
+ACK observacional e schema/substituicao permanecem pendentes.
 
 ### Gate 2 — migrations e projecoes aditivas
 
 - [ ] Desenhar migration conforme o playbook oficial.
-- [ ] Criar cobertura, projecao de sessoes, fatos de etapa, actions e outbox.
+- [ ] Criar cobertura/configuracao, projecao de sessoes, fatos de etapa,
+  actions, eventos normalizados e estado de entrega do snapshot.
 - [ ] Criar unicidades e indices orientados a flow, periodo, sessao e canal.
+- [ ] Validar `retention_days` entre 1 e 30, com padrao/teto 30, e implementar
+  limpeza incremental sem backfill.
 - [ ] Deixar cobertura `pending` e feature flags desligadas por padrao.
 - [ ] Validar rollback sem tocar tabelas funcionais nem dados anteriores.
 - [ ] Provar que nenhuma rotina de backfill foi criada.
@@ -463,19 +484,22 @@ mudanca funcional no workflow.
 **Criterio de saida:** zero, um e varios acionamentos por sessao reconciliam
 exatamente com as fontes especializadas.
 
-### Gate 5 — produtor ORCH, fila e outbox
+### Gate 5 — produtor ORCH, fila e estado de entrega
 
 - [ ] Criar fila exclusiva conforme `ORCH_QUEUE_PROFILE`.
 - [ ] Criar worker com hostname explicito e sem reutilizar fila existente.
 - [ ] Fazer o Beat apenas enfileirar flows sujos; nenhuma agregacao pesada no
   Beat.
-- [ ] Implementar lease, `SKIP LOCKED`, retry/backoff e envio `at-least-once`.
-- [ ] Preservar eventos durante indisponibilidade da Metrics.
-- [ ] Adicionar heartbeat e observabilidade de backlog/idade/falha.
+- [ ] Implementar debounce/coalescencia, lease, `SKIP LOCKED`, retry/backoff e
+  `latest-state delivery`.
+- [ ] Preservar fatos e estado `dirty` durante indisponibilidade da Metrics,
+  sem acumular cada versao intermediaria.
+- [ ] Republicar o snapshot atual em reconexao e heartbeat.
+- [ ] Adicionar observabilidade de dirty age, versao, tentativa e falha.
 - [ ] Manter o produtor e contrato `dialer_metrics` intocados.
 
-**Criterio de saida:** eventos sobrevivem a desconexao e reinicio sem duplicar
-contagens nem bloquear sessoes.
+**Criterio de saida:** o estado mais novo sobrevive a desconexao e reinicio,
+reconcilia a tela e nao bloqueia sessoes.
 
 ### Gate 6 — agregador e snapshot
 
@@ -484,6 +508,8 @@ contagens nem bloquear sessoes.
 - [ ] Gerar somente sobre projecoes novas; proibir varredura de
   `orch_session_metrics`.
 - [ ] Publicar `as_of`, `coverage_started_at`, denominadores e qualidade.
+- [ ] Publicar `retention_days`, `oldest_available_at` e janela inteiramente
+  contida na cobertura ainda retida.
 - [ ] Usar sequencia monotonica por workspace/flow/janela.
 - [ ] Publicar flow sujo em ate cinco segundos e heartbeat em trinta segundos,
   sujeitos a medicao antes do rollout.
@@ -494,11 +520,12 @@ dentro do budget operacional.
 
 ### Gate 7 — testes locais e adversariais
 
-- [ ] Evento duplicado, atrasado e fora de ordem.
+- [ ] Fato interno duplicado, atrasado e fora de ordem.
 - [ ] Reexecucao do mesmo card e loop entre etapas.
 - [ ] Salto de etapa e revisoes diferentes do mesmo flow.
-- [ ] Falha de outbox, WebSocket e ACK.
+- [ ] Falha de agregacao, WebSocket e ACK observacional.
 - [ ] Reinicio do worker durante envio.
+- [ ] Retencao 1/30 dias, reducao, aumento sem ressurreicao e limpeza em lotes.
 - [ ] Isolamento entre workspace/flow e ausencia de PII/payload bruto.
 - [ ] Regressao completa do workflow e stacks anteriores ativas.
 - [ ] Repetir `SUBA_O_AMBIENTE` e smoke encadeado apos mudanca de runtime.
@@ -517,7 +544,7 @@ idempotencia e ausencia de regressao funcional.
 - [ ] Caso sejam necessarios valores nao zero nas sete etapas, usar revisao
   controlada ou clone de telemetria; nao reclassificar cards falsamente.
 - [ ] Provar zero, um e varios canais, loop, sucesso, falha e espera.
-- [ ] Reconciliar banco, eventos enviados, snapshot e recepcao Metrics.
+- [ ] Reconciliar fatos internos, snapshot e recepcao Metrics.
 
 **Criterio de saida:** contagens exatas e recebimento comprovado na Metrics,
 sem depender da futura UI.
@@ -525,7 +552,8 @@ sem depender da futura UI.
 ### Gate 9 — shadow rollout e robustez
 
 - [ ] Manter a Metrics recebendo em shadow antes de qualquer tela depender.
-- [ ] Comparar contagens de amostras controladas e medir atraso/perda/backlog.
+- [ ] Comparar contagens de amostras controladas e medir atraso, dirty age e
+  republicacao apos desconexao.
 - [ ] Validar carga, P95, isolamento, mascaramento e rollback.
 - [ ] Confirmar regressao do PDIAL e de `dialer_metrics` sem mudanca.
 - [ ] Expandir somente por allowlist de workspace/flow.
