@@ -40,16 +40,24 @@ class Settings:
     celery_dialer_supplier_v2_queue: str
     celery_channel_supplier_v2_queue: str
     celery_heartbeat_queue: str
+    celery_journey_snapshot_queue: str
     celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
     celery_beat_reconcile_pending_events_enabled: bool
     celery_beat_dialer_supplier_v2_reconcile_enabled: bool
     celery_beat_channel_supplier_v2_reconcile_enabled: bool
+    celery_beat_journey_snapshot_enabled: bool
+    celery_journey_snapshot_interval_seconds: int
+    celery_journey_snapshot_workspace_uuid: str | None
     celery_dispatch_workspace_uuid: str | None
     celery_reconcile_pending_events_workspace_uuid: str | None
     celery_task_always_eager: bool
     celery_health_heartbeat_key: str
     celery_health_heartbeat_ttl_seconds: int
+    orch_journey_dashboard_enabled: bool
+    orch_journey_snapshot_lease_seconds: int
+    orch_journey_redis_url: str | None
+    orch_journey_ws_ticket_ttl_seconds: int
     celery_generate_file_enabled: bool
     celery_generate_file_scan_enabled: bool
     celery_generate_file_scan_interval_seconds: int
@@ -305,6 +313,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         "dialer_supplier_v2": "orch_dialer_supplier_v2",
         "channel_supplier_v2": "orch_channel_supplier_v2",
         "heartbeat": "orch_heartbeat",
+        "journey_snapshot": "orch_journey_snapshot",
         "fileapp_ingest": "orch_fileapp_ingest_events",
         "fileapp_process": "orch_fileapp_source_list_ingest",
         "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc",
@@ -324,6 +333,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "dialer_supplier_v2": "orch_dialer_supplier_v2_launchd_local",
             "channel_supplier_v2": "orch_channel_supplier_v2_launchd_local",
             "heartbeat": "orch_heartbeat_launchd_local",
+            "journey_snapshot": "orch_journey_snapshot_launchd_local",
             "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
             "fileapp_process": "orch_fileapp_source_list_launchd_local",
             "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_launchd_local",
@@ -340,6 +350,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "dialer_supplier_v2": "orch_dialer_supplier_v2_f5_local",
             "channel_supplier_v2": "orch_channel_supplier_v2_f5_local",
             "heartbeat": "orch_heartbeat_f5_local",
+            "journey_snapshot": "orch_journey_snapshot_f5_local",
             "fileapp_ingest": "orch_fileapp_ingest_f5_local",
             "fileapp_process": "orch_fileapp_source_list_f5_local",
             "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_f5_local",
@@ -437,6 +448,13 @@ def get_settings() -> Settings:
             _read_env_optional("CELERY_HEARTBEAT_QUEUE", _default_queue_by_profile(queue_profile, "heartbeat"))
             or _default_queue_by_profile(queue_profile, "heartbeat")
         ),
+        celery_journey_snapshot_queue=(
+            _read_env_optional(
+                "CELERY_JOURNEY_SNAPSHOT_QUEUE",
+                _default_queue_by_profile(queue_profile, "journey_snapshot"),
+            )
+            or _default_queue_by_profile(queue_profile, "journey_snapshot")
+        ),
         celery_beat_heartbeat_enabled=_read_env_bool("CELERY_BEAT_HEARTBEAT_ENABLED", True),
         celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
         celery_beat_reconcile_pending_events_enabled=_read_env_bool("CELERY_BEAT_RECONCILE_PENDING_EVENTS_ENABLED", True),
@@ -446,6 +464,19 @@ def get_settings() -> Settings:
         celery_beat_channel_supplier_v2_reconcile_enabled=_read_env_bool(
             "CELERY_BEAT_CHANNEL_SUPPLIER_V2_RECONCILE_ENABLED", False
         ),
+        celery_beat_journey_snapshot_enabled=_read_env_bool(
+            "CELERY_BEAT_JOURNEY_SNAPSHOT_ENABLED", False
+        ),
+        celery_journey_snapshot_interval_seconds=_read_env_int_range(
+            "CELERY_JOURNEY_SNAPSHOT_INTERVAL_SECONDS",
+            2,
+            minimum=1,
+            maximum=60,
+        ),
+        celery_journey_snapshot_workspace_uuid=_read_env_optional(
+            "CELERY_JOURNEY_SNAPSHOT_WORKSPACE_UUID",
+            _read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
+        ),
         celery_dispatch_workspace_uuid=_read_env_optional("CELERY_DISPATCH_WORKSPACE_UUID"),
         celery_reconcile_pending_events_workspace_uuid=_read_env_optional(
             "CELERY_RECONCILE_PENDING_EVENTS_WORKSPACE_UUID",
@@ -454,6 +485,24 @@ def get_settings() -> Settings:
         celery_task_always_eager=_read_env_bool("CELERY_TASK_ALWAYS_EAGER", False),
         celery_health_heartbeat_key=_read_env_optional("CELERY_HEARTBEAT_KEY", "orch:beat:heartbeat") or "orch:beat:heartbeat",
         celery_health_heartbeat_ttl_seconds=_read_env_int("CELERY_HEARTBEAT_TTL_SECONDS", 30),
+        orch_journey_dashboard_enabled=_read_env_bool(
+            "ORCH_JOURNEY_DASHBOARD_ENABLED", True
+        ),
+        orch_journey_snapshot_lease_seconds=_read_env_int_range(
+            "ORCH_JOURNEY_SNAPSHOT_LEASE_SECONDS",
+            120,
+            minimum=30,
+            maximum=900,
+        ),
+        orch_journey_redis_url=_read_env_optional(
+            "ORCH_JOURNEY_REDIS_URL", result_backend
+        ),
+        orch_journey_ws_ticket_ttl_seconds=_read_env_int_range(
+            "ORCH_JOURNEY_WS_TICKET_TTL_SECONDS",
+            30,
+            minimum=10,
+            maximum=120,
+        ),
         celery_generate_file_enabled=_read_env_bool("CELERY_GENERATE_FILE_ENABLED", True),
         celery_generate_file_scan_enabled=_read_env_bool("CELERY_GENERATE_FILE_SCAN_ENABLED", True),
         celery_generate_file_scan_interval_seconds=_read_env_int("CELERY_GENERATE_FILE_SCAN_INTERVAL_SECONDS", 10),

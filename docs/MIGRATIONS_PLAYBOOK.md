@@ -57,6 +57,21 @@ Garantir mudanças de schema com segurança em ambiente multi-workspace (`ws_*`)
 - Antes de `migrate-all`, aplicar somente no workspace HighComm, conferir as
   sete tabelas, defaults, constraints e indices e registrar tempo/lock.
 
+## Nota operacional — snapshot agregado por workspace `0024`
+
+- Cria somente `orch_journey_workspace_snapshot_state` no schema do workspace;
+  nao altera as sete tabelas da `0023` e nao remove o controle historico por
+  flow `orch_journey_snapshot_delivery`.
+- A linha singleton nasce limpa, sem snapshot e sem writer. Aplicar a migration
+  isoladamente nao cria task, ticket, WebSocket, publicacao ou coleta.
+- `dirty_generation` e `built_generation` impedem limpar uma mudanca que
+  ocorra durante o build. Lease incompleto expira por tempo e nunca autoriza
+  mais de um commit para o mesmo `claim_token + claim_generation`.
+- `snapshot_bytes` possui teto estrutural de 1 MiB. Payload acima desse limite
+  deve falhar antes da escrita e preservar o ultimo snapshot valido.
+- Aplicar primeiro somente no HighComm e validar singleton, constraints e
+  indices. Nao executar `migrate-all` antes do canario E2E dos gates seguintes.
+
 ## Fluxo obrigatório para criar/alterar tabelas
 
 1. Criar novo arquivo SQL em `sql/` com próximo número sequencial (`006_...sql`, `007_...sql`, etc.).

@@ -13,6 +13,12 @@ from app.repositories.orch_channel_events_repository import (
     insert_channel_event,
     mark_channel_event_processed,
 )
+from app.services.channel_supplier_v2_service import (
+    build_channel_dispatch_correlation_key,
+)
+from app.services.journey_metrics_service import (
+    record_journey_channel_action_event,
+)
 
 _MAX_CALLBACK_ITEMS = 100
 _MAX_PROVIDER_EVENT_ID_LENGTH = 255
@@ -381,6 +387,31 @@ async def persist_channel_supplier_v2_callback(
         if not was_inserted:
             continue
         inserted_count += 1
+        correlation_key = build_channel_dispatch_correlation_key(
+            session_uuid=str(claims["session_uuid"]),
+            flow_uuid=str(claims["flow_uuid"]),
+            flow_revision_id=str(claims["flow_revision_id"]),
+            component_ref_id=str(claims["component_ref_id"]),
+            channel=str(claims["channel"]),
+            dispatch_sequence=int(claims["dispatch_sequence"]),
+        )
+        await record_journey_channel_action_event(
+            db_session,
+            source_session_id=int(session_row["id"]),
+            flow_uuid=str(session_row["flow_uuid"]),
+            session_uuid=str(session_row["uuid"]),
+            channel=str(channel).strip().lower(),
+            source_kind="channel_supplier_v2_dispatch",
+            source_id=correlation_key,
+            native_status=event.event_type,
+            event_id=event.event_id,
+            occurred_at=event.event_ts,
+            component_ref_id=str(claims["component_ref_id"]),
+            component_kind=f"send_with_{str(channel).strip().lower()}",
+            action_sequence=int(claims["dispatch_sequence"]),
+            provider_reference=event.event_id,
+            metadata={"event_kind": str(event_kind).strip().lower()},
+        )
         if late_callback:
             pending_result = await db_session.execute(
                 text(

@@ -1,6 +1,14 @@
-# Telemetria de Jornadas ORCH -> Metrics — contrato WebSocket
+# Telemetria de Jornadas ORCH -> Metrics — contrato WebSocket superseded
 
-## Estado
+> **SUPERSEDED em 2026-09-25.** Este contrato registra a fronteira que chegou
+> a ser aceita com Metrics/SYNC, mas nunca recebeu writer ou publisher de
+> runtime. O produto adotou WebSocket proprio do ORCH, sala e snapshot unicos
+> por workspace e UI propria na Gestao de Extensoes. Nao implementar novos
+> trabalhos a partir deste documento. A fonte vigente e
+> `ORCHESTRATION_REPORTING_PLAN.md`; o novo contrato interno sera
+> `ORCHESTRATION_WORKSPACE_WS_CONTRACT.md`.
+
+## Estado historico
 
 - Versao aceita: `0.2.0`.
 - Data: 2026-09-25.

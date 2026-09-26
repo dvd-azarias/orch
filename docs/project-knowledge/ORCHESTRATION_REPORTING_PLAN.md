@@ -1,12 +1,12 @@
-# Telemetria de Jornadas de Orquestracao para Metrics — plano mestre
+# Dashboard de Jornadas de Orquestracao — plano mestre
 
 Plano iniciado em 2026-09-23 para uma visao analitica de sessoes,
-acionamentos e eventos de canal. Em 2026-09-25, o produto foi redirecionado:
-a Metrics API e sua UI passam a ser consumidoras dos dados, e o ORCH fica
-responsavel por persistir fatos duraveis por ate 30 dias e publicar snapshots
-reconciliaveis pelo
-mesmo transporte WebSocket/SYNC ja comprovado pelo PDIAL, sem atribuir essa
-responsabilidade ao PDIAL.
+acionamentos e eventos de canal. Em 2026-09-25, depois de congelar o primeiro
+contrato externo, o produto foi redirecionado novamente: o ORCH permanece
+como fonte duravel, mas passa tambem a agregar e servir um snapshot unico por
+workspace por WebSocket proprio. A UI oficial desta frente sera construida na
+Gestao de Extensoes. SYNC e Metrics deixam de ser dependencias; no futuro, a
+Metrics podera integrar como cliente do contrato publicado pelo ORCH.
 
 Este documento e a fonte unica da verdade desta frente. Toda retomada deve
 comecar pela leitura de **Status atual**, **Checkpoint de retorno** e do
@@ -15,56 +15,53 @@ evidencia correspondente neste arquivo.
 
 ## Status atual
 
-- **Frente ativa:** Gate 2 — migrations e projecoes aditivas.
-- **Ultimo gate concluido:** Gate 1 — contrato snapshot-only aceito pela
-  Metrics/SYNC em 2026-09-25, sem alteracao de runtime, banco, PDIAL ou flow.
+- **Frente ativa:** Gate 7 — integracao e validacao da UI oficial.
+- **Ultimo gate concluido localmente:** Gate 6 — projecoes, agregador, fila,
+  snapshot duravel e gateway WebSocket proprio. Latencia sob carga e prova
+  entre replicas continuam como criterios de Gate 8/rollout, nao como sucesso
+  presumido.
 - **Classificacao:** `ALPHA_FIX_OPTIONAL`, com beneficio operacional direto
   para suporte e diagnostico. Mudancas de runtime devem permanecer pequenas,
   aditivas e protegidas.
-- **Escopo autorizado:** contrato com a Metrics, persistencia/projecoes
-  minimas, retencao configuravel de 1 a 30 dias, instrumentacao idempotente,
-  estado coalescivel de entrega, worker e fila exclusivos, publicacao
-  WebSocket, snapshots, homologacao canaria e rollout controlado.
-- **Fora do escopo:** construir UI de relatorios no repositorio de Gestao de
-  Extensoes, BFF/GETs para essa UI, backfill, atribuicao comercial, custos,
-  BI externo e grandes refatoracoes do runtime.
+- **Escopo autorizado:** persistencia/projecoes minimas, retencao configuravel
+  de 1 a 30 dias, instrumentacao idempotente, dirty state por workspace,
+  agregador e fila exclusivos, gateway WebSocket proprio, snapshot agregado,
+  UI na Gestao de Extensoes, homologacao canaria e rollout controlado.
+- **Fora do escopo:** backfill, atribuicao comercial, custos, BI externo,
+  dependencia de SYNC/Metrics e grandes refatoracoes do runtime.
 - **Marco zero aprovado:** a telemetria considera somente sessoes,
   acionamentos e eventos produzidos depois da ativacao explicita do novo
   mecanismo em cada workspace. Nao existe backfill, importacao, inferencia ou
   exibicao de dados anteriores.
 
-## Redirecionamento aprovado em 2026-09-25
+## Redirecionamento vigente aprovado em 2026-09-25
 
-1. O estudo dos Gates historicos 1 e 2 permanece valido para graos,
+1. O estudo dos Gates historicos permanece valido para graos,
    denominadores, canais, idempotencia, privacidade e marco zero.
-2. As antigas entregas de API read-only, BFF e UI propria ficam canceladas;
-   seus documentos viram referencia semantica, nao backlog de implementacao.
-3. O ORCH guarda internamente os fatos incrementais e publica um unico
-   contrato externo: `orchestration_journey_snapshot`. A Metrics nao precisa
-   persistir nem reconstruir jornadas.
-4. O transporte reutiliza `broadcast:dashboard`,
-   `target_application=metrics` e `target_workspace_uuid`, mas o produtor e
-   um worker do ORCH. O evento `dialer_metrics` e seu produtor PDIAL nao sao
+2. O ORCH guarda fatos incrementais, agrega e publica um unico contrato por
+   workspace: `orchestration_workspace_snapshot`.
+3. O transporte SYNC e a UI da Metrics ficam formalmente substituidos nesta
+   frente. A Metrics podera futuramente escutar o WebSocket do ORCH sem
+   alterar a fonte duravel nem a semantica dos fatos.
+4. O evento `dialer_metrics`, seu produtor PDIAL e seus consumidores nao sao
    alterados.
-5. O Beat apenas agenda flows `dirty`. Persistencia de fatos, agregacao e
-   envio pertencem a fronteiras dedicadas; indisponibilidade da Metrics nao
-   pode impedir o andamento das sessoes.
-6. O envelope e roteado ao workspace e a sala fisica e por usuario. Nao existe
-   sala por flow; a separacao usa `type`,
-   `topic=orchestration.journey.{workspace_uuid}.{flow_uuid}` e o filtro da UI
-   sobre as dimensoes do payload.
+5. O Beat apenas agenda workspaces `dirty`. Persistencia de fatos, agregacao,
+   fan-out e UI pertencem a fronteiras dedicadas; indisponibilidade da
+   dashboard nunca pode impedir o andamento das sessoes.
+6. O gateway mantem uma sala logica por workspace:
+   `orch.journey.workspace.{workspace_uuid}`. Flow e dimensao do snapshot e
+   filtro local da UI; nao existe emissor automatico por flow.
 7. `orch_session_metrics` nao sera varrida para produzir snapshots. As
    projecoes novas existem justamente para evitar agregacao repetida sobre
    dezenas de milhoes de linhas.
 8. A retencao efetiva e configuravel por workspace entre 1 e 30 dias, com
    padrao e teto absoluto de 30. Aumentar o periodo nao recria dados removidos.
-9. O transporte adota `latest-state delivery`: mudancas proximas sao
-   agrupadas, somente o snapshot mais novo permanece pendente e reconexao ou
-   heartbeat republicam o estado atual.
-10. O SYNC nao comprime nem declara limite formal de payload, aceita ate 400
-    mensagens/segundo, nao fornece ACK e a Metrics substitui o snapshot pela
-    maior `snapshot_sequence`. O ORCH deve impor budgets internos abaixo
-    desses limites antes do rollout.
+9. O transporte adota `latest-state delivery`: mudancas proximas de quaisquer
+   flows sao agrupadas, somente o snapshot mais novo do workspace permanece
+   pendente e reconexao ou heartbeat republicam o estado atual.
+10. O ORCH define autenticacao, compressao, payload budget, sequencia,
+    heartbeat e backpressure do proprio WebSocket. PostgreSQL e fonte da
+    verdade; Redis serve apenas a notificacao/fan-out entre replicas.
 
 ## Funil canonico de jornada
 
@@ -175,11 +172,15 @@ Sessao de orquestracao
 11. Dados anteriores ao marco zero nao pertencem ao produto de Relatorios e
     nunca sao inferidos a partir de metricas, timestamps ou callbacks antigos.
 
-## Contrato visual de referencia para a Metrics
+## Contrato visual da nossa dashboard
 
-A imagem `ORCHoficialDASHBOARD.png` e a referencia funcional do consumidor,
-mas a UI sera construida e mantida pela equipe da Metrics. O ORCH deve emitir
-dados suficientes para os seguintes filtros:
+A imagem `ORCHoficialDASHBOARD.png` e a referencia funcional. A UI sera
+construida e mantida no repositorio oficial `GOHP-LAB/target-extensions-ui` e
+consumira exclusivamente o WebSocket proprio do ORCH para os dados da
+dashboard. O snapshot deve fornecer dados suficientes para os seguintes
+  filtros. O overview e a lista compacta de flows chegam no snapshot automatico;
+  filtros detalhados usam request/response no mesmo WebSocket, somente enquanto
+  houver usuario interessado:
 
 - workspace selecionado globalmente;
 - flow com autocomplete por nome;
@@ -225,20 +226,31 @@ dados suficientes para os seguintes filtros:
 ```text
 Runtime ORCH
   -> fatos/projecoes com retencao no schema do workspace
-      -> fila/worker exclusivo de telemetria
-          -> WebSocket/SYNC broadcast:dashboard
-              -> Metrics API
-                  -> UI da Metrics
+      -> dirty state + fila/worker exclusivo por workspace
+          -> snapshot persistido do workspace
+              -> notificacao Redis entre replicas
+                  -> gateway WebSocket proprio do ORCH
+                      -> UI de Gestao de Extensoes
 ```
 
-- A Metrics nao acessa diretamente o banco do ORCH.
-- Credenciais WebSocket permanecem fora do Git.
+- A UI nao acessa diretamente o banco do ORCH.
+- Credenciais e tickets WebSocket permanecem fora do Git.
 - Fatos incrementais permanecem internos ao ORCH; somente snapshots agregados
   atravessam o WebSocket.
-- O envio e `latest-state`: a Metrics substitui o snapshot pela maior sequencia
-  monotonica do mesmo flow/janela.
-- Ausencia temporaria da Metrics preserva os fatos e o estado `dirty`, mas nao
-  bloqueia a sessao nem exige reter cada versao intermediaria do snapshot.
+- O envio automatico e `latest-state`: a UI substitui o snapshot pela maior sequencia
+  monotonica do mesmo workspace.
+- Ausencia temporaria de consumidores preserva os fatos, o snapshot mais
+  recente e o estado `dirty`, sem bloquear a sessao nem reter cada versao
+  intermediaria.
+- O navegador obtem um ticket curto e de uso unico pelo BFF; depois do
+  handshake, snapshot inicial, atualizacoes e heartbeat trafegam somente pelo
+  WebSocket.
+- Detalhe por flow/revisao/canal/periodo nao cria publisher nem sala propria. A
+  UI envia uma requisicao no socket do workspace e recebe uma view correlacionada
+  por `request_id` e `snapshot_sequence`.
+- Em ambiente com varias replicas, apenas um worker agrega um workspace por
+  lease. Cada API entrega a notificacao Redis somente aos sockets locais; ao
+  reconectar, qualquer replica recupera o ultimo snapshot no PostgreSQL.
 - Nenhum corpo de mensagem, token, credencial ou payload bruto e publicado.
 - O PDIAL e o evento `dialer_metrics` permanecem contratos independentes.
 
@@ -255,18 +267,22 @@ mesmo card/canal na mesma sessao e nao devem ser varridas repetidamente para
 alimentar a dashboard. O desenho aditivo a detalhar e validar por migration
 compreende:
 
-- `orch_journey_coverage`: estado `pending|active`, marco zero imutavel e
-  configuracao de atraso/travamento;
+- `orch_journey_flow_coverage`: cobertura e marco zero por flow;
 - `orch_journey_sessions`: projecao compacta de estado, etapa atual/mais alta,
   ultimo progresso e resultado terminal;
-- `orch_journey_stage_facts`: primeira/ultima entrada, visitas, permanencia e
+- `orch_journey_stage_visits`: primeira/ultima entrada, visitas, permanencia e
   transicoes por sessao/revisao/etapa;
-- `orch_channel_actions`: uma tentativa externa real por linha;
-- `orch_journey_snapshot_delivery`: estado coalescivel por flow/janela,
-  `dirty_since`, versoes construida/enviada, lease, tentativas, proxima
-  tentativa e ultimo erro.
+- `orch_journey_channel_actions`: uma tentativa externa real por linha;
+- `orch_journey_channel_action_events`: eventos normalizados ligados a action;
+- novo controle por workspace/janela: `dirty_since`, ultimo snapshot,
+  sequencia, lease, tentativas, proxima tentativa e ultimo erro.
 
-O ledger `orch_channel_actions` conserva:
+`orch_journey_snapshot_delivery` foi criado pela migration `0023` para a
+fronteira anterior por flow/SYNC. Ele nao possui writer nem dados funcionais e
+permanecera inerte; uma migration aditiva criara o controle correto por
+workspace sem reescrever migration ja aplicada.
+
+O ledger `orch_journey_channel_actions` conserva:
 
 - `action_id` idempotente;
 - sessao, flow e revisao;
@@ -402,143 +418,176 @@ sincronicamente nas fronteiras ja duraveis ou alimentada por tarefas
 idempotentes. Nao deve consultar ou agregar `orch_session_metrics` como fonte
 primaria de acionamentos.
 
-## Gates ativos — telemetria WebSocket para Metrics
+## Gates ativos — dashboard propria por workspace
 
 ### Gate 0 — redirecionamento, memoria e retorno
 
 - [x] Preservar os estudos de grao, canais e idempotencia ja confirmados.
-- [x] Cancelar explicitamente API read-only, BFF e UI propria desta frente.
-- [x] Registrar Metrics API/UI como consumidoras e ORCH como produtor.
+- [x] Substituir SYNC/Metrics por WebSocket e UI proprios nesta frente.
+- [x] Definir um emissor logico e uma sala por workspace, nunca por sessao ou
+  flow.
 - [x] Congelar as sete etapas canonicas do funil.
 - [x] Preservar marco zero, ausencia de backfill e retorno obrigatorio ao
   canario e ao fluxo completo.
-- [x] Nao alterar runtime, banco, PDIAL ou flow neste gate.
+- [x] Confirmar que fatos/projecoes da migration `0023` permanecem validos e
+  que apenas o controle de entrega por flow sera aposentado antes de uso.
+- [x] Nao alterar runtime, banco implantado, PDIAL ou flow neste gate.
 
-**Resultado:** concluido em 2026-09-25 por este documento e pelo indice no
-`PROJECT_BRAIN.md`.
+**Resultado:** concluido documentalmente em 2026-09-25. O antigo contrato
+`ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` permanece como historico
+superseded; nao e backlog nem contrato de runtime.
 
-### Gate 1 — contrato snapshot-only com a Metrics
+### Gate 1 — contrato do WebSocket proprio
 
-- [x] Congelar o envelope `broadcast:dashboard` e autenticacao SYNC.
-- [x] Congelar `orchestration_journey_snapshot` e todos os blocos da imagem.
-- [x] Congelar ORCH como fonte duravel, Metrics como consumidora de exibicao e
-  ausencia de fatos incrementais no contrato externo.
-- [x] Definir sequencia, coalescencia, ausencia de ACK, retry, heartbeat e
-  limite de payload.
-- [x] Confirmar sala fisica por usuario e filtro de flow pela UI sobre o
-  payload.
-- [x] Confirmar rate limit e regra de substituicao pela maior
-  `snapshot_sequence`.
+- [x] Congelar `orchestration_workspace_snapshot` e todos os blocos da imagem.
+- [x] Definir sala `orch.journey.workspace.{workspace_uuid}` e autorizacao
+  fail-closed por workspace.
+- [x] Definir ticket curto/de uso unico, handshake, heartbeat, reconexao e
+  encerramento de conexao.
+- [x] Definir `snapshot_sequence` monotonica por workspace e descarte de
+  mensagens antigas na UI.
+- [x] Definir snapshots completos substituiveis; nao transmitir fatos internos
+  ou eventos por sessao.
+- [x] Definir buckets que permitam hoje, ontem, 7 dias, 30 dias e intervalo de
+  datas sem nova emissao por flow.
+- [x] Definir payload budget, compressao, debounce, timeout e backpressure.
 - [x] Congelar timezone, coortes, denominadores, desfechos, conversao,
   abandono, saude e limites de atraso/travamento.
-- [x] Congelar retencao configuravel entre 1 e 30 dias e o comportamento de
-  callbacks posteriores a expiracao.
-- [x] Validar o fixture de snapshot com a equipe da Metrics antes de escrever
-  runtime.
+- [x] Congelar retencao entre 1 e 30 dias e callback posterior a expiracao.
+- [x] Criar fixtures do snapshot e da view sob demanda; validar overview local
+  e filtros detalhados pelo mesmo socket.
 
-**Criterio de saida:** contrato versionado aceito pelos dois lados, sem
-ambiguidade de grao, periodo, sala ou idempotencia.
+**Criterio de saida:** contrato interno versionado sem ambiguidade de grao,
+periodo, sala, autenticacao ou idempotencia.
 
-**Resultado:** concluido em 2026-09-25. A Metrics/SYNC confirmou envelope,
-sala por usuario, ausencia de compressao/limite formal de payload, teto de 400
-mensagens/segundo, ausencia de ACK e substituicao pela maior
-`snapshot_sequence`. O contrato aceito e `0.2.0`, com fixture em
-`ORCHESTRATION_JOURNEY_METRICS_WS_EXAMPLES.json`.
+**Resultado:** concluido documentalmente em 2026-09-25 por
+`ORCHESTRATION_WORKSPACE_WS_CONTRACT.md`, fixture JSON e testes de contrato. A
+UI abre um socket same-origin no BFF; o BFF apenas autentica o Upgrade e cria o
+tunel para o ORCH. O broadcast automatico ficou deliberadamente compacto por
+workspace, e a visao detalhada e requisitada no mesmo socket para impedir um
+cubo combinatorio de flows, dias, etapas e canais. A prova integrada do tunel,
+ticket e browser permanece nos Gates 6 e 7, onde existe runtime para testa-la.
 
-### Gate 2 — migrations e projecoes aditivas
+### Gate 2 — persistencia e controle por workspace
 
-- [x] Desenhar migration conforme o playbook oficial.
-- [x] Criar cobertura/configuracao, projecao de sessoes, fatos de etapa,
-  actions, eventos normalizados e estado de entrega do snapshot.
-- [x] Criar unicidades e indices orientados a flow, periodo, sessao e canal.
-- [x] Validar `retention_days` entre 1 e 30, com padrao/teto 30.
-- [ ] Implementar a limpeza incremental sem backfill no gate de runtime.
-- [x] Deixar a configuracao do produto ativa por padrao, com cobertura de flow
-  lazy no primeiro fato novo; a migration isolada nao possui writer.
-- [x] Validar idempotencia e rollback sem tocar tabelas funcionais nem dados
-  anteriores.
-- [x] Provar que nenhuma rotina de backfill foi criada.
-- [ ] Depois do merge, aplicar somente no workspace HighComm e validar objetos,
-  defaults, constraints e indices antes de considerar `migrate-all`.
+- [x] Migration `0023` criou configuracao, cobertura por flow, projecao de
+  sessoes, visitas de etapa, actions e eventos normalizados.
+- [x] Retencao 1–30 dias, constraints, unicidades e indices foram validados.
+- [x] A migration foi aplicada somente no HighComm e os objetos/defaults foram
+  confirmados antes de qualquer writer.
+- [x] Criar migration aditiva para dirty state, lease e ultimo snapshot por
+  workspace/janela.
+- [x] Manter `orch_journey_snapshot_delivery` sem writer e documentada como
+  obsoleta; remove-la somente em limpeza futura explicitamente aprovada.
+- [x] Implementar limpeza incremental sem backfill.
+- [x] Provar idempotencia/rollback sem tocar tabelas funcionais.
 
-**Criterio de saida:** estruturas vazias e reversiveis, defaults confirmados no
-workspace canario e nenhum comportamento de sessao alterado.
+**Criterio de saida:** uma unica coordenacao duravel por workspace, estruturas
+reversiveis e nenhum comportamento de sessao alterado.
 
-**Evidencia local:** migration `0023_create_orch_journey_metrics_tables`
-executada duas vezes no mesmo schema PostgreSQL temporario sob rollback; sete
-tabelas, configuracao `enabled=true`, retencao 30, cobertura lazy ativa e
-constraint de teto 30 confirmadas. Testes estaticos e de parser/migration:
-`7 passed`. Nenhum workspace real recebeu a migration.
+**Resultado:** concluido localmente em 2026-09-25 pela migration aditiva
+`0024`, ainda nao aplicada a workspace real. O singleton usa geracoes para nao
+perder dirty state durante o build, lease expiravel, retry e ultimo snapshot
+com teto estrutural de 1 MiB. A limpeza remove em lotes somente sessoes
+terminais expiradas e deixa sessoes ativas antigas intactas. Migration,
+coalescencia concorrente, retry e limpeza passaram em schemas PostgreSQL
+temporarios com rollback; nenhum hook de runtime foi conectado neste gate.
 
 ### Gate 3 — instrumentacao de sessao e etapas
 
-- [ ] Registrar inicio, entrada/transicao de etapa, espera, retomada e termino.
-- [ ] Resolver `stage` exclusivamente na revisao fixada da sessao.
-- [ ] Tornar eventos idempotentes em reexecucoes e callbacks repetidos.
-- [ ] Preservar loops, retornos e saltos sem inventar etapas.
-- [ ] Calcular etapa atual, maior etapa e numero de visitas separadamente.
-- [ ] Classificar cobertura ausente de `stage` como warning, nunca como zero
+- [x] Registrar inicio, entrada/transicao de etapa, espera, retomada e termino.
+- [x] Resolver `stage` exclusivamente na revisao fixada da sessao.
+- [x] Tornar eventos idempotentes em reexecucoes e callbacks repetidos.
+- [x] Preservar loops, retornos e saltos sem inventar etapas.
+- [x] Calcular etapa atual, maior etapa e numero de visitas separadamente.
+- [x] Classificar cobertura ausente de `stage` como warning, nunca como zero
   silencioso.
-- [ ] Fazer falha de telemetria usar savepoint/alarme sem interromper o fluxo.
+- [x] Fazer falha de telemetria usar savepoint/alarme sem interromper o fluxo.
 
 **Criterio de saida:** timeline exata de etapas para sessoes controladas, sem
 mudanca funcional no workflow.
 
 ### Gate 4 — actions, canais e desfechos
 
-- [ ] WhatsApp: uma action por mensagem outbound real.
-- [ ] SMS/RCS V2: uma action por dispatch, atualizada pelos callbacks.
-- [ ] Voz V2: uma action por tentativa real, nunca por ciclo/card.
-- [ ] Manter e-mail indisponivel enquanto nao houver emissor homologado.
-- [ ] Normalizar resultados sem apagar o status nativo do provedor.
-- [ ] Deduplicar callback e preservar ocorrido, recebido e processado.
-- [ ] Definir resultado terminal por `finish_flow`/tabulacao explicita, sem
+- [x] WhatsApp: uma action por mensagem outbound real.
+- [x] SMS/RCS V2: uma action por dispatch, atualizada pelos callbacks.
+- [x] Voz V2: uma action por tentativa real, nunca por ciclo/card.
+- [x] Manter e-mail indisponivel enquanto nao houver emissor homologado.
+- [x] Normalizar resultados sem apagar o status nativo do provedor.
+- [x] Deduplicar callback e preservar ocorrido, recebido e processado.
+- [x] Definir resultado terminal por `finish_flow`/tabulacao explicita, sem
   inferir sucesso apenas por chegar a `desfecho`.
 
 **Criterio de saida:** zero, um e varios acionamentos por sessao reconciliam
 exatamente com as fontes especializadas.
 
-### Gate 5 — produtor ORCH, fila e estado de entrega
+### Gate 5 — agregador unico por workspace
 
-- [ ] Criar fila exclusiva conforme `ORCH_QUEUE_PROFILE`.
-- [ ] Criar worker com hostname explicito e sem reutilizar fila existente.
-- [ ] Fazer o Beat apenas enfileirar flows sujos; nenhuma agregacao pesada no
+- [x] Criar fila exclusiva conforme `ORCH_QUEUE_PROFILE`.
+- [x] Criar worker com hostname explicito e sem reutilizar fila existente.
+- [x] Fazer o Beat apenas enfileirar workspaces sujos; nenhuma agregacao pesada no
   Beat.
-- [ ] Implementar debounce/coalescencia, lease, `SKIP LOCKED`, retry/backoff e
+- [x] Manter o schedule desligado por default e ativa-lo explicitamente em um
+  unico Beat somente depois de migration/escopo canario.
+- [x] Implementar debounce/coalescencia, lease, `SKIP LOCKED`, retry/backoff e
   `latest-state delivery`.
-- [ ] Preservar fatos e estado `dirty` durante indisponibilidade da Metrics,
-  sem acumular cada versao intermediaria.
-- [ ] Republicar o snapshot atual em reconexao e heartbeat.
-- [ ] Adicionar observabilidade de dirty age, versao, tentativa e falha.
-- [ ] Manter o produtor e contrato `dialer_metrics` intocados.
+- [x] Colapsar alteracoes de varios flows no mesmo debounce em um snapshot do
+  workspace.
+- [x] Preservar fatos, dirty state e ultimo snapshot quando nao houver UI
+  conectada, sem acumular versoes intermediarias.
+- [x] Adicionar logs estruturados de versao, tentativa, falha e notificacao.
+- [x] Manter o produtor e contrato `dialer_metrics` intocados.
 
 **Criterio de saida:** o estado mais novo sobrevive a desconexao e reinicio,
-reconcilia a tela e nao bloqueia sessoes.
+um unico worker logico agrega cada workspace e nada bloqueia sessoes.
 
-### Gate 6 — agregador e snapshot
+### Gate 6 — gateway WebSocket proprio e snapshot
 
-- [ ] Gerar resumo, progresso ativo, saude, funil, abandono por etapa, canais,
+- [x] Gerar resumo, progresso ativo, saude, funil, abandono por etapa, canais,
   desfechos, duracao e alertas.
-- [ ] Gerar somente sobre projecoes novas; proibir varredura de
+- [x] Gerar somente sobre projecoes novas; proibir varredura de
   `orch_session_metrics`.
-- [ ] Publicar `as_of`, `coverage_started_at`, denominadores e qualidade.
-- [ ] Publicar `retention_days`, `oldest_available_at` e janela inteiramente
+- [x] Publicar `as_of`, `coverage_started_at`, denominadores e qualidade.
+- [x] Publicar `retention_days`, `oldest_available_at` e janela inteiramente
   contida na cobertura ainda retida.
-- [ ] Usar sequencia monotonica por workspace/flow/janela.
-- [ ] Publicar flow sujo em ate cinco segundos e heartbeat em trinta segundos,
-  sujeitos a medicao antes do rollout.
+- [x] Usar sequencia monotonica por workspace/janela.
+- [x] Criar gateway com ticket curto e sala rigidamente vinculada ao workspace.
+- [x] Usar Redis apenas para notificar replicas; PostgreSQL permanece fonte da
+  verdade e fornece o snapshot inicial/reconexao.
+- [x] Configurar debounce de tres segundos e heartbeat em trinta segundos;
+  a comprovacao do SLO de cinco segundos permanece no Gate 8.
 - [ ] Medir plano/latencia e impor budget por snapshot.
+- [x] Manter todos os dados da dashboard no WebSocket; HTTP serve apenas ao
+  bootstrap seguro do ticket.
 
 **Criterio de saida:** snapshot deterministico e reconciliavel com os fatos,
-dentro do budget operacional.
+recebido por clientes em replicas distintas e dentro do budget operacional.
 
-### Gate 7 — testes locais e adversariais
+### Gate 7 — UI propria na Gestao de Extensoes
+
+- [x] Partir do `main` atualizado de `GOHP-LAB/target-extensions-ui`.
+- [x] Criar Dashboard em Orquestracao, preservando o rastreamento de sessoes
+  existente como drill-down complementar.
+- [x] Implementar visao geral, funil, flows, canais, desfechos, duracao, serie
+  temporal, saude, alertas e qualidade da cobertura.
+- [x] Implementar filtros locais por flow, revisao, periodo e canal.
+- [x] Exibir conexao, reconexao, snapshot sequence, cobertura, vazio, parcial e
+  indisponivel sem mascarar lacunas.
+- [ ] Validar responsividade, navegacao por teclado e degradacao segura no
+  browser contra runtime local.
+
+**Criterio de saida:** a tela da imagem e reproduzida com dados exclusivamente
+do WebSocket proprio, sem banco no navegador e sem dependencia de SYNC.
+
+### Gate 8 — testes locais e adversariais
 
 - [ ] Fato interno duplicado, atrasado e fora de ordem.
 - [ ] Reexecucao do mesmo card e loop entre etapas.
 - [ ] Salto de etapa e revisoes diferentes do mesmo flow.
-- [ ] Falha de agregacao, WebSocket e ACK observacional.
+- [ ] Falha de agregacao, Redis, WebSocket, ticket e reconexao entre replicas.
 - [ ] Reinicio do worker durante envio.
+- [ ] Varios flows alterados no mesmo debounce produzem uma emissao do
+  workspace.
 - [ ] Retencao 1/30 dias, reducao, aumento sem ressurreicao e limpeza em lotes.
 - [ ] Isolamento entre workspace/flow e ausencia de PII/payload bruto.
 - [ ] Regressao completa do workflow e stacks anteriores ativas.
@@ -547,7 +596,7 @@ dentro do budget operacional.
 **Criterio de saida:** testes automatizados e runtime local provam recuperacao,
 idempotencia e ausencia de regressao funcional.
 
-### Gate 8 — homologacao HighComm
+### Gate 9 — homologacao HighComm
 
 - [ ] Aplicar migration sem ativar cobertura.
 - [ ] Ativar somente workspace `ba7eb0ec-e565-447c-8c11-8f870cf72a60` e flow
@@ -558,32 +607,30 @@ idempotencia e ausencia de regressao funcional.
 - [ ] Caso sejam necessarios valores nao zero nas sete etapas, usar revisao
   controlada ou clone de telemetria; nao reclassificar cards falsamente.
 - [ ] Provar zero, um e varios canais, loop, sucesso, falha e espera.
-- [ ] Reconciliar fatos internos, snapshot e recepcao Metrics.
+- [ ] Reconciliar fatos internos, snapshot WebSocket e nossa UI.
 
-**Criterio de saida:** contagens exatas e recebimento comprovado na Metrics,
-sem depender da futura UI.
+**Criterio de saida:** contagens exatas e tela reconciliada no workspace
+HighComm, incluindo reconexao e atualizacao ao vivo.
 
-### Gate 9 — shadow rollout e robustez
+### Gate 10 — rollout, handoff futuro e retorno
 
-- [ ] Manter a Metrics recebendo em shadow antes de qualquer tela depender.
-- [ ] Comparar contagens de amostras controladas e medir atraso, dirty age e
+- [ ] Comparar contagens controladas e medir atraso, dirty age, payload, P95 e
   republicacao apos desconexao.
 - [ ] Validar carga, P95, isolamento, mascaramento e rollback.
 - [ ] Confirmar regressao do PDIAL e de `dialer_metrics` sem mudanca.
 - [ ] Expandir somente por allowlist de workspace/flow.
-
-**Criterio de saida:** telemetria estavel e auditavel sob carga representativa,
-com rollback comprovado.
-
-### Gate 10 — handoff e retorno ao objetivo principal
-
-- [ ] Entregar contrato e exemplos finais a Metrics/UI.
+- [ ] Entregar contrato e exemplos finais da nossa UI; uma futura integracao
+  Metrics deve consumir este contrato e nao inverter a dependencia.
 - [ ] Atualizar arquitetura, banco, configuracao, runbook, riscos e memoria.
 - [ ] Registrar commits, deploys e evidencias no `MAINTENANCE_LOG.md`.
 - [ ] Marcar pendencias objetivas sem prolongar esta pausa.
 - [ ] Retomar a homologacao do flow
   `f77b70f0-849b-4d11-9ccc-449b3c4ba981` no checkpoint registrado.
 - [ ] Retomar em seguida o objetivo estrategico do fluxo completo.
+
+**Criterio de saida:** dashboard propria estavel e auditavel sob carga
+representativa, rollback comprovado e trabalho principal retomado no ponto
+registrado.
 
 ## Gates historicos — preservados como evidencia, substituidos em 2026-09-25
 

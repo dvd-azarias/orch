@@ -113,6 +113,14 @@ from app.services.identidade_person_service import (
     normalize_workspace_id,
     query_identidade_person,
 )
+from app.services.journey_metrics_service import (
+    JourneyMetricsContext,
+    finalize_journey_session_metrics,
+    initialize_journey_session_metrics,
+    record_journey_channel_action_requested,
+    record_journey_component_entry,
+    record_journey_component_transition,
+)
 from app.services.manage_contact_channels_service import (
     MANAGE_CONTACT_CHANNEL_OPERATIONS,
     ManageContactChannelsError,
@@ -9751,6 +9759,7 @@ async def execute_workflow_m2_for_session(
     execution_started_perf = time.perf_counter()
     session_uuid_for_metrics: str | None = None
     revision_id_for_metrics: str | None = None
+    journey_metrics_context: JourneyMetricsContext | None = None
     metrics: list[dict[str, Any]] = []
 
     def _append_metric(
@@ -9826,6 +9835,12 @@ async def execute_workflow_m2_for_session(
             },
         )
         await persist_session_metrics(db_session, metrics=metrics)
+        await finalize_journey_session_metrics(
+            db_session,
+            context=journey_metrics_context,
+            stopped_reason=result.stopped_reason,
+            occurred_at=finished_at,
+        )
         logger.info(
             "workflow m2 execution metrics",
             extra={
@@ -9994,6 +10009,13 @@ async def execute_workflow_m2_for_session(
             raise WorkflowExecutionError("invalid_definition", "Definição do fluxo inválida para execução M2.")
 
         session_scope = _read_session_scope(runtime_variables)
+        journey_metrics_context = await initialize_journey_session_metrics(
+            db_session,
+            source_session_id=session_id,
+            flow_uuid=flow_uuid,
+            flow_revision_id=revision_id_for_metrics,
+            session_scope=session_scope,
+        )
         contextual_member_routing_enabled = _contextual_member_routing_enabled_for_scope(
             feature_enabled=contextual_member_routing_feature_enabled,
             session_scope=session_scope,
@@ -10538,6 +10560,15 @@ async def execute_workflow_m2_for_session(
 
             kind = component_kind(component)
             branch_label: str | None = None
+
+            await record_journey_component_entry(
+                db_session,
+                context=journey_metrics_context,
+                component=component,
+                card_cursor=next_card_uuid,
+                component_kind=kind,
+                occurred_at=step_started_at,
+            )
 
             try:
                 _ensure_unbound_person_component_supported(
@@ -11583,6 +11614,30 @@ async def execute_workflow_m2_for_session(
                             session_uuid=str(session_uuid_for_metrics or ""),
                             flow_revision_id=str(revision_id_for_metrics or ""),
                         )
+                        active_intent = _channel_supplier_v2_active_intent(
+                            runtime_variables
+                        )
+                        if (
+                            active_intent is not None
+                            and str(active_intent.get("channel") or "") == "sms"
+                        ):
+                            await record_journey_channel_action_requested(
+                                db_session,
+                                context=journey_metrics_context,
+                                component=component,
+                                component_kind=kind,
+                                channel="sms",
+                                source_kind="channel_supplier_v2_dispatch",
+                                source_id=str(
+                                    active_intent.get("correlation_key") or ""
+                                ),
+                                action_sequence=int(
+                                    active_intent.get("dispatch_sequence") or 1
+                                ),
+                                requested_at=_parse_iso_datetime(
+                                    active_intent.get("requested_at")
+                                ),
+                            )
                         logger.info(
                             "workflow m2 send with sms prepared",
                             extra={
@@ -11610,6 +11665,30 @@ async def execute_workflow_m2_for_session(
                             session_uuid=str(session_uuid_for_metrics or ""),
                             flow_revision_id=str(revision_id_for_metrics or ""),
                         )
+                        active_intent = _channel_supplier_v2_active_intent(
+                            runtime_variables
+                        )
+                        if (
+                            active_intent is not None
+                            and str(active_intent.get("channel") or "") == "rcs"
+                        ):
+                            await record_journey_channel_action_requested(
+                                db_session,
+                                context=journey_metrics_context,
+                                component=component,
+                                component_kind=kind,
+                                channel="rcs",
+                                source_kind="channel_supplier_v2_dispatch",
+                                source_id=str(
+                                    active_intent.get("correlation_key") or ""
+                                ),
+                                action_sequence=int(
+                                    active_intent.get("dispatch_sequence") or 1
+                                ),
+                                requested_at=_parse_iso_datetime(
+                                    active_intent.get("requested_at")
+                                ),
+                            )
                         logger.info(
                             "workflow m2 send with rcs prepared",
                             extra={
@@ -12307,6 +12386,13 @@ async def execute_workflow_m2_for_session(
                 runtime_variables=runtime_variables,
                 last_card_uuid=_to_uuid_or_none(last_card_uuid),
                 next_card_uuid=_to_uuid_or_none(next_card_uuid),
+            )
+            await record_journey_component_transition(
+                db_session,
+                context=journey_metrics_context,
+                component=component,
+                card_cursor=current,
+                occurred_at=datetime.now(timezone.utc),
             )
             step_latency_ms = (time.perf_counter() - step_started_perf) * 1000
             _append_metric(

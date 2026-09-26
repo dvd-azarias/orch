@@ -19,6 +19,7 @@ SWITCH_BOT_FLOW_QUEUE="${CELERY_SWITCH_BOT_FLOW_QUEUE:-orch_switch_bot_flow_f5_l
 DIALER_SUPPLIER_V2_QUEUE="${CELERY_DIALER_SUPPLIER_V2_QUEUE:-orch_dialer_supplier_v2_f5_local}"
 CHANNEL_SUPPLIER_V2_QUEUE="${CELERY_CHANNEL_SUPPLIER_V2_QUEUE:-orch_channel_supplier_v2_f5_local}"
 HEARTBEAT_QUEUE="${CELERY_HEARTBEAT_QUEUE:-orch_heartbeat_f5_local}"
+JOURNEY_SNAPSHOT_QUEUE="${CELERY_JOURNEY_SNAPSHOT_QUEUE:-orch_journey_snapshot_f5_local}"
 FILEAPP_INGEST_QUEUE="${CELERY_S3_FILES_INGEST_QUEUE:-orch_fileapp_ingest_f5_local}"
 FILEAPP_PROCESS_QUEUE="${CELERY_SOURCE_LIST_INGEST_QUEUE:-orch_fileapp_source_list_f5_local}"
 FILEAPP_MAILING_ASSOC_QUEUE="${CELERY_FILEAPP_MAILING_ASSOC_QUEUE:-orch_fileapp_mailing_assoc_f5_local}"
@@ -94,6 +95,7 @@ CELERY_SWITCH_BOT_FLOW_QUEUE=${SWITCH_BOT_FLOW_QUEUE}
 CELERY_DIALER_SUPPLIER_V2_QUEUE=${DIALER_SUPPLIER_V2_QUEUE}
 CELERY_CHANNEL_SUPPLIER_V2_QUEUE=${CHANNEL_SUPPLIER_V2_QUEUE}
 CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE}
+CELERY_JOURNEY_SNAPSHOT_QUEUE=${JOURNEY_SNAPSHOT_QUEUE}
 CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE}
 CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE}
 CELERY_FILEAPP_MAILING_ASSOC_QUEUE=${FILEAPP_MAILING_ASSOC_QUEUE}
@@ -120,10 +122,12 @@ wait_for_workers_ready() {
   local legacy_log="${RUN_DIR}/worker_legacy.log"
   local fileapp_log="${RUN_DIR}/worker_fileapp.log"
   local gf_log="${RUN_DIR}/worker_generate_file.log"
+  local journey_log="${RUN_DIR}/worker_journey_dashboard.log"
   for _ in $(seq 1 60); do
     if rg -q "orch-worker-legacy@.* ready\\." "${legacy_log}" 2>/dev/null \
       && rg -q "orch-worker-fileapp@.* ready\\." "${fileapp_log}" 2>/dev/null \
-      && rg -q "orch-worker-gf@.* ready\\." "${gf_log}" 2>/dev/null; then
+      && rg -q "orch-worker-gf@.* ready\\." "${gf_log}" 2>/dev/null \
+      && rg -q "orch-worker-journey@.* ready\\." "${journey_log}" 2>/dev/null; then
       echo "[ok] workers celery estão prontos."
       return 0
     fi
@@ -136,7 +140,7 @@ wait_for_workers_ready() {
 start_all() {
   show_env
   start_proc "api" \
-    "ORCH_QUEUE_PROFILE=f5_local CELERY_DISPATCH_QUEUE=${DISPATCH_QUEUE} CELERY_EXECUTE_QUEUE=${EXECUTE_QUEUE} CELERY_SWITCH_BOT_FLOW_QUEUE=${SWITCH_BOT_FLOW_QUEUE} CELERY_DIALER_SUPPLIER_V2_QUEUE=${DIALER_SUPPLIER_V2_QUEUE} CELERY_CHANNEL_SUPPLIER_V2_QUEUE=${CHANNEL_SUPPLIER_V2_QUEUE} CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE} CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} CELERY_FILEAPP_MAILING_ASSOC_QUEUE=${FILEAPP_MAILING_ASSOC_QUEUE} uvicorn app.main:app --host ${API_HOST} --port ${API_PORT}"
+    "ORCH_QUEUE_PROFILE=f5_local CELERY_DISPATCH_QUEUE=${DISPATCH_QUEUE} CELERY_EXECUTE_QUEUE=${EXECUTE_QUEUE} CELERY_SWITCH_BOT_FLOW_QUEUE=${SWITCH_BOT_FLOW_QUEUE} CELERY_DIALER_SUPPLIER_V2_QUEUE=${DIALER_SUPPLIER_V2_QUEUE} CELERY_CHANNEL_SUPPLIER_V2_QUEUE=${CHANNEL_SUPPLIER_V2_QUEUE} CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE} CELERY_JOURNEY_SNAPSHOT_QUEUE=${JOURNEY_SNAPSHOT_QUEUE} CELERY_S3_FILES_INGEST_QUEUE=${FILEAPP_INGEST_QUEUE} CELERY_SOURCE_LIST_INGEST_QUEUE=${FILEAPP_PROCESS_QUEUE} CELERY_FILEAPP_MAILING_ASSOC_QUEUE=${FILEAPP_MAILING_ASSOC_QUEUE} uvicorn app.main:app --host ${API_HOST} --port ${API_PORT}"
   wait_for_api
   start_proc "worker_legacy" \
     "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
@@ -153,8 +157,13 @@ celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-fileapp-w
     "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
 CELERY_DISPATCH_QUEUE=${DISPATCH_QUEUE} CELERY_HEARTBEAT_QUEUE=${HEARTBEAT_QUEUE} \
 CELERY_DISPATCH_WORKSPACE_UUID=${WORKSPACE_UUID} \
+CELERY_BEAT_JOURNEY_SNAPSHOT_ENABLED=true CELERY_JOURNEY_SNAPSHOT_QUEUE=${JOURNEY_SNAPSHOT_QUEUE} CELERY_JOURNEY_SNAPSHOT_WORKSPACE_UUID=${WORKSPACE_UUID} \
 CELERY_GENERATE_FILE_ENABLED=false \
 celery -A app.core.celery_app:celery_app beat --schedule=/tmp/orch-celerybeat-legacy-f5-local -l INFO"
+  start_proc "worker_journey_dashboard" \
+    "CELERY_ENABLED=true ORCH_JOURNEY_DASHBOARD_ENABLED=true ORCH_QUEUE_PROFILE=f5_local \
+CELERY_JOURNEY_SNAPSHOT_QUEUE=${JOURNEY_SNAPSHOT_QUEUE} CELERY_JOURNEY_SNAPSHOT_WORKSPACE_UUID=${WORKSPACE_UUID} \
+celery -A app.core.celery_app:celery_app worker --hostname=orch-celery-journey-worker@_macbook_deivid_dev -n orch-worker-journey@%h -Q ${JOURNEY_SNAPSHOT_QUEUE} --without-mingle --without-gossip -l INFO"
   start_proc "worker_generate_file" \
     "CELERY_ENABLED=true WORKFLOW_V2_ENABLED=true WORKFLOW_V2_EXECUTE_M2=true ORCH_QUEUE_PROFILE=f5_local \
 CELERY_GENERATE_FILE_ENABLED=true CELERY_GENERATE_FILE_WORKSPACE_UUID=${WORKSPACE_UUID} \
@@ -172,6 +181,7 @@ celery -A app.core.celery_app:celery_app beat --schedule=/tmp/orch-celerybeat-gf
 stop_all() {
   stop_proc "beat_generate_file"
   stop_proc "worker_generate_file"
+  stop_proc "worker_journey_dashboard"
   stop_proc "beat_legacy"
   stop_proc "worker_fileapp"
   stop_proc "worker_legacy"
@@ -184,6 +194,7 @@ status_all() {
   status_proc "worker_fileapp"
   status_proc "beat_legacy"
   status_proc "worker_generate_file"
+  status_proc "worker_journey_dashboard"
   status_proc "beat_generate_file"
 }
 

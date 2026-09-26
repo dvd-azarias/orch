@@ -2297,3 +2297,132 @@ de banco real nesta entrega.
 - Nenhum workspace real foi migrado. Após merge, aplicar somente no workspace
   HighComm, validar catálogo/constraints/índices e só então decidir sobre
   `migrate-all`.
+
+## 2026-09-25 — Dashboard de jornadas internalizada por workspace
+
+### REQUEST / CLASSIFICATION
+
+Substituir a dependencia planejada de SYNC/Metrics por uma cadeia controlada
+integralmente pelo ORCH e pela UI de Gestao de Extensoes. A meta e reduzir o
+volume de publicacao, eliminar coordenacao externa e conservar o caminho para
+uma futura Metrics integrar como cliente. `ALPHA_FIX_OPTIONAL`; Gate 0
+exclusivamente documental.
+
+### DECISION / SAFETY
+
+- O ORCH continua fonte duravel dos fatos; a migration `0023` permanece valida
+  para configuracao, cobertura por flow, sessoes, etapas, actions e eventos.
+- Antes deste redirecionamento, a migration `0023` foi aplicada somente no
+  workspace HighComm `ba7eb0ec-e565-447c-8c11-8f870cf72a60`: sete tabelas,
+  48 constraints, 25 indices, `enabled=true`, retencao 30 e nenhuma linha de
+  fato foram confirmados. Nenhum outro workspace recebeu a migration.
+- O emissor passa a ser unico em sentido logico por workspace. Mudancas de
+  varios flows dentro do debounce produzem um snapshot do workspace, nunca uma
+  mensagem por sessao ou um publisher automatico por flow.
+- A sala sera `orch.journey.workspace.{workspace_uuid}` e a UI propria
+  consumira um WebSocket do ORCH. HTTP sera usado apenas para obter ticket
+  curto/de uso unico pelo BFF.
+- PostgreSQL guarda o ultimo snapshot e sua sequencia. Redis apenas notifica
+  replicas com sockets locais e nao se torna fonte de verdade.
+- O controle `orch_journey_snapshot_delivery`, criado para entrega por flow ao
+  SYNC, permanece sem writer e sera aposentado antes do rollout. A correcao de
+  coordenacao por workspace sera aditiva; nenhuma migration aplicada sera
+  reescrita.
+- O contrato `ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` foi marcado como
+  superseded antes de qualquer publisher. PDIAL e `dialer_metrics` permanecem
+  intocados.
+
+### CHECKPOINT / NEXT
+
+- O Gate 3 foi interrompido antes de integrar hooks ao executor. O worktree
+  isolado possui somente um servico novo ainda nao rastreado, preservado como
+  prototipo para a futura instrumentacao idempotente.
+- Frente ativa: congelar o contrato do WebSocket proprio e seu fixture; depois
+  criar controle duravel por workspace e somente entao retomar os writers.
+- O retorno obrigatorio permanece no flow HighComm
+  `f77b70f0-849b-4d11-9ccc-449b3c4ba981` e, na sequencia, no objetivo do fluxo
+  completo.
+
+## 2026-09-25 — Gates 1 e 2 da dashboard propria de jornadas
+
+### REQUEST / CLASSIFICATION
+
+Fechar o contrato do WebSocket controlado pelo ORCH e criar a coordenacao
+duravel minima por workspace antes de ligar qualquer writer. Mudanca
+`ALPHA_FIX_OPTIONAL`, isolada da semantica funcional do workflow.
+
+### CONTRACT / SAFETY
+
+- Contrato `ORCHESTRATION_WORKSPACE_WS_CONTRACT.md` congelado em `1.0`.
+- A UI obtem ticket opaco de uso unico pelo BFF e abre um WebSocket
+  same-origin. O BFF apenas autentica o Upgrade e cria tunel para o ORCH; nao
+  interpreta frame nem escolhe workspace.
+- O broadcast automatico contem overview e resumos compactos por flow. A view
+  detalhada e solicitada no mesmo socket, evitando cubo automatico de 30 dias
+  por flow, etapa e canal.
+- O PDIAL, `dialer_metrics`, callbacks funcionais e runtime de sessao ficaram
+  fora da mudanca.
+
+### PERSISTENCE / VALIDATION
+
+- Migration aditiva `0024` cria somente
+  `orch_journey_workspace_snapshot_state`, uma linha por schema/workspace.
+- Geracoes dirty/built preservam mudancas concorrentes ao build; lease e retry
+  sao comparados por token + geracao; o ultimo snapshot tem limite estrutural
+  de 1 MiB.
+- Limpeza incremental remove somente sessoes terminais vencidas, em lote de no
+  maximo mil, e preserva sessoes ativas mesmo antigas.
+- Foram executados 18 testes focados; migration `0024` idempotente,
+  coalescencia durante lease, retry, limpeza, fixtures e migration `0023`
+  passaram contra schemas PostgreSQL temporarios com rollback.
+- Nenhum workspace real recebeu a `0024`; nenhum writer, worker, Beat, ticket
+  ou WebSocket foi ativado.
+
+### NEXT
+
+Gate 3: integrar somente os writers idempotentes de sessao/etapa sob
+failure-safe, usando o prototipo preservado e marcando dirty na mesma
+transacao. Depois seguem actions/canais, agregador, gateway, UI e canario. O
+checkpoint final continua sendo retomar `f77b70f0-849b-4d11-9ccc-449b3c4ba981`
+e o fluxo completo.
+
+## 2026-09-26 — Gates 3 a 7 da dashboard propria de jornadas
+
+### IMPLEMENTACAO / SEGURANCA
+
+- Writers failure-safe projetam ciclo da sessao e as sete etapas a partir da
+  revisao fixada, preservando loops e marcando o workspace dirty na mesma
+  transacao.
+- O ledger registra actions reais de voz, WhatsApp, SMS e RCS e seus callbacks
+  idempotentes. E-mail continua explicitamente ausente. PDIAL e
+  `dialer_metrics` ficaram intocados.
+- Worker/fila exclusivos agregam somente workspaces sujos, usando geracao,
+  lease, debounce e retry duraveis. PostgreSQL guarda o ultimo snapshot;
+  Redis publica apenas workspace/sequencia.
+- O gateway usa ticket opaco, curto e de uso unico, fan-out local coalescido,
+  heartbeat, snapshot inicial/reconexao e request/response de filtros no mesmo
+  socket. Payloads e views possuem teto de 1 MiB e nao carregam PII bruta.
+- A UI oficial foi preparada a partir de `origin/main` atualizado. O BFF
+  permite somente o `POST` exato do ticket e o Upgrade exato do socket,
+  mantendo Basic Auth, CSRF e workspace fail-closed.
+
+### EVIDENCIAS / PENDENCIAS
+
+- Agregacao, snapshot, ticket, coalescencia, filtros e callbacks: 66 testes
+  direcionados passaram; o worker gerou e persistiu envelope real em schema
+  PostgreSQL temporario. A propria rota WebSocket do ORCH tambem foi exercitada
+  com autenticacao por ticket, snapshot inicial rigidamente escopado ao
+  workspace e rejeicao `4401` para ticket invalido.
+- A regressao ampliada de workflow/callbacks somou `499 passed`; nove falhas
+  ja conhecidas da baseline permaneceram (sete chamadas de teste com a antiga
+  assinatura `trigger_orch(flow_uuid=...)` e duas expectativas antigas de
+  `stopped_reason`). Nenhuma falha nova foi atribuida a dashboard.
+- UI: lint, TypeScript e build Node `22.17.1` passaram; smoke BFF fora da
+  sandbox comprovou credenciais, ticket e tunel WebSocket, alem das rotas
+  anteriores.
+- Ainda pendentes: stack local completa, browser/responsividade, falhas
+  adversariais, duas replicas, medicao de SLO/carga, migrations/ativacao no
+  canario e rollout. Nenhum commit, deploy ou migration real foi executado
+  nesta etapa local.
+- O retorno obrigatorio permanece no flow
+  `f77b70f0-849b-4d11-9ccc-449b3c4ba981` e depois no fluxo completo.

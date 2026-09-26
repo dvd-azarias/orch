@@ -61,6 +61,7 @@ As flags legada e nova sao mutuamente exclusivas. Detalhes: `docs/BILLING_BATCH_
 | generate run | `orch_component_generate_file_run` | sufixo launchd | sufixo f5 |
 | generate scan | `orch_component_generate_file_scan` | sufixo launchd | sufixo f5 |
 | billing | `orch.billing.outbox` | `orch.billing.outbox_launchd_local` | `orch.billing.outbox_f5_local` |
+| snapshot da jornada | `orch_journey_snapshot` | `orch_journey_snapshot_launchd_local` | `orch_journey_snapshot_f5_local` |
 
 Overrides `CELERY_*_QUEUE` prevalecem. API, publishers e consumers precisam usar os mesmos nomes.
 
@@ -79,6 +80,26 @@ Defaults importantes:
 - heartbeat, dispatch, reconcile de channel events e post-process FileApp sao habilitados por default.
 - rescue e hygiene FileApp sao desabilitados por default.
 - broker ausente cai em `memory://`, inadequado para processos separados.
+
+## Dashboard propria de jornadas
+
+- `ORCH_JOURNEY_DASHBOARD_ENABLED=true`: habilita writers failure-safe,
+  agregacao e ticket/socket. O default e ativo, mas nao produz dados em schema
+  sem as migrations `0023` e `0024`.
+- `CELERY_JOURNEY_SNAPSHOT_QUEUE`: fila exclusiva resolvida por
+  `ORCH_QUEUE_PROFILE`; nao compartilhar com workflow ou outras aplicacoes.
+- `CELERY_BEAT_JOURNEY_SNAPSHOT_ENABLED=false`: default seguro; quando ativado,
+  o Beat apenas localiza workspaces sujos e enfileira o build. Habilitar o
+  schedule em um unico Beat logico do ambiente e somente apos migration/escopo.
+- `CELERY_JOURNEY_SNAPSHOT_INTERVAL_SECONDS=2`: frequencia do scanner.
+- `CELERY_JOURNEY_SNAPSHOT_WORKSPACE_UUID`: escopo opcional e recomendado no
+  canario.
+- `ORCH_JOURNEY_SNAPSHOT_LEASE_SECONDS=120`: lease duravel do build.
+- `ORCH_JOURNEY_REDIS_URL`: Redis usado somente para ticket curto e
+  notificacao entre replicas; se ausente, o ticket falha fechado e o snapshot
+  permanece duravel no PostgreSQL.
+- `ORCH_JOURNEY_WS_TICKET_TTL_SECONDS=30`: validade do ticket opaco e de uso
+  unico emitido ao BFF.
 
 ## Integracoes
 
