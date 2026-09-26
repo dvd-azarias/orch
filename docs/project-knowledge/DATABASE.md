@@ -31,7 +31,8 @@
 | `orch_journey_stage_visits` | workspace | visitas e transicoes pelas sete etapas canonicas |
 | `orch_journey_channel_actions` | workspace | uma tentativa externa real por acionamento |
 | `orch_journey_channel_action_events` | workspace | ciclo de vida normalizado de cada acionamento |
-| `orch_journey_snapshot_delivery` | workspace | snapshot mais recente e estado coalescivel de publicacao WS |
+| `orch_journey_snapshot_delivery` | workspace | controle historico por flow/SYNC da `0023`; permanece inerte e sem writer |
+| `orch_journey_workspace_snapshot_state` | workspace | singleton de dirty generation, lease, retry, sequencia e ultimo snapshot agregado do workspace |
 | `orch_alembic_version` | workspace | controle de migrations do ORCH |
 | `target.orch_flow_aliases` | central | alias curto para workspace/flow |
 
@@ -48,7 +49,7 @@
 
 ## Migrations
 
-Lista executavel: `0001` a `0015`, depois `0018` a `0023`.
+Lista executavel: `0001` a `0015`, depois `0018` a `0024`.
 
 - `0016/0017` permanecem como arquivos historicos, mas foram retiradas do pipeline porque alteravam enum de outro sistema.
 - Todas as pendencias de um workspace rodam numa transacao.
@@ -58,8 +59,14 @@ Lista executavel: `0001` a `0015`, depois `0018` a `0023`.
 - `0023` cria somente sete objetos `orch_journey_*` e seus indices. Nao altera
   nem indexa tabelas existentes. `orch_journey_settings` nasce com
   `enabled=true` e retencao 30; a cobertura de flow e criada de forma lazy no
-  primeiro fato novo, sem backfill. A migration ainda depende de merge e
-  aplicacao controlada no workspace HighComm.
+  primeiro fato novo, sem backfill. Em 2026-09-25, foi aplicada somente no
+  workspace HighComm; nenhum outro workspace recebeu essa migration.
+- `0024` cria somente o singleton
+  `orch_journey_workspace_snapshot_state`, sem alterar a `0023`. Geracoes
+  separam dirty observado de snapshot construido e impedem perder mudanca que
+  ocorra durante um lease. O payload e limitado a 1 MiB por constraint. A
+  migration foi validada localmente em schema temporario com rollback e ainda
+  nao foi aplicada em workspace real.
 - O parser SQL e simples e nao suporta genericamente dollar-quoted blocks.
 - Paths de SQL sao relativos ao diretorio de execucao.
 

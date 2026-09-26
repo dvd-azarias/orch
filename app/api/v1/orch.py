@@ -99,6 +99,7 @@ from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 from app.services.workflow_m2_service import WorkflowExecutionError, execute_workflow_m2_for_session
 from app.services.workflow_runtime_service import WorkflowBootstrapError, bootstrap_workflow_for_session
 from app.services.migration_service import migrate_all_active_workspaces, migrate_workspace
+from app.services.journey_metrics_service import record_journey_channel_action_event
 from app.services.session_service import persist_session
 from app.services.workspace_service import (
     bind_workspace_context,
@@ -1051,6 +1052,31 @@ async def callback_dialer_supplier_v2_by_workspace(
             flow_uuid=str(flow_uuid),
             callback_payload=callback_payload,
         )
+        if (
+            persisted is not None
+            and bool(persisted.get("accepted"))
+            and not bool(persisted.get("idempotent"))
+        ):
+            await record_journey_channel_action_event(
+                db_session,
+                source_session_id=int(persisted["session_id"]),
+                flow_uuid=str(flow_uuid),
+                session_uuid=str(persisted["session_uuid"]),
+                channel="voice",
+                source_kind="dialer_supplier_v2_attempt",
+                source_id=str(request.attempt_id),
+                native_status=request.outcome,
+                event_id=str(request.event_id),
+                occurred_at=request.occurred_at,
+                component_ref_id=request.component_ref_id,
+                component_kind="send_with_dialer_handoff",
+                provider_reference=str(request.attempt_id),
+                metadata={
+                    "decision": request.decision,
+                    "decision_source": request.decision_source,
+                    "release_mapping_version": request.release_mapping_version,
+                },
+            )
     if persisted is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -18,7 +18,9 @@ scripts/dev_phase_stack.sh status
 scripts/dev_phase_stack.sh smoke 5
 ```
 
-Processos esperados: API, worker/beat workflow, worker FileApp e worker/beat generate-file.
+Processos esperados: API, worker/beat workflow, worker FileApp, worker/beat
+generate-file e, quando a dashboard estiver habilitada, worker exclusivo
+`orch_journey_snapshot` mais um unico Beat publicando seu scanner.
 
 O billing batch nao integra ainda a stack DEV canonica e nasce desligado. Para sua validacao/rollout, seguir exclusivamente `docs/BILLING_BATCH_RUNBOOK.md` e usar a fila local isolada do profile ativo.
 
@@ -150,6 +152,27 @@ Sequencia segura:
 6. habilitar a flag no ambiente alvo, reiniciar os processos e monitorar os dois alarmes `workflow_m2_contact_member_scope_not_found` e `workflow_m2_contact_member_routing_update_failed`.
 
 Rollback: definir a flag como `false` e reiniciar API/workers. Isso restaura o seletor legado; nao desfaz `linked_actuator`, `ani`, consumo ou sessoes ja terminalizadas.
+
+## Dashboard de jornadas por WebSocket
+
+Rollout seguro:
+
+1. aplicar as migrations `0023` e `0024` primeiro somente no workspace
+   canario e conferir tabelas/constraints;
+2. configurar `CELERY_JOURNEY_SNAPSHOT_WORKSPACE_UUID` para o HighComm e usar
+   a fila exclusiva do profile;
+3. subir o worker com hostname explicito e habilitar o scanner em apenas um
+   Beat;
+4. reiniciar a API para carregar ticket/gateway e confirmar que Redis
+   indisponivel recusa ticket sem afetar sessoes;
+5. validar snapshot no PostgreSQL, sequencia crescente, ticket de uso unico,
+   Upgrade pelo BFF, reconexao e filtro pelo mesmo socket;
+6. reconciliar fatos, snapshot e UI antes de remover o escopo canario.
+
+Rollback: `ORCH_JOURNEY_DASHBOARD_ENABLED=false`, desligar o scanner e o worker
+dedicado e reiniciar API/workers que escrevem telemetria. Preservar as tabelas
+e o ultimo snapshot; nao executar migration reversa nem apagar fatos. PDIAL e
+`dialer_metrics` ficam fora desse mecanismo.
 
 Reparacao historica e uma operacao separada. Nao executar backfill em massa: reconstruir a relacao sessao/lista pelo payload, conferir ownership externo e aplicar updates guardados por IDs aprovados.
 

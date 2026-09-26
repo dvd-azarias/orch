@@ -41,6 +41,10 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("0021_create_fileapp_ingest_receipts", "sql/021_create_fileapp_ingest_receipts.sql"),
     ("0022_create_orch_billing_batch_tables", "sql/022_create_orch_billing_batch_tables.sql"),
     ("0023_create_orch_journey_metrics_tables", "sql/023_create_orch_journey_metrics_tables.sql"),
+    (
+        "0024_create_orch_journey_workspace_snapshot_state",
+        "sql/024_create_orch_journey_workspace_snapshot_state.sql",
+    ),
 ]
 
 

@@ -1,0 +1,276 @@
+{
+  "ticket_response": {
+    "data": {
+      "ticket": "opaque-single-use-ticket",
+      "expires_in_seconds": 30
+    }
+  },
+  "authenticate": {
+    "type": "authenticate",
+    "version": "1.0",
+    "ticket": "opaque-single-use-ticket"
+  },
+  "authenticated": {
+    "type": "authenticated",
+    "version": "1.0",
+    "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+    "heartbeat_seconds": 30
+  },
+  "snapshot": {
+    "type": "orchestration_workspace_snapshot",
+    "meta": {
+      "version": "1.0",
+      "snapshot_id": "00000000-0000-0000-0000-000000000042",
+      "snapshot_sequence": 42,
+      "generated_at": "2026-09-25T21:00:04.900Z",
+      "reason": "update",
+      "source_application": "orch"
+    },
+    "payload": {
+      "as_of": "2026-09-25T21:00:04.900Z",
+      "workspace": {
+        "uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        "name": "Highcomm"
+      },
+      "retention": {
+        "retention_days": 30,
+        "maximum_days": 30,
+        "coverage_started_at": "2026-09-25T18:00:00.000Z",
+        "oldest_available_at": "2026-09-25T18:00:00.000Z"
+      },
+      "catalog": {
+        "flows": [
+          {
+            "uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+            "name": "Bradesco TRC 002"
+          }
+        ],
+        "revisions": [
+          {
+            "uuid": "10000000-0000-0000-0000-000000000070",
+            "flow_uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+            "version": 70
+          }
+        ],
+        "channels": ["voice", "whatsapp", "sms", "rcs", "email"],
+        "stages": [
+          {"id": "entrada", "ordinal": 1, "label": "Entrada"},
+          {"id": "identificacao", "ordinal": 2, "label": "Identificacao"},
+          {"id": "qualificacao", "ordinal": 3, "label": "Qualificacao"},
+          {"id": "abordagem", "ordinal": 4, "label": "Abordagem"},
+          {"id": "proposta", "ordinal": 5, "label": "Proposta"},
+          {"id": "decisao", "ordinal": 6, "label": "Decisao"},
+          {"id": "desfecho", "ordinal": 7, "label": "Desfecho"}
+        ]
+      },
+      "workspace_view": {
+        "summary": {
+          "sessions_started": 10,
+          "sessions_in_progress": 2,
+          "sessions_completed": 6,
+          "sessions_abandoned": 1,
+          "sessions_failed": 1,
+          "sessions_without_actions": 1,
+          "conversions": 4,
+          "conversion_denominator": 10
+        },
+        "active_progress": [
+          {"stage_id": "abordagem", "sessions": 1},
+          {"stage_id": "decisao", "sessions": 1}
+        ],
+        "health": {
+          "grain": "sessions",
+          "error": 1,
+          "awaiting_intervention": 0,
+          "stalled": 0,
+          "delayed": 1,
+          "normal": 8
+        },
+        "funnel": [
+          {"stage_id": "entrada", "ordinal": 1, "reached_sessions": 10, "visits": 10},
+          {"stage_id": "identificacao", "ordinal": 2, "reached_sessions": 10, "visits": 10},
+          {"stage_id": "qualificacao", "ordinal": 3, "reached_sessions": 9, "visits": 9},
+          {"stage_id": "abordagem", "ordinal": 4, "reached_sessions": 8, "visits": 12},
+          {"stage_id": "proposta", "ordinal": 5, "reached_sessions": 5, "visits": 5},
+          {"stage_id": "decisao", "ordinal": 6, "reached_sessions": 5, "visits": 5},
+          {"stage_id": "desfecho", "ordinal": 7, "reached_sessions": 6, "visits": 6}
+        ],
+        "stage_dropoffs": [
+          {"stage_id": "qualificacao", "sessions": 1},
+          {"stage_id": "abordagem", "sessions": 1}
+        ],
+        "channels": [
+          {
+            "channel": "voice",
+            "grain": "actions",
+            "actions": 12,
+            "outcomes": {
+              "answered": 4,
+              "machine": 2,
+              "busy": 1,
+              "no_answer": 2,
+              "rejected": 1,
+              "invalid_number": 1,
+              "failure": 1
+            }
+          },
+          {
+            "channel": "sms",
+            "grain": "actions",
+            "actions": 3,
+            "outcomes": {"sent": 3, "delivered": 2, "failed": 1}
+          },
+          {
+            "channel": "whatsapp",
+            "grain": "actions",
+            "actions": 2,
+            "outcomes": {"sent": 2, "delivered": 2, "read": 1, "failed": 0}
+          }
+        ],
+        "outcomes": [
+          {"grain": "sessions", "outcome": "success", "count": 4},
+          {"grain": "sessions", "outcome": "improductive", "count": 2},
+          {"grain": "sessions", "outcome": "abandoned", "count": 1},
+          {"grain": "sessions", "outcome": "failed", "count": 1}
+        ],
+        "duration": {
+          "grain": "sessions",
+          "average_seconds": 185.4,
+          "histogram": [
+            {"lte_seconds": 60, "count": 2},
+            {"lte_seconds": 300, "count": 5},
+            {"lte_seconds": 900, "count": 1}
+          ]
+        },
+        "time_series": [
+          {
+            "date": "2026-09-25",
+            "timezone": "America/Sao_Paulo",
+            "sessions_started": 10,
+            "sessions_completed": 6,
+            "actions": 17
+          }
+        ],
+        "alerts": [
+          {"code": "journey_metrics_stage_missing", "count": 1}
+        ]
+      },
+      "flow_summaries": [
+        {
+          "flow": {
+            "uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+            "name": "Bradesco TRC 002"
+          },
+          "summary": {
+            "sessions_started": 10,
+            "sessions_in_progress": 2,
+            "sessions_completed": 6,
+            "sessions_abandoned": 1,
+            "sessions_failed": 1,
+            "sessions_without_actions": 1,
+            "conversions": 4,
+            "conversion_denominator": 10
+          },
+          "coverage_complete": false,
+          "last_fact_at": "2026-09-25T21:00:03.000Z"
+        }
+      ],
+      "data_quality": {
+        "complete": false,
+        "warnings": [
+          {
+            "code": "journey_metrics_stage_missing",
+            "count": 1,
+            "message": "Um card executado nao possuia etapa valida na revisao fixada."
+          }
+        ]
+      }
+    }
+  },
+  "view_request": {
+    "type": "orchestration_view_request",
+    "request_id": "view-1",
+    "filters": {
+      "flow_uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+      "revision_uuid": null,
+      "channels": ["voice", "sms"],
+      "period": {
+        "from": "2026-09-25",
+        "to": "2026-09-25",
+        "timezone": "America/Sao_Paulo"
+      }
+    }
+  },
+  "view": {
+    "type": "orchestration_workspace_view",
+    "request_id": "view-1",
+    "snapshot_sequence": 42,
+    "generated_at": "2026-09-25T21:00:05.100Z",
+    "filters": {
+      "flow_uuid": "f77b70f0-849b-4d11-9ccc-449b3c4ba981",
+      "revision_uuid": null,
+      "channels": ["voice", "sms"],
+      "period": {
+        "from": "2026-09-25",
+        "to": "2026-09-25",
+        "timezone": "America/Sao_Paulo"
+      }
+    },
+    "view": {
+      "summary": {
+        "sessions_started": 10,
+        "sessions_in_progress": 2,
+        "sessions_completed": 6,
+        "sessions_abandoned": 1,
+        "sessions_failed": 1,
+        "sessions_without_actions": 1,
+        "conversions": 4,
+        "conversion_denominator": 10
+      },
+      "funnel": [
+        {"stage_id": "entrada", "ordinal": 1, "reached_sessions": 10, "visits": 10},
+        {"stage_id": "identificacao", "ordinal": 2, "reached_sessions": 10, "visits": 10},
+        {"stage_id": "qualificacao", "ordinal": 3, "reached_sessions": 9, "visits": 9},
+        {"stage_id": "abordagem", "ordinal": 4, "reached_sessions": 8, "visits": 12},
+        {"stage_id": "proposta", "ordinal": 5, "reached_sessions": 5, "visits": 5},
+        {"stage_id": "decisao", "ordinal": 6, "reached_sessions": 5, "visits": 5},
+        {"stage_id": "desfecho", "ordinal": 7, "reached_sessions": 6, "visits": 6}
+      ],
+      "channels": [
+        {
+          "channel": "voice",
+          "grain": "actions",
+          "actions": 12,
+          "outcomes": {"answered": 4, "machine": 2, "busy": 1, "no_answer": 2, "rejected": 1, "invalid_number": 1, "failure": 1}
+        },
+        {
+          "channel": "sms",
+          "grain": "actions",
+          "actions": 3,
+          "outcomes": {"sent": 3, "delivered": 2, "failed": 1}
+        }
+      ],
+      "duration": {
+        "grain": "sessions",
+        "average_seconds": 185.4,
+        "histogram": [
+          {"lte_seconds": 60, "count": 2},
+          {"lte_seconds": 300, "count": 5},
+          {"lte_seconds": 900, "count": 1}
+        ]
+      },
+      "time_series": [
+        {"date": "2026-09-25", "timezone": "America/Sao_Paulo", "sessions_started": 10, "sessions_completed": 6, "actions": 15}
+      ]
+    }
+  },
+  "heartbeat": {
+    "type": "heartbeat",
+    "workspace_uuid": "ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+    "latest_snapshot_sequence": 42,
+    "sent_at": "2026-09-25T21:00:30.000Z"
+  },
+  "resync": {
+    "type": "resync"
+  }
+}

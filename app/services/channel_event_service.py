@@ -20,6 +20,7 @@ from app.repositories.orch_channel_events_repository import (
 )
 from app.repositories.orch_sessions_repository import fetch_session_workflow_state, set_session_cdr
 from app.services.dialer_release_mapper import resolve_dialer_status_from_release
+from app.services.journey_metrics_service import record_journey_channel_action_event
 from app.services.workflow_engine import definition_has_finish_flow_webhook
 from app.services.workflow_revision_service import resolve_workflow_revision_for_session
 
@@ -288,6 +289,27 @@ async def persist_channel_events(
                     payload=event.payload,
                 )
                 if was_inserted:
+                    if (
+                        event.channel == "whatsapp"
+                        and event.event_id is not None
+                        and event.event_type
+                        in {"sent", "delivered", "read", "failed", "limit_reached"}
+                    ):
+                        await record_journey_channel_action_event(
+                            db_session,
+                            source_session_id=session_id,
+                            flow_uuid=flow_uuid,
+                            session_uuid=None,
+                            channel="whatsapp",
+                            source_kind="whatsapp_provider_message",
+                            source_id=str(event.event_id),
+                            native_status=event.event_type,
+                            event_id=str(event.event_id),
+                            occurred_at=event.event_ts,
+                            component_kind="send_whatsapp",
+                            provider_reference=str(event.event_id),
+                            metadata={"provider": "whatsapp"},
+                        )
                     if event.channel == "dialer" and await _session_has_finish_flow_webhook(
                         db_session,
                         flow_uuid=flow_uuid,

@@ -100,6 +100,15 @@ if settings.orch_billing_snapshot_enabled:
         "schedule": max(5, settings.orch_billing_publish_interval_seconds),
         "options": {"queue": settings.celery_dispatch_queue},
     }
+if (
+    settings.orch_journey_dashboard_enabled
+    and settings.celery_beat_journey_snapshot_enabled
+):
+    beat_schedule["orch-journey-dashboard-scan-dirty-workspaces"] = {
+        "task": "app.tasks.journey_dashboard.scan_dirty_workspaces",
+        "schedule": max(1, settings.celery_journey_snapshot_interval_seconds),
+        "options": {"queue": settings.celery_journey_snapshot_queue},
+    }
 
 celery_app = Celery(
     "orch",
@@ -113,6 +122,7 @@ celery_app = Celery(
         "app.tasks.generate_file_tasks",
         "app.tasks.fileapp_ingest_tasks",
         "app.tasks.billing_tasks",
+        "app.tasks.journey_dashboard_tasks",
     ],
 )
 
@@ -137,6 +147,12 @@ celery_app.conf.update(
         "app.tasks.channel_supplier_v2.reconcile_pending_dispatches": {"queue": settings.celery_dispatch_queue},
         "app.tasks.dialer_supplier_v2.reconcile_pending_cycles": {"queue": settings.celery_dispatch_queue},
         "app.tasks.billing.publish_pending_snapshots": {"queue": settings.celery_dispatch_queue},
+        "app.tasks.journey_dashboard.scan_dirty_workspaces": {
+            "queue": settings.celery_journey_snapshot_queue
+        },
+        "app.tasks.journey_dashboard.build_workspace_snapshot": {
+            "queue": settings.celery_journey_snapshot_queue
+        },
         "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},
         "app.tasks.component_generate_file.run": {"queue": settings.celery_generate_file_run_queue},
         "app.tasks.fileapp.ingest_event": {"queue": settings.celery_s3_files_ingest_queue},

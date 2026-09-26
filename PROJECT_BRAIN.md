@@ -211,6 +211,18 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 
 ### CONFIRMED
 
+- A dashboard propria de jornadas possui implementacao local aditiva, ainda
+  nao implantada: migrations `0023/0024`, projecoes idempotentes de sessao,
+  sete etapas e actions reais de voz/WhatsApp/SMS/RCS, dirty state por
+  workspace, agregador em fila exclusiva, snapshot duravel de ate 1 MiB e
+  gateway WebSocket com ticket Redis de uso unico. PostgreSQL continua fonte
+  da verdade; Redis apenas autentica/notifica. A UI oficial parte do
+  `origin/main` e usa BFF same-origin para ticket e Upgrade. E-mail permanece
+  sem action enquanto nao existir emissor homologado; PDIAL e
+  `dialer_metrics` nao foram alterados. Evidencia de browser, carga, replicas e
+  canario ainda pertence aos Gates 8/9 de
+  `ORCHESTRATION_REPORTING_PLAN.md`.
+
 - O primeiro canário de escrita do `identidade_person` (`9ec18a2d-3807-43e2-9c2e-1db2ed4ff170`) encontrou a pessoa na Identidade.io, mas reverteu o savepoint com `identidade_person_persistence_failed`: o normalizador preservava `birthday` como string ISO e o `asyncpg` exige `datetime.date` para a coluna PostgreSQL `date`. Não houve escrita parcial nem fan-out. A correção converte a data somente na fronteira SQL, preservando a string serializável no runtime. Além da transação real revertida, o canário E2E pré-deploy `1b54233b-7075-42c9-8085-35c8afad5db7` criou pessoa, draft, 8 canais, materializou 8 membros, vinculou a lista com HTTP 200 e terminou em `state=3`; o flow ganhou exatamente uma sessão. A confirmação pós-deploy do mesmo código ainda permanece pendente.
 
 - O envelope real de `identidade_person` usa formatos mistos da UI (string, objeto `{id, name}` e lista de checkbox); a engine os normaliza. As queries de pessoa/draft/lista foram executadas no PostgreSQL do workspace de teste dentro de transação revertida, com zero resíduos após rollback. O canário real `2dd62260-3519-45dd-9275-ad0c56359b84`, em `lookup_only`, consultou a Identidade.io uma vez, terminou em `state=3` e não criou pessoa, draft, canal ou vínculo.
@@ -277,5 +289,6 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `docs/project-knowledge/FLOW_SESSION_SCOPE_CONTRACT.md` — contrato normativo Person/Channel, seleção de canal, Dial Rule, validações 422 e ordem segura para retomar o canário multidialer e o flow completo.
 - `docs/project-knowledge/JOURNEY_TRACKING.md` — contrato read-only, privacidade, guardrails, UI, rollout e retorno ao flow completo do Rastreamento de Jornadas.
 - `docs/project-knowledge/CONTACT_CHANNEL_MANAGEMENT.md` — contrato, normalização, idempotência, projeção primária legada, segurança, testes e sequência de homologação do card genérico de canais.
-- `docs/project-knowledge/ORCHESTRATION_REPORTING_PLAN.md` — fonte unica da verdade para a telemetria de jornadas enviada pelo ORCH a Metrics. O ORCH persiste fatos estruturados por retencao configuravel de 1 a 30 dias, sem backfill, e publica somente snapshots reconciliaveis via WebSocket/SYNC; Metrics nao e fonte duravel e o PDIAL permanece independente. O funil usa as sete etapas dos cards e o retorno ao canario/fluxo completo permanece obrigatorio.
-- `docs/project-knowledge/ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` — contrato `0.2.0` snapshot-only aceito entre ORCH e Metrics/SYNC: envelope `broadcast:dashboard`, sala por usuario com filtro de flow na UI, sem compressao/limite formal de payload, teto de 400 mensagens/segundo, sem ACK e substituicao pela maior `snapshot_sequence`. O ORCH impoe budgets proprios, latest-state delivery e retencao de 1 a 30 dias; fixture em `ORCHESTRATION_JOURNEY_METRICS_WS_EXAMPLES.json`.
+- `docs/project-knowledge/ORCHESTRATION_REPORTING_PLAN.md` — fonte unica da verdade para a dashboard propria de jornadas. O ORCH persiste fatos estruturados por retencao configuravel de 1 a 30 dias, sem backfill, agrega um snapshot logico por workspace e o entrega por WebSocket proprio a UI de Gestao de Extensoes. Nao existe emissao por sessao/flow nem dependencia de SYNC/Metrics; Redis e apenas fan-out e PostgreSQL permanece fonte duravel. O PDIAL continua independente e o retorno ao canario/fluxo completo e obrigatorio.
+- `docs/project-knowledge/ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` — contrato historico `0.2.0` com Metrics/SYNC, superseded antes de receber writer ou publisher. Serve apenas como evidencia das decisoes anteriores e nao deve orientar runtime novo.
+- `docs/project-knowledge/ORCHESTRATION_WORKSPACE_WS_CONTRACT.md` — contrato vigente `1.0` do snapshot unico por workspace, ticket curto, BFF same-origin, sala propria, sequencia, reconexao, fan-out entre replicas e consumo pela nossa UI. O broadcast automatico e compacto; filtros detalhados usam request/response no mesmo socket.

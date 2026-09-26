@@ -35,6 +35,9 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS",
         "ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW",
         "ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW",
+        "ORCH_JOURNEY_DASHBOARD_ENABLED",
+        "CELERY_BEAT_JOURNEY_SNAPSHOT_ENABLED",
+        "CELERY_JOURNEY_SNAPSHOT_QUEUE",
     ):
         monkeypatch.delenv(key, raising=False)
     config.get_settings.cache_clear()
@@ -56,6 +59,9 @@ def test_supplier_v2_is_disabled_and_isolated_by_default(
     assert settings.orch_dialer_multilane_v2_flow_uuids == ()
     assert settings.orch_dialer_multilane_v2_max_lanes_per_flow == 1
     assert settings.orch_dialer_multilane_v2_max_execution_groups_per_flow == 1
+    assert settings.orch_journey_dashboard_enabled is True
+    assert settings.celery_beat_journey_snapshot_enabled is False
+    assert settings.celery_journey_snapshot_queue == "orch_journey_snapshot"
     config.get_settings.cache_clear()
 
 
