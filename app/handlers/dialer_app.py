@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import ast
 import re
 from typing import Any
 
 from fastapi import HTTPException, status
 
 from app.schemas.orch import SessionExtraction
+from app.services.cdr_mailing_data import extract_cdr_mailing_phone
 from app.services.phone_normalizer import normalize_br_mobile_missing_ninth_digit
 
 
@@ -37,16 +37,9 @@ def is_dialer(payload: dict[str, Any]) -> bool:
 def _extract_phone_from_dialer(payload: dict[str, Any]) -> str | None:
     hangup = payload.get("hangup")
     if isinstance(hangup, dict):
-        cdr_mailing_data = hangup.get("CdrMailingData")
-        if isinstance(cdr_mailing_data, str) and cdr_mailing_data.strip():
-            try:
-                parsed = ast.literal_eval(cdr_mailing_data)
-                if isinstance(parsed, dict):
-                    phone = parsed.get("phone")
-                    if phone:
-                        return str(phone).strip()
-            except (SyntaxError, ValueError):
-                pass
+        phone = extract_cdr_mailing_phone(hangup.get("CdrMailingData"))
+        if phone is not None:
+            return phone
 
     makecall = payload.get("makecall")
     if isinstance(makecall, dict):

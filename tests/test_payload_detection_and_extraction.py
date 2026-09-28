@@ -243,6 +243,48 @@ def test_extract_session_fields_normalizes_dialer_12_digits_missing_ninth() -> N
 
 
 @pytest.mark.parametrize(
+    "cdr_mailing_data",
+    [
+        {"phone": "5511975620806"},
+        '{"phone":"5511975620806"}',
+        "{'phone': '5511975620806'}",
+    ],
+)
+def test_extract_session_fields_accepts_supported_cdr_mailing_formats(
+    cdr_mailing_data: object,
+) -> None:
+    payload = {
+        "uniqueid": "test-uid",
+        "hangup": {
+            "Event": "Hangup",
+            "CdrMailingData": cdr_mailing_data,
+        },
+    }
+
+    extracted = extract_session_fields("DialerApp", payload)
+
+    assert extracted.entity_address == "5511975620806"
+
+
+def test_extract_session_fields_falls_back_to_dial_string_for_invalid_cdr_data() -> None:
+    payload = {
+        "uniqueid": "test-uid",
+        "hangup": {
+            "Event": "Hangup",
+            "CdrMailingData": "__import__('os').system('false')",
+        },
+        "makecall": {
+            "Event": "DialBegin",
+            "DialString": "PJSIP/TRUNK/5511975620806",
+        },
+    }
+
+    extracted = extract_session_fields("DialerApp", payload)
+
+    assert extracted.entity_address == "5511975620806"
+
+
+@pytest.mark.parametrize(
     ("phone", "expected"),
     [
         ("551147371485", "1147371485"),

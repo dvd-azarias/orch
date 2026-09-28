@@ -2386,6 +2386,27 @@ transacao. Depois seguem actions/canais, agregador, gateway, UI e canario. O
 checkpoint final continua sendo retomar `f77b70f0-849b-4d11-9ccc-449b3c4ba981`
 e o fluxo completo.
 
+## 2026-09-28 — Leitura tolerante e segura de CdrMailingData
+
+### REQUEST / CLASSIFICATION
+
+Aceitar o contrato real do Asterisk sem limitar o ORCH a uma única
+serialização. `ALPHA_FIX_REQUIRED` por correlação de eventos de voz.
+
+### CHANGE / SAFETY
+
+- `CdrMailingData` pode chegar como mapping, JSON ou literal Python com aspas
+  simples;
+- o parser tenta JSON primeiro e usa `ast.literal_eval` somente como fallback,
+  com limite de tamanho, exigindo sempre um dicionário;
+- código executável, listas, escalares e telefone não textual são rejeitados;
+- quando o campo é inválido, permanece o fallback existente por `DialString`.
+
+### VALIDATION / ROLLBACK
+
+- parser e extração DialerApp: `37 passed`;
+- rollback somente de código; nenhuma persistência ou contrato HTTP mudou.
+
 ## 2026-09-26 — Gates 3 a 7 da dashboard propria de jornadas
 
 ### IMPLEMENTACAO / SEGURANCA

@@ -322,7 +322,8 @@ Mapeamento inicial:
 - `entity_session_id = uniqueid | hangup.Uniqueid | hangup.Linkedid`
 
 Extração de telefone:
-1. `hangup.CdrMailingData`
+1. `hangup.CdrMailingData`, aceitando objeto, JSON ou literal Python do
+   Asterisk; entradas inválidas falham fechadas
 2. fallback em `makecall.DialString`
 
 ## GenericApp
