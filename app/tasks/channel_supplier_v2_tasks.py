@@ -22,6 +22,7 @@ from app.services.channel_supplier_v2_service import (
     parse_channel_dispatch_intent,
     register_channel_dispatch,
 )
+from app.services.journey_metrics_service import record_journey_channel_action_event
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
 
 
@@ -388,6 +389,24 @@ async def _sync_registered_dispatch(
         registration=registration,
     )
     if result.state == "accepted" and transitioned:
+        try:
+            await _record_provider_acceptance(
+                workspace_uuid=workspace_uuid,
+                flow_uuid=flow_uuid,
+                session_id=session_id,
+                intent=registration,
+            )
+        except Exception:
+            logger.exception(
+                "channel Supplier V2 provider acceptance telemetry failed",
+                extra={
+                    "event": "orch.channel_supplier_v2.acceptance.telemetry_failed",
+                    "workspace_uuid": workspace_uuid,
+                    "flow_uuid": flow_uuid,
+                    "session_id": session_id,
+                    "dispatch_id": result.dispatch_id,
+                },
+            )
         from app.tasks.workflow_tasks import (
             resume_channel_supplier_v2_acceptance_task,
         )
@@ -429,6 +448,60 @@ async def _sync_registered_dispatch(
         "dispatch_id": result.dispatch_id,
         "transitioned": transitioned,
     }
+
+
+async def _record_provider_acceptance(
+    *,
+    workspace_uuid: str,
+    flow_uuid: str,
+    session_id: int,
+    intent: dict[str, Any],
+) -> None:
+    accepted_at = _parse_iso(intent.get("accepted_at"))
+    if accepted_at is None:
+        return
+    correlation_key = str(intent.get("correlation_key") or "").strip()
+    component_ref_id = str(intent.get("component_ref_id") or "").strip()
+    session_uuid = str(intent.get("session_uuid") or "").strip()
+    channel = str(intent.get("channel") or "").strip().lower()
+    dispatch_id = str(intent.get("dispatch_id") or "").strip()
+    if (
+        not correlation_key
+        or not component_ref_id
+        or not session_uuid
+        or channel not in {"sms", "rcs"}
+        or not dispatch_id
+    ):
+        return
+
+    _safe_workspace_uuid, schema = bind_workspace_context(workspace_uuid)
+    safe_schema = schema.replace('"', '""')
+    session_factory = get_session_factory()
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+            await record_journey_channel_action_event(
+                db_session,
+                source_session_id=session_id,
+                flow_uuid=flow_uuid,
+                session_uuid=session_uuid,
+                channel=channel,
+                source_kind="channel_supplier_v2_dispatch",
+                source_id=correlation_key,
+                native_status="accepted",
+                event_id=f"dispatch:{dispatch_id}:accepted",
+                occurred_at=accepted_at,
+                component_ref_id=component_ref_id,
+                component_kind=f"send_with_{channel}",
+                action_sequence=int(intent.get("dispatch_sequence") or 1),
+                provider_reference=str(
+                    intent.get("provider_message_id") or dispatch_id
+                ),
+                metadata={
+                    "provider_status": intent.get("provider_status"),
+                    "projection_source": "channel_supplier_v2_registration",
+                },
+            )
 
 
 async def _patch_registration(

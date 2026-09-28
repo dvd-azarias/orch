@@ -106,6 +106,23 @@ async def _cleanup_flow_with_revision(*, flow_uuid: str, revision_uuid: str) -> 
     async with session_factory() as db_session:
         async with db_session.begin():
             await db_session.execute(
+                text(
+                    f"""
+                    DELETE FROM "{schema}".orch_billing_events
+                    WHERE source_session_id IN (
+                        SELECT id
+                        FROM "{schema}".orch_sessions
+                        WHERE flow_uuid = CAST(:id AS uuid)
+                    )
+                    """
+                ),
+                {"id": flow_uuid},
+            )
+            await db_session.execute(
+                text(f'DELETE FROM "{schema}".orch_sessions WHERE flow_uuid = CAST(:id AS uuid)'),
+                {"id": flow_uuid},
+            )
+            await db_session.execute(
                 text(f'DELETE FROM "{schema}".flow_v2_revision WHERE id = CAST(:id AS uuid)'),
                 {"id": revision_uuid},
             )
@@ -522,3 +539,134 @@ async def test_send_whatsapp_template_routes_hsm_failure_to_exception_branch(
         )
     finally:
         await _cleanup_flow_with_revision(flow_uuid=inserted_flow_uuid, revision_uuid=revision_uuid)
+
+
+@pytest.mark.asyncio
+async def test_outbound_whatsapp_discards_events_received_before_card_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _ensure_flow_tables()
+    settings = get_settings()
+    flow_uuid = str(uuid4())
+    set_uuid = "e1111111-1111-1111-1111-111111111111"
+    send_uuid = "e2222222-2222-2222-2222-222222222222"
+    finish_uuid = "e3333333-3333-3333-3333-333333333333"
+    definition = {
+        "trigger_start_by_ref_id": set_uuid,
+        "components": [
+            {
+                "uuid": set_uuid,
+                "ref_id": set_uuid,
+                "component_id": "set_variables",
+                "parameters": {"instructions": []},
+            },
+            {
+                "uuid": send_uuid,
+                "ref_id": send_uuid,
+                "component_id": "send_whatsapp_template",
+                "parameters": {},
+            },
+            {
+                "uuid": finish_uuid,
+                "ref_id": finish_uuid,
+                "component_id": "finish_flow",
+                "parameters": {},
+            },
+        ],
+        "branches": [
+            {"from": set_uuid, "to": send_uuid, "branch": "proximo"},
+            {"from": send_uuid, "to": finish_uuid, "branch": "sent"},
+        ],
+    }
+
+    inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(
+        flow_uuid=flow_uuid,
+        definition=definition,
+    )
+    monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
+    monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(celery_enabled=False, celery_fileapp_ingest_enabled=True),
+    )
+    monkeypatch.setattr(
+        orch_trigger_service,
+        "get_settings",
+        lambda: SimpleNamespace(celery_enabled=False),
+    )
+
+    prepared: list[int] = []
+
+    async def _fake_prepare(**_kwargs):  # noqa: ANN001
+        prepared.append(1)
+        return {"ani": "1147371486", "linked_actuator": "whatsapp"}
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "_prepare_send_whatsapp_template_contact_member",
+        _fake_prepare,
+    )
+    discarded_events: list[int] = []
+    original_discard_pending_channel_events = (
+        workflow_m2_service.discard_pending_channel_events
+    )
+
+    async def _track_discarded_events(*args, **kwargs):  # noqa: ANN002, ANN003
+        discarded = await original_discard_pending_channel_events(*args, **kwargs)
+        discarded_events.append(discarded)
+        return discarded
+
+    monkeypatch.setattr(
+        workflow_m2_service,
+        "discard_pending_channel_events",
+        _track_discarded_events,
+    )
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as db_session:
+            response = await orch_api._trigger_orch_for_workspace(
+                workspace_uuid=settings.orch_lab_workspace_uuid,
+                flow_uuid=UUID(flow_uuid),
+                payload=_whatsapp_status_payload(status="sent"),
+                db_session=db_session,
+                validate_workspace=False,
+                schema_override=settings.database_schema,
+            )
+
+        assert response.workflow_execution is not None
+        assert response.workflow_execution["stopped_reason"] == (
+            "blocked_send_whatsapp_interactive"
+        )
+        assert prepared == [1]
+        assert discarded_events == [1]
+        row = await _get_session_state_row(response.session_id)
+        assert row["last_card_uuid"] == send_uuid
+        assert row["next_card_uuid"] == send_uuid
+        assert "send_whatsapp_interactive_last_error" not in row["runtime_variables"]
+
+        async with session_factory() as db_session:
+            event_row = (
+                await db_session.execute(
+                    text(
+                        f"""
+                        SELECT processed_at, discard_reason
+                        FROM "{settings.database_schema.replace('"', '""')}".orch_channel_events
+                        WHERE session_id = :session_id
+                          AND channel = 'whatsapp'
+                          AND event_type = 'sent'
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"session_id": response.session_id},
+                )
+            ).mappings().one()
+        assert event_row["processed_at"] is not None
+        assert event_row["discard_reason"] == "before_outbound_whatsapp_card_entry"
+    finally:
+        await _cleanup_flow_with_revision(
+            flow_uuid=inserted_flow_uuid,
+            revision_uuid=revision_uuid,
+        )

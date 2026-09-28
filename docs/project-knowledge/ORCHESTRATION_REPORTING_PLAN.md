@@ -521,6 +521,38 @@ mudanca funcional no workflow.
 **Criterio de saida:** zero, um e varios acionamentos por sessao reconciliam
 exatamente com as fontes especializadas.
 
+#### Correcao de cobertura observada em runtime — 2026-09-28
+
+A homologacao do canario confirmou tres lacunas entre as fontes especializadas
+e o ledger da dashboard:
+
+- voz registrava imediatamente o terminal da Supplier V2, mas uma tentativa
+  intermediaria real, como `machine` seguida de nova tentativa, nao virava
+  action;
+- SMS/RCS preservavam o dispatch `accepted` na Supplier V2, mas esse marco nao
+  atualizava a action solicitada enquanto nenhum callback posterior chegasse;
+- um evento WhatsApp recebido antes da entrada em um card outbound podia ser
+  interpretado como resposta daquele novo envio.
+
+O menor ajuste seguro mantem as fontes existentes e acrescenta reconciliacao
+idempotente no scanner exclusivo da dashboard:
+
+- cada `contact_supplier_dial_attempts_v2` concluida e projetada uma unica vez
+  por `attempt.id`, inclusive tentativas nao terminais; o ordinal nativo do
+  ciclo fica em metadata, pois `action_sequence` pertence ao escopo completo
+  `sessao + card + canal` e nao pode reiniciar em cada ciclo;
+- o primeiro `accepted` duravel de SMS/RCS atualiza a action no worker de
+  registro; o scanner repara eventual falha dessa telemetria sem reenviar a
+  mensagem nem retomar novamente a sessao;
+- ao entrar em `send_whatsapp_template|interactive` vindo de outro card, eventos
+  WhatsApp ainda pendentes sao descartados com motivo auditavel antes da
+  preparacao do novo envio. A retomada do proprio card continua consumindo
+  somente eventos posteriores.
+
+A projecao roda em savepoint: qualquer falha gera log e nao impede que um
+snapshot ja dirty seja construido. Nao ha migration, backfill de sessoes
+anteriores ao marco zero, alteracao de PDIAL ou mudanca em Supplier V1.
+
 ### Gate 5 — agregador unico por workspace
 
 - [x] Criar fila exclusiva conforme `ORCH_QUEUE_PROFILE`.

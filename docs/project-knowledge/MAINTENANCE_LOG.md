@@ -2426,3 +2426,41 @@ e o fluxo completo.
   nesta etapa local.
 - O retorno obrigatorio permanece no flow
   `f77b70f0-849b-4d11-9ccc-449b3c4ba981` e depois no fluxo completo.
+
+## 2026-09-28 — Cobertura real de canais na dashboard de jornadas
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a divergencia observada no canario entre os acionamentos reais e a
+dashboard: tentativa de voz intermediaria ausente, SMS aceito ainda exibido
+como solicitado e evento WhatsApp anterior consumido por um card outbound.
+`ALPHA_FIX_REQUIRED` para confiabilidade operacional e para impedir decisao de
+workflow com evento pertencente a outro momento da jornada.
+
+### CHANGE / SAFETY
+
+- um reconciliador idempotente projeta cada tentativa concluida da Supplier V2
+  por `attempt.id`, incluindo resultados intermediarios; callbacks terminais
+  ja projetados sao preservados e nao colidem com tentativas anteriores;
+- o aceite duravel de SMS/RCS atualiza o ledger no primeiro compare-and-set, e
+  o reconciliador da dashboard funciona como reparo se a telemetria imediata
+  falhar;
+- eventos WhatsApp pendentes antes da entrada em um card outbound sao baixados
+  com `discard_reason=before_outbound_whatsapp_card_entry`; a sessao prepara o
+  novo envio e permanece aguardando seu retorno;
+- a projecao usa savepoint e nunca bloqueia o snapshot existente nem o caminho
+  funcional de envio/retomada;
+- nenhuma migration, Supplier V1, PDIAL, `dialer_metrics`, payload de provedor
+  ou contrato de card foi alterado.
+
+### VALIDATION / ROLLBACK
+
+- `12 passed` na reproducao dirigida dos tres gaps;
+- `81 passed` na regressao ampliada de jornadas, Supplier V2 de canal e
+  callbacks;
+- `143 passed` na regressao unitaria completa da engine M2;
+- stack local completa subiu com filas isoladas `*_f5_local`; API e seis
+  processos Celery ficaram ativos, e o smoke encadeado criou com sucesso as
+  sessoes `8658` e `8659`; a stack foi encerrada ao final;
+- rollback e somente de codigo e restart dos workers/API. As actions novas sao
+  fatos idempotentes corretos e nao exigem compensacao.
