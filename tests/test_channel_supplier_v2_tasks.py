@@ -130,6 +130,7 @@ async def test_accepted_sms_transitions_once_and_schedules_workflow_resume(
         "dispatch_id": "13131313-1313-4313-8313-131313131313",
     }
     enqueued: list[dict] = []
+    telemetry: list[dict] = []
     monkeypatch.setattr(
         tasks,
         "get_channel_dispatch",
@@ -149,6 +150,11 @@ async def test_accepted_sms_transitions_once_and_schedules_workflow_resume(
         tasks,
         "_transition_registered_dispatch",
         lambda **_kwargs: _async_value(True),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "_record_provider_acceptance",
+        lambda **kwargs: telemetry.append(kwargs) or _async_value(None),
     )
     from app.tasks import workflow_tasks
 
@@ -180,6 +186,26 @@ async def test_accepted_sms_transitions_once_and_schedules_workflow_resume(
             },
             "queue": "orch_execute_test",
             "routing_key": "orch_execute_test",
+        }
+    ]
+    assert telemetry == [
+        {
+            "workspace_uuid": WORKSPACE_UUID,
+            "flow_uuid": FLOW_UUID,
+            "session_id": 71,
+            "intent": {
+                **intent,
+                "state": "accepted",
+                "provider_message_id": "provider-message-1",
+                "provider_status": "13",
+                "accepted_at": "2026-09-23T12:00:00+00:00",
+                "failed_at": None,
+                "uncertain_at": None,
+                "last_error_code": None,
+                "last_error_message": None,
+                "status": "provider_accepted",
+                "updated_at": telemetry[0]["intent"]["updated_at"],
+            },
         }
     ]
 
@@ -254,6 +280,12 @@ async def test_duplicate_acceptance_does_not_schedule_second_resume(
     from app.tasks import workflow_tasks
 
     enqueued: list[dict] = []
+    telemetry: list[dict] = []
+    monkeypatch.setattr(
+        tasks,
+        "_record_provider_acceptance",
+        lambda **kwargs: telemetry.append(kwargs) or _async_value(None),
+    )
     monkeypatch.setattr(
         workflow_tasks.resume_channel_supplier_v2_acceptance_task,
         "apply_async",
@@ -271,6 +303,7 @@ async def test_duplicate_acceptance_does_not_schedule_second_resume(
     assert result["status"] == "provider_accepted"
     assert result["transitioned"] is False
     assert enqueued == []
+    assert telemetry == []
 
 
 @pytest.mark.asyncio

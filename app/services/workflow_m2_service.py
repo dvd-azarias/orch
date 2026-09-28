@@ -11186,6 +11186,28 @@ async def execute_workflow_m2_for_session(
                         runtime_variables,
                         process_card_cursor=next_card_uuid,
                     )
+                    entering_outbound_whatsapp_card = (
+                        last_card_uuid is not None
+                        and str(last_card_uuid) != str(next_card_uuid)
+                    )
+                    if entering_outbound_whatsapp_card:
+                        discarded_pre_entry_events = await discard_pending_channel_events(
+                            db_session,
+                            session_id=session_id,
+                            channel="whatsapp",
+                            discard_reason="before_outbound_whatsapp_card_entry",
+                        )
+                        if discarded_pre_entry_events:
+                            logger.info(
+                                "pre-entry WhatsApp events discarded before outbound card",
+                                extra={
+                                    "event": "orch.whatsapp.pre_entry_events_discarded",
+                                    "flow_uuid": flow_uuid,
+                                    "session_id": session_id,
+                                    "component_ref_id": component.get("ref_id"),
+                                    "discarded_count": discarded_pre_entry_events,
+                                },
+                            )
                     pending_whatsapp_event = await claim_next_pending_channel_event(
                         db_session,
                         session_id=session_id,
@@ -11201,9 +11223,13 @@ async def execute_workflow_m2_for_session(
                                 contact_row=contact_runtime_context,
                             )
 
-                    branch_candidates = _resolve_send_whatsapp_interactive_branch_labels(
-                        component=component,
-                        runtime_variables=runtime_variables,
+                    branch_candidates = (
+                        []
+                        if entering_outbound_whatsapp_card
+                        else _resolve_send_whatsapp_interactive_branch_labels(
+                            component=component,
+                            runtime_variables=runtime_variables,
+                        )
                     )
                     branch_label = None
                     if branch_candidates:

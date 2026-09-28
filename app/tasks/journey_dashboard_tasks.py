@@ -20,6 +20,9 @@ from app.services.journey_workspace_aggregation_service import (
 from app.services.journey_dashboard_websocket_service import (
     journey_workspace_notification_channel,
 )
+from app.services.journey_supplier_projection_service import (
+    project_supplier_v2_journey_actions,
+)
 from app.services.journey_workspace_snapshot_service import (
     JourneyWorkspaceSnapshotClaim,
     claim_journey_workspace_snapshot,
@@ -84,6 +87,8 @@ async def _scan_dirty_journey_workspaces() -> dict[str, int]:
     )
     scanned = 0
     enqueued = 0
+    voice_actions_projected = 0
+    channel_actions_projected = 0
     checked_at = datetime.now(UTC)
     for workspace in workspaces:
         workspace_uuid = normalize_workspace_uuid(str(workspace["workspace_uuid"]))
@@ -98,6 +103,23 @@ async def _scan_dirty_journey_workspaces() -> dict[str, int]:
                     await db_session.execute(
                         text(f'SET LOCAL search_path TO "{safe_schema}"')
                     )
+                    try:
+                        async with db_session.begin_nested():
+                            projection = await project_supplier_v2_journey_actions(
+                                db_session,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "journey Supplier V2 projection failed",
+                            extra={
+                                "event": "orch.journey_dashboard.supplier_projection_failed",
+                                "workspace_uuid": workspace_uuid,
+                                "exception_type": type(exc).__name__,
+                            },
+                        )
+                    else:
+                        voice_actions_projected += projection.voice_projected
+                        channel_actions_projected += projection.channel_projected
                     is_due = await journey_workspace_snapshot_is_due(
                         db_session,
                         checked_at=checked_at,
@@ -130,6 +152,8 @@ async def _scan_dirty_journey_workspaces() -> dict[str, int]:
             "event": "orch.journey_dashboard.scan.finished",
             "workspaces_scanned": scanned,
             "workspaces_enqueued": enqueued,
+            "voice_actions_projected": voice_actions_projected,
+            "channel_actions_projected": channel_actions_projected,
         },
     )
     return {"workspaces_scanned": scanned, "workspaces_enqueued": enqueued}
