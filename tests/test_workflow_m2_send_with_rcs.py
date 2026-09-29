@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 
@@ -190,8 +191,23 @@ async def test_channel_rcs_marks_exact_member_and_blocks_without_http(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("template_variables", "expected_variables"),
+    [
+        (
+            {"nome": "{{contact.full_name}}"},
+            {"nome": "Contato de Teste"},
+        ),
+        (
+            {"json": {}, "output_var_name": "Variáveis do template"},
+            {},
+        ),
+    ],
+)
 async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
     monkeypatch: pytest.MonkeyPatch,
+    template_variables: dict,
+    expected_variables: dict,
 ) -> None:
     runtime = _runtime()
     component = _component()
@@ -200,7 +216,7 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
         "broker_code": "rcs_trc_conv_brad_eavm",
         "customer_code": "BRAD_EAVM_RCS",
         "template_code": "4580",
-        "template_variables": {"nome": "{{contact.full_name}}"},
+        "template_variables": template_variables,
         "completion_event": "response",
         "timeout_seconds": 300,
     }
@@ -262,9 +278,12 @@ async def test_enabled_supplier_v2_materializes_only_encrypted_rcs_intent(
     assert "secret-rcs-token" not in serialized
     assert "5511999990001" not in str(intent)
     plaintext = Fernet(key.encode()).decrypt(intent["envelope_ciphertext"].encode())
+    envelope = json.loads(plaintext)
+    assert envelope["provider"]["variables"] == expected_variables
     assert b"secret-rcs-token" in plaintext
     assert b"BRAD_EAVM_RCS" in plaintext
-    assert b"Contato de Teste" in plaintext
+    if expected_variables:
+        assert b"Contato de Teste" in plaintext
     assert b"url_callback_mo" not in plaintext
     assert b"syncwebhook.example.test/v1/orch/channel-supplier-v2/callbacks/" in plaintext
     wait_state = runtime["workflow_v2"]["channel_dispatch_v2_wait"]
