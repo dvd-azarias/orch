@@ -1,5 +1,34 @@
 # Maintenance Log
 
+## 2026-09-29 — Payload do Code Editor disponível aos cards seguintes
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a divergência entre Runner v5 e ORCH na composição
+`code_editor -> api_call`: o JavaScript retornava o JSON correto, mas as
+variáveis seguintes continuavam vazias. `ALPHA_FIX_REQUIRED`, por impacto
+direto no payload enviado pelo flow de orquestração.
+
+### CHANGE / SAFETY
+
+- o `payload` objeto retornado pelo Code Editor agora é mesclado de forma rasa
+  em `variables.customs`, depois da persistência do `ctx.variables` retornado;
+- o payload vence somente colisões com a mesma chave, reproduzindo o contrato
+  do Runner v5 e preservando todas as demais variáveis;
+- `code_editor_last_payload` continua disponível para diagnóstico;
+- payload não-objeto, branch, timeout e tratamento de erro permanecem com o
+  comportamento anterior;
+- nenhuma migration, fila, rota, canvas ou contrato HTTP foi alterado.
+
+### VALIDATION / ROLLBACK
+
+- regressão focada confirmou success/failure, preservação de customs e consumo
+  real das variáveis por um `api_call` imediatamente posterior;
+- stack local completa confirmou o encadeamento
+  `set_variables -> code_editor -> scheduling_moment -> api_call -> finish`,
+  sessão terminal, status HTTP 200 e recebimento externo `stream_id=2037735`;
+- rollback é somente de código e restart rolling dos workers de workflow.
+
 ## 2026-09-23 — Aceite do provedor conclui o card SMS sem consumir lifecycle
 
 ### REQUEST / CLASSIFICATION

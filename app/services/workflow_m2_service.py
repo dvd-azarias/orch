@@ -9139,7 +9139,15 @@ def _run_code_editor(
     runtime_variables["code_editor_last_result"] = result
 
     if isinstance(result, dict) and result.get("payload") is not None:
-        runtime_variables["code_editor_last_payload"] = result.get("payload")
+        result_payload = result.get("payload")
+        runtime_variables["code_editor_last_payload"] = result_payload
+        if isinstance(result_payload, dict):
+            output_variables = _ensure_variables(runtime_variables)
+            output_customs = output_variables.get("customs")
+            if not isinstance(output_customs, dict):
+                output_customs = {}
+                output_variables["customs"] = output_customs
+            output_customs.update(result_payload)
 
     branch = None
     if isinstance(result, dict):
