@@ -212,6 +212,66 @@ def test_rcs_callbacks_normalize_official_lifecycle(
     assert result[0].event_type == expected
 
 
+def test_rcs_naive_provider_timestamp_uses_sao_paulo_timezone() -> None:
+    result = normalize_channel_supplier_v2_callbacks(
+        channel="rcs",
+        event_kind="status",
+        payload={
+            "message_id": "rcs-1",
+            "status": "Entregue",
+            "date": "2026-09-29 19:10:02",
+        },
+    )
+
+    assert result[0].event_ts == datetime(
+        2026,
+        9,
+        29,
+        22,
+        10,
+        2,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_rcs_explicit_provider_timezone_is_preserved() -> None:
+    result = normalize_channel_supplier_v2_callbacks(
+        channel="rcs",
+        event_kind="status",
+        payload={
+            "message_id": "rcs-1",
+            "status": "Entregue",
+            "date": "2026-09-29T19:10:02-03:00",
+        },
+    )
+
+    assert result[0].event_ts is not None
+    assert result[0].event_ts.isoformat() == "2026-09-29T19:10:02-03:00"
+    assert result[0].event_ts.utcoffset() == timedelta(hours=-3)
+
+
+def test_sms_naive_provider_timestamp_keeps_existing_utc_contract() -> None:
+    result = normalize_channel_supplier_v2_callbacks(
+        channel="sms",
+        event_kind="status",
+        payload={
+            "messageid": "sms-1",
+            "status": 12,
+            "date": "2026-09-29 19:10:02",
+        },
+    )
+
+    assert result[0].event_ts == datetime(
+        2026,
+        9,
+        29,
+        19,
+        10,
+        2,
+        tzinfo=timezone.utc,
+    )
+
+
 def test_callback_without_provider_message_id_is_rejected() -> None:
     with pytest.raises(ChannelSupplierV2CallbackError) as exc_info:
         normalize_channel_supplier_v2_callbacks(

@@ -3,8 +3,9 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,7 @@ _MAX_PROVIDER_EVENT_ID_LENGTH = 255
 _SMS_SENT_STATUS_CODES = {4, 12, 13}
 _SMS_DELIVERED_STATUS_CODES = {1}
 _SMS_FAILED_STATUS_CODES = {2}
+_RCS_PROVIDER_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
 
 class ChannelSupplierV2CallbackError(Exception):
@@ -90,7 +92,11 @@ def _provider_event_id(payload: Mapping[str, Any]) -> str:
     return event_id
 
 
-def _parse_event_timestamp(payload: Mapping[str, Any]) -> datetime | None:
+def _parse_event_timestamp(
+    payload: Mapping[str, Any],
+    *,
+    naive_timezone: tzinfo = timezone.utc,
+) -> datetime | None:
     raw_value: Any = None
     for key in (
         "date",
@@ -123,7 +129,9 @@ def _parse_event_timestamp(payload: Mapping[str, Any]) -> datetime | None:
         parsed = datetime.fromisoformat(raw_text.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is not None:
+        return parsed
+    return parsed.replace(tzinfo=naive_timezone).astimezone(timezone.utc)
 
 
 def _status_code(payload: Mapping[str, Any]) -> int | None:
@@ -307,7 +315,14 @@ def normalize_channel_supplier_v2_callbacks(
             NormalizedChannelCallback(
                 event_type=event_type,
                 event_id=_provider_event_id(item),
-                event_ts=_parse_event_timestamp(item),
+                event_ts=_parse_event_timestamp(
+                    item,
+                    naive_timezone=(
+                        _RCS_PROVIDER_TIMEZONE
+                        if normalized_channel == "rcs"
+                        else timezone.utc
+                    ),
+                ),
                 provider_payload=dict(item),
             )
         )
