@@ -693,8 +693,16 @@ async def _list_reconcilable_channel_supplier_v2_dispatches(
                     )
                     OR (
                         runtime_variables #>> '{workflow_v2,channel_dispatch_v2,status}' = 'registered'
-                        AND runtime_variables #>> '{workflow_v2,channel_dispatch_v2,channel}' = 'sms'
-                        AND runtime_variables #>> '{workflow_v2,blocking_stop_reason}' = 'blocked_send_with_sms'
+                        AND (
+                            (
+                                runtime_variables #>> '{workflow_v2,channel_dispatch_v2,channel}' = 'sms'
+                                AND runtime_variables #>> '{workflow_v2,blocking_stop_reason}' = 'blocked_send_with_sms'
+                            )
+                            OR (
+                                runtime_variables #>> '{workflow_v2,channel_dispatch_v2,channel}' = 'rcs'
+                                AND runtime_variables #>> '{workflow_v2,blocking_stop_reason}' = 'blocked_send_with_rcs'
+                            )
+                        )
                     )
               )
             ORDER BY updated_at ASC, id ASC
