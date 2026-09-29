@@ -500,3 +500,27 @@ async def test_recent_dialer_event_reopens_successful_finish_webhook_session_whe
     assert result is None
     assert ":allow_confirmed_finish_flow_webhook" in session.statement
     assert session.parameters["allow_confirmed_finish_flow_webhook"] is True
+
+
+@pytest.mark.asyncio
+async def test_recent_event_casts_optional_expected_session_id_to_bigint() -> None:
+    session = _RecordingSession(None)
+
+    result = await persist_run_flow_event_for_recent_entity_address(
+        session,
+        flow_uuid="3d2f3ce2-f943-48c6-94f0-cfb4f22bdd17",
+        app_name="DialerApp",
+        entity_address="5511975620806",
+        payload={"uniqueid": "GW01-pinned.1"},
+        extracted={"entity": "action-pinned"},
+        event_name="hangup",
+        event_result="hangup",
+        resume_card_uuid="3fcb8a0e-cd5f-4a9d-a941-e04951882bce",
+        correlation_window_hours=36,
+        expected_session_id=138479,
+    )
+
+    assert result is None
+    assert "CAST(:expected_session_id AS bigint) IS NULL" in session.statement
+    assert "id = CAST(:expected_session_id AS bigint)" in session.statement
+    assert session.parameters["expected_session_id"] == 138479

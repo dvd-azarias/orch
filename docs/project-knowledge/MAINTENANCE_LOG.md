@@ -2679,3 +2679,33 @@ ordenação de estados, sem alterar o provedor ou o contrato da Metrics.
   Metrics; `git diff --check` sem erro;
 - rollback é reversão de código e restart da API que recebe callbacks; nenhum
   dado histórico será reescrito automaticamente.
+
+## 2026-09-29 — Tipagem do vínculo de sessão em callbacks tardios
+
+### REQUEST / CLASSIFICATION
+
+Corrigir falhas repetidas de callbacks `hangup`/tabulação observadas durante a
+auditoria pós-deploy no receptor ORCH. `ALPHA_FIX_REQUIRED`, pois o erro aborta
+a transação antes da retomada da sessão correlacionada.
+
+### ROOT CAUSE / CHANGE / SAFETY
+
+- a correlação tardia passou a receber `expected_session_id`, mas a expressão
+  `:expected_session_id IS NULL` não declarava o tipo do parâmetro;
+- com PostgreSQL/asyncpg, a preparação da consulta falhava com
+  `AmbiguousParameterError` antes de considerar o valor recebido;
+- como `orch_sessions.id` é `BIGSERIAL`, os dois usos do parâmetro foram
+  explicitamente convertidos para `bigint`;
+- nenhum contrato HTTP, regra de correlação, schema ou caminho de sessão foi
+  alterado. O patch apenas torna explícito o tipo já exigido pelo domínio.
+
+### VALIDATION / ROLLBACK
+
+- teste de regressão confirma o cast nos dois lados da expressão e preserva o
+  valor da sessão fixada;
+- `17 passed` na suíte do repositório de sessões e `12 passed` na suíte do
+  serviço de callbacks;
+- a validação final exige deploy da API receptora e ausência do erro no journal
+  sob callback real; rollback é somente reversão de código e restart da API;
+- concluído o incidente, retomar a homologação dos novos eventos da Metrics API
+  no fluxo canário, incluindo o evento real de SMS ainda pendente.
