@@ -27,9 +27,13 @@ async def fetch_select_contact_channel_candidate(
     person_uuid: str | None,
     channel_type: str,
     channel_label: str | None,
+    channel_match_policy: str | None = None,
     excluded_contact_list_member_id: int | None = None,
     authorized_contact_list_member_id: int | None = None,
 ) -> dict[str, Any] | None:
+    effective_match_policy = channel_match_policy or (
+        "compatible_phone" if channel_type == "sms" else "exact_type"
+    )
     parameters: dict[str, Any] = {
         "flow_uuid": flow_uuid,
         "session_id": session_id,
@@ -38,6 +42,7 @@ async def fetch_select_contact_channel_candidate(
         "mailing_id": mailing_id,
         "person_uuid": person_uuid,
         "channel_type": channel_type,
+        "channel_match_policy": effective_match_policy,
         "channel_label": channel_label,
         "excluded_contact_list_member_id": excluded_contact_list_member_id,
         "authorized_contact_list_member_id": authorized_contact_list_member_id,
@@ -66,7 +71,6 @@ async def fetch_select_contact_channel_candidate(
         """
 
     normalized_type_sql = _channel_type_sql("clm.contact_channel_type")
-    # SMS is a phone capability; RCS remains explicit and is never inferred from voice.
     result = await db_session.execute(
         text(
             f"""
@@ -106,7 +110,8 @@ async def fetch_select_contact_channel_candidate(
               AND (
                     {normalized_type_sql} = :channel_type
                     OR (
-                          :channel_type = 'sms'
+                          :channel_match_policy = 'compatible_phone'
+                          AND :channel_type IN ('sms', 'whatsapp', 'rcs')
                           AND {normalized_type_sql} = 'voice'
                         )
                   )
@@ -115,7 +120,10 @@ async def fetch_select_contact_channel_candidate(
                     OR BTRIM(clm.contact_channel_label) = CAST(:channel_label AS text)
                   )
               {scope_filter}
-            ORDER BY COALESCE(source_channel.is_primary, false) DESC, clm.id ASC
+            ORDER BY
+                CASE WHEN {normalized_type_sql} = :channel_type THEN 0 ELSE 1 END,
+                COALESCE(source_channel.is_primary, false) DESC,
+                clm.id ASC
             LIMIT 1
             FOR UPDATE OF clm, os
             """

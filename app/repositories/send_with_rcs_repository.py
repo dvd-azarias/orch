@@ -15,6 +15,7 @@ async def assign_rcs_routing_for_session(
     contact_list_id: str,
     mailing_id: int,
     person_uuid: str | None,
+    allow_phone_source: bool = False,
 ) -> dict[str, Any] | None:
     result = await db_session.execute(
         text(
@@ -38,7 +39,14 @@ async def assign_rcs_routing_for_session(
                   AND clm.unassigned_at IS NULL
                   AND clm.contact_channel_address IS NOT NULL
                   AND BTRIM(clm.contact_channel_address) <> ''
-                  AND LOWER(BTRIM(COALESCE(clm.contact_channel_type, ''))) = 'rcs'
+                  AND (
+                        LOWER(BTRIM(COALESCE(clm.contact_channel_type, ''))) = 'rcs'
+                        OR (
+                              CAST(:allow_phone_source AS boolean)
+                              AND LOWER(BTRIM(COALESCE(clm.contact_channel_type, '')))
+                                  IN ('phone', 'voice')
+                            )
+                      )
                   AND (
                         CAST(:person_uuid AS uuid) IS NULL
                         OR clm.person_uuid = CAST(:person_uuid AS uuid)
@@ -71,6 +79,7 @@ async def assign_rcs_routing_for_session(
             "contact_list_id": contact_list_id,
             "mailing_id": mailing_id,
             "person_uuid": person_uuid,
+            "allow_phone_source": allow_phone_source,
         },
     )
     row = result.mappings().first()

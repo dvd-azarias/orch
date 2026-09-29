@@ -2485,3 +2485,34 @@ workflow com evento pertencente a outro momento da jornada.
   sessoes `8658` e `8659`; a stack foi encerrada ao final;
 - rollback e somente de codigo e restart dos workers/API. As actions novas sao
   fatos idempotentes corretos e nao exigem compensacao.
+
+## 2026-09-29 — Telefone único reutilizado por transportes opt-in
+
+### REQUEST / CLASSIFICATION
+
+Remover a exigência artificial de duplicar o mesmo telefone como Voice, RCS e
+WhatsApp para uma única pessoa, preservando os contratos de seleção e Supplier
+V2. `ALPHA_FIX_OPTIONAL`, sem tocar Supplier V1 ou discagem.
+
+### CHANGE / SAFETY
+
+- o seletor ganhou política `exact_type|compatible_phone`; o default omitido é
+  exato, com exceção do SMS legado, que já aceitava `voice|phone`;
+- no modo compatível, tipo especializado vence e o fallback é somente
+  `voice|phone`; pessoa, lista, mailing, membro, endereço e tipo persistido são
+  preservados;
+- o runtime registra transporte solicitado, tipo de origem, família do endereço
+  e match exato/compatível;
+- RCS só aceita o fallback se o próprio card declarar
+  `reuse_current_phone`; o repositório grava `linked_actuator=rcs` no mesmo
+  membro, e a Supplier V2 fará a segunda validação contra a revisão publicada;
+- nenhuma migration, Supplier V1 ou regra de discagem foi alterada.
+
+### VALIDATION / ROLLBACK
+
+- `75 passed` no recorte final de seletor/repositórios/RCS;
+- `125 passed` na regressão ampliada de SMS, RCS, WhatsApp e callbacks da
+  Supplier V2;
+- canário real ainda pendente de merge/deploy e nova sessão limpa;
+- rollback por reversão de código e restart; não há persistência estrutural a
+  desfazer.

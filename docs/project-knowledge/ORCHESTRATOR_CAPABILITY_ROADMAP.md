@@ -315,13 +315,20 @@ Rollback da primeira entrega: interromper novos usos do card, resolver ou termin
 
 ## Item 7 — `send_with_rcs`
 
-Objetivo: preparar um handoff RCS somente quando o mailing materializou capacidade explícita, mantendo a autoridade de execução no ORCH e sem realizar envio ao provedor nesta primeira entrega.
+Objetivo: preparar um handoff RCS pelo membro exato, usando capacidade explícita
+quando disponível ou reaproveitamento telefônico somente por opt-in, mantendo a
+autoridade de execução no ORCH.
 
 Contrato concluído na primeira entrega marker-only:
 
 - catálogo provider-neutral com `message_template` obrigatório e sem destinatário, endpoint ou credencial inventada;
-- `select_contact_channel` aceita `rcs` por correspondência exata;
-- `voice`, `phone`, `sms`, `whatsapp` e `email` não são considerados capacidade RCS;
+- `select_contact_channel` aceita `rcs` por correspondência exata e a prefere;
+- `channel_match_policy=compatible_phone` permite fallback somente para
+  `voice|phone`, sem reclassificar o membro;
+- `send_with_rcs` também precisa declarar
+  `recipient_channel_policy=reuse_current_phone`; campo omitido/`rcs_only`
+  permanece estrito;
+- `sms`, `whatsapp` e `email` não são considerados capacidade RCS;
 - em `person`, seleção RCS anterior é obrigatória; em `channel`, o membro/endereço de origem é preservado;
 - o ORCH grava `linked_actuator=rcs` no membro exato e bloqueia a sessão em `state=1` na mesma transação;
 - nenhuma mensagem, endereço ou configuração do card é copiada para runtime, logs, alarmes ou métricas;

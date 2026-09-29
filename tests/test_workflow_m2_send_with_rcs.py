@@ -47,11 +47,14 @@ class _Session:
         return _Result()
 
 
-def _component() -> dict:
+def _component(*, recipient_channel_policy: str | None = None) -> dict:
+    parameters = {"message_template": "Olá {{contact.full_name}}"}
+    if recipient_channel_policy is not None:
+        parameters["recipient_channel_policy"] = recipient_channel_policy
     return {
         "ref_id": RCS_REF,
         "component_id": "send_with_rcs",
-        "parameters": {"message_template": "Olá {{contact.full_name}}"},
+        "parameters": parameters,
     }
 
 
@@ -96,6 +99,7 @@ def _configure_execution(
     runtime: dict,
     contact_row: dict | None,
     session_state_overrides: dict | None = None,
+    component: dict | None = None,
 ) -> list[dict]:
     persisted: list[dict] = []
     session_state = {
@@ -119,7 +123,10 @@ def _configure_execution(
             return_value=WorkflowRevisionResolution(
                 revision={
                     "id": REVISION_UUID,
-                    "definition": {"components": [_component()], "branches": []},
+                    "definition": {
+                        "components": [component or _component()],
+                        "branches": [],
+                    },
                 },
                 source="pinned",
                 requested_revision_id=REVISION_UUID,
@@ -308,6 +315,53 @@ async def test_person_rcs_requires_and_uses_explicitly_selected_rcs_member(
     assert result.stopped_reason == "blocked_send_with_rcs"
     assert assign_rcs.await_args.kwargs["contact_list_member_id"] == 88
     assert assign_rcs.await_args.kwargs["person_uuid"] == PERSON_UUID
+
+
+@pytest.mark.asyncio
+async def test_person_rcs_reuses_selected_voice_only_with_explicit_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    component = _component(recipient_channel_policy="reuse_current_phone")
+    runtime = _runtime(session_scope="person")
+    runtime["workflow_v2"]["selected_contact_channel"] = {
+        "selected": True,
+        "session_scope": "person",
+        "contact_list_member_id": 77,
+        "contact_list_id": CONTACT_LIST_UUID,
+        "mailing_id": 1140,
+        "person_uuid": PERSON_UUID,
+        "type": "voice",
+        "requested_type": "rcs",
+        "selected_source_type": "voice",
+        "address_family": "phone",
+        "capability_match": "compatible_phone",
+        "label": "identidade_tel_1",
+        "address": "5511999990001",
+    }
+    _configure_execution(
+        monkeypatch,
+        runtime=runtime,
+        contact_row=_contact_row(channel_type="voice"),
+        component=component,
+    )
+    assign_rcs = AsyncMock(
+        return_value={
+            "contact_list_member_id": 77,
+            "linked_actuator": "rcs",
+            "mode": "marked",
+        }
+    )
+    monkeypatch.setattr(workflow, "assign_rcs_routing_for_session", assign_rcs)
+
+    result = await workflow.execute_workflow_m2_for_session(
+        _Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+    )
+
+    assert result.stopped_reason == "blocked_send_with_rcs"
+    assert assign_rcs.await_args.kwargs["allow_phone_source"] is True
+    assert runtime["send_with_rcs_routing"]["selected_source_type"] == "voice"
 
 
 @pytest.mark.asyncio
