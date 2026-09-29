@@ -131,14 +131,29 @@ sem qualquer mudanca na classificacao PDIAL.
 
 ### Gate M5 — rollout e evidencia
 
-- [ ] habilitar somente no workspace HighComm
+- [x] habilitar somente no workspace HighComm
   `ba7eb0ec-e565-447c-8c11-8f870cf72a60`;
-- [ ] usar o fluxo canario
+- [x] usar o fluxo canario
   `f77b70f0-849b-4d11-9ccc-449b3c4ba981`;
-- [ ] observar backlog, latencia, retries, HTTP e ausencia de bloqueio;
-- [ ] comparar os status de voz com o PDIAL;
+- [x] observar backlog, latencia, retries, HTTP e ausencia de bloqueio;
+- [x] comparar os status de voz com o PDIAL;
 - [ ] validar WhatsApp, SMS e RCS com callbacks reais;
 - [ ] ampliar allowlist somente depois da evidencia canaria.
+
+Evidencia parcial do Gate M5 em 2026-09-29:
+
+- a sessao `f0357257-c500-479c-87ef-0fb4c42193f4` publicou voz
+  `dialing -> answered`, RCS `sent -> delivered -> read` e WhatsApp
+  `sent -> delivered -> read -> replied`, conservando um `dispatch_id` por
+  acionamento;
+- os 28 eventos produzidos pela sessao ate a resposta WhatsApp foram aceitos
+  pela Metrics com HTTP `202`, sem item pendente ou morto na outbox;
+- SMS continua pendente de uma nova sessao posterior a ativacao integral dos
+  produtores; por isso o item conjunto de canais ainda nao foi encerrado;
+- o callback RCS real comprovou que o campo `date` sem offset representa
+  `America/Sao_Paulo`. A normalizacao desse caso foi corrigida localmente antes
+  do rollout global; datas com offset e o contrato historico de SMS permanecem
+  inalterados.
 
 ### Gate M6 — retorno obrigatorio
 

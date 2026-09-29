@@ -130,6 +130,10 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     todo envelope leva `flow_type=orchestration`. Voz espelha a taxonomia do
     PDIAL e só produz `dialing` após aceite 2xx do MakeCall V2; o terminal
     continua vindo do CDR/Hangup. Supplier V1 e WebSockets não participam.
+    Callbacks RCS reais enviam `date` local sem offset; somente nesse canal o
+    ORCH interpreta esse formato como `America/Sao_Paulo` antes de convertê-lo
+    para UTC. Offset explícito e timestamps SMS preservam os contratos
+    anteriores.
     Consulte `METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
 
 ## O que e o ORCH

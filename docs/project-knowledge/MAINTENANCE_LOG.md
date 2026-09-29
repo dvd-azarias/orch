@@ -2647,3 +2647,35 @@ como telefone compatível e materializou o dispatch
   repositórios e seleção de canal;
 - rollback por reversão de código e restart dos workers/API ORCH afetados;
   nenhuma migration ou compensação de dados é necessária.
+
+## 2026-09-29 — Fuso do callback RCS e evidência Metrics multicanal
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a projeção temporal do RCS descoberta durante o canário dos novos
+eventos da Metrics API. `ALPHA_FIX_REQUIRED` para confiabilidade da jornada e
+ordenação de estados, sem alterar o provedor ou o contrato da Metrics.
+
+### ROOT CAUSE / CHANGE / SAFETY
+
+- o callback real do RCS enviou `date` sem offset, por exemplo
+  `2026-09-29 19:10:02`, enquanto o recebimento ocorreu às `22:10 UTC`;
+- o parser genérico anexava UTC a qualquer data ingênua. Assim, o agregado
+  conservava `accepted` como estado mais recente, embora `delivered_at` e
+  `engaged_at` já existissem;
+- somente timestamps ingênuos do canal RCS passam a ser interpretados em
+  `America/Sao_Paulo` e convertidos para UTC;
+- timestamps com offset explícito permanecem intactos, e SMS mantém sua
+  interpretação histórica em UTC. Não há migration, replay ou alteração de
+  payload externo.
+
+### VALIDATION / ROLLBACK
+
+- a sessão `f0357257-c500-479c-87ef-0fb4c42193f4` comprovou voz
+  `dialing -> answered`, RCS `sent -> delivered -> read` e WhatsApp
+  `sent -> delivered -> read -> replied`;
+- 28 envelopes foram publicados com HTTP `202`, sem pendência ou dead letter;
+- `35 passed` na regressão direcionada de callbacks, jornada e integração
+  Metrics; `git diff --check` sem erro;
+- rollback é reversão de código e restart da API que recebe callbacks; nenhum
+  dado histórico será reescrito automaticamente.
