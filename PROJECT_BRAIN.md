@@ -113,6 +113,14 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     `channel`/legados permanecem com a identidade histórica. Integração e novo
     E2E ainda são pendentes; a tentativa consumida não deve ser reutilizada ou
     zerada.
+35. O `code_editor` do executor ORCH precisa publicar o `payload` retornado em
+    `variables.customs`, por merge raso, além de preservar
+    `code_editor_last_payload` para diagnóstico. Esse é o contrato já praticado
+    pelo Runner v5 e permite que cards seguintes resolvam `{{variavel}}`, em
+    especial um `api_call`. O `ctx.variables` retornado pelo JavaScript continua
+    sendo persistido primeiro; quando houver colisão, o `payload` retornado vence.
+    Payload não-objeto permanece somente no campo diagnóstico. A correção é
+    local ao executor e não altera schema, filas, canvas ou contratos HTTP.
 
 ## O que e o ORCH
 

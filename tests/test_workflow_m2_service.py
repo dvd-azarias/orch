@@ -3253,6 +3253,85 @@ export default async function main(ctx) {
 
     assert branch == "success"
     assert runtime_variables["variables"]["customs"]["resultado"] == 228
+    assert runtime_variables["variables"]["customs"]["ok"] is True
+    assert runtime_variables["code_editor_last_payload"] == {"ok": True}
+
+
+def test_code_editor_payload_is_available_to_following_api_call(monkeypatch) -> None:
+    runtime_variables = {
+        "variables": {
+            "customs": {
+                "preserved": "unchanged",
+                "ETAPA": "before",
+            }
+        }
+    }
+    code_editor_component = {
+        "parameters": {
+            "timeout_ms": 500,
+            "code": """
+export default async function main(ctx) {
+  return {
+    branch: ctx.branches.success,
+    payload: {
+      CPF: "12345678901",
+      DATA: "2026-09-29",
+      ETAPA: "SEGMENTAÇÃO"
+    }
+  };
+}
+""",
+        }
+    }
+
+    branch = _run_code_editor(
+        component=code_editor_component,
+        runtime_variables=runtime_variables,
+        branch_labels=["success", "error"],
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_http_execute(req, timeout_seconds):
+        captured["body"] = req.data.decode("utf-8")
+        return 200, {}, "{\"received\": true}", None
+
+    monkeypatch.setattr(workflow_m2_service, "_http_execute", fake_http_execute)
+    api_call_component = {
+        "parameters": {
+            "request": {
+                "url": "https://example.test/hook",
+                "method": "POST",
+                "timeout": 1000,
+                "headers": [],
+                "query": [],
+                "body": {
+                    "mode": "json",
+                    "json": (
+                        '{"CPF":"{{CPF}}","DATA":"{{DATA}}",'
+                        '"ETAPA":"{{ETAPA}}","preserved":"{{preserved}}"}'
+                    ),
+                },
+                "response": {},
+            }
+        }
+    }
+
+    api_branch = _run_api_call(component=api_call_component, runtime_variables=runtime_variables)
+    customs = runtime_variables["variables"]["customs"]
+
+    assert branch == "success"
+    assert api_branch == "success"
+    assert customs["preserved"] == "unchanged"
+    assert customs["ETAPA"] == "SEGMENTAÇÃO"
+    assert customs["CPF"] == "12345678901"
+    assert customs["DATA"] == "2026-09-29"
+    assert json.loads(captured["body"]) == {
+        "CPF": "12345678901",
+        "DATA": "2026-09-29",
+        "ETAPA": "SEGMENTAÇÃO",
+        "preserved": "unchanged",
+    }
 
 
 def test_resolve_code_editor_branch_redirects_to_exception_on_runtime_error() -> None:
@@ -3296,6 +3375,7 @@ export default async function main(ctx) {
         branch_labels=["success", "exception_6509b0nud"],
     )
     assert branch == "exception_6509b0nud"
+    assert runtime_variables["variables"]["customs"]["ok"] is False
 
 
 def test_resolve_code_editor_branch_raises_when_unmapped_and_no_exception() -> None:
