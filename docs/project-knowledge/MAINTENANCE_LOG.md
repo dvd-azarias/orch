@@ -1,5 +1,38 @@
 # Maintenance Log
 
+## 2026-09-29 — Reconciliador Supplier V2 cobre dispatch RCS registrado
+
+### REQUEST / CLASSIFICATION
+
+Eliminar a intervenção manual observada no canário RCS quando o primeiro GET
+do ORCH encontrou o dispatch ainda em `dispatching`, mas o Target Core o marcou
+como `accepted` logo depois. `ALPHA_FIX_REQUIRED`, restrito ao scanner de
+recuperação SMS/RCS V2.
+
+### EVIDENCE / CHANGE / SAFETY
+
+- sessão `8774` (`eb31ad4c-de14-4444-9443-74acd3c666b7`) permaneceu em
+  `blocked_send_with_rcs` com intenção local `registered`, enquanto o dispatch
+  `8f7df84c-c703-46f1-bf40-4db85f713598` já estava `accepted` no Target Core;
+- a consulta periódica incluía `registered` somente para `sms`, apesar de todo
+  o restante do task e do outbox já suportar `sms|rcs`;
+- o scanner agora seleciona `sms + blocked_send_with_sms` e
+  `rcs + blocked_send_with_rcs`; combinações cruzadas e ausência de bloqueio
+  permanecem excluídas;
+- a transição continua usando o mesmo lock, compare-and-set, idempotência e
+  fila dedicada. Supplier V1, callbacks, schema e demais canais não mudam;
+- no RCS, `provider_accepted` não fabrica entrega: o card ainda depende do
+  callback de ciclo de vida configurado ou do timeout.
+
+### VALIDATION / ROLLBACK
+
+- `84 passed` na regressão completa de Supplier V2 SMS/RCS, incluindo task,
+  callback, API, engine, repositories e consultas PostgreSQL reais;
+- o teste do scanner comprova seleção dos dois pares válidos e exclusão de
+  canal/motivo cruzados ou sessão sem bloqueio;
+- rollback é a reversão da condição do scanner e dos testes, sem migration ou
+  compensação de dados.
+
 ## 2026-09-29 — Payload do Code Editor disponível aos cards seguintes
 
 ### REQUEST / CLASSIFICATION

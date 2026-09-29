@@ -14,7 +14,7 @@ FLOW_UUID = "c1dfbaa3-41c6-41b5-bf50-b7f6ba5c5152"
 
 
 @pytest.mark.asyncio
-async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
+async def test_reconciler_query_selects_pending_expired_and_registered_channels_in_postgres(
 ) -> None:
     real_factory = get_session_factory()
 
@@ -62,6 +62,21 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
                     now - timedelta(minutes=30),
                 ),
                 (8, "registered", "sms", None, now - timedelta(minutes=30)),
+                (
+                    9,
+                    "registered",
+                    "rcs",
+                    "blocked_send_with_sms",
+                    now - timedelta(minutes=30),
+                ),
+                (
+                    10,
+                    "registered",
+                    "sms",
+                    "blocked_send_with_rcs",
+                    now - timedelta(minutes=30),
+                ),
+                (11, "registered", "rcs", None, now - timedelta(minutes=30)),
             ]
             for session_id, status, channel, blocking_reason, updated_at in rows:
                 await db_session.execute(
@@ -109,4 +124,5 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
                 {"id": 1, "flow_uuid": FLOW_UUID, "attempts": 1},
                 {"id": 4, "flow_uuid": FLOW_UUID, "attempts": 4},
                 {"id": 6, "flow_uuid": FLOW_UUID, "attempts": 6},
+                {"id": 7, "flow_uuid": FLOW_UUID, "attempts": 7},
             ]

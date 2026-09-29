@@ -345,19 +345,24 @@ publica a retomada. Identificador do provedor, sessão, canal e tipo normalizado
 formam a deduplicação; callback histórico fica auditado como tardio e nunca
 reabre card ou sessão.
 
-O card SMS expõe somente `next`/`Próximo`. O reconciliador do ORCH consulta o
-dispatch registrado e somente o estado durável `accepted` libera essa
-transição. A mudança `registered -> provider_accepted` é protegida por lock e
-compare-and-set; replay não agenda outra retomada. Estados `pending` e
-`dispatching` mantêm a sessão bloqueada; `failed` e `uncertain` são registrados
-sem fingir sucesso. DLR, MO e status não liberam mais o card: eles viram eventos
-`callback/sms_event` no inbox da sessão e pertencem ao `wait_for_event`
+O reconciliador do ORCH consulta dispatches `registered` de SMS e RCS, sempre
+exigindo a combinação correspondente entre canal e motivo de bloqueio. A
+mudança `registered -> provider_accepted` é protegida por lock e compare-and-set;
+replay não agenda outra retomada. Estados `pending` e `dispatching` mantêm a
+sessão bloqueada; `failed` e `uncertain` são registrados sem fingir sucesso.
+
+O card SMS expõe somente `next`/`Próximo`, e apenas o estado durável `accepted`
+libera essa transição. DLR, MO e status não liberam mais o card: eles viram
+eventos `callback/sms_event` no inbox da sessão e pertencem ao `wait_for_event`
 seguinte. `data.status` distingue `sent`, `delivered`, `not_delivered`,
 `response`, `failed` e telemetria ainda desconhecida. O card grava uma chave
 opaca em `customs.<output_var>.correlation_key`; um `wait_for_event` seguinte
 usa essa chave para consumir somente eventos do dispatch exato, inclusive os
 que chegaram antes de o wait ser armado. Se uma condição devolver a execução
-ao mesmo wait, seu timeout absoluto não é renovado.
+ao mesmo wait, seu timeout absoluto não é renovado. No RCS, o mesmo aceite
+durável é registrado e dispara a reavaliação idempotente da sessão, mas não
+fabrica entrega: a saída continua dependendo do callback de ciclo de vida
+configurado ou do timeout.
 
 ## Handoff RCS e dispatch opt-in pela Supplier V2
 
