@@ -3212,6 +3212,16 @@ def _materialize_channel_dispatch_v2_intent(
             raw_variables = _render_value(
                 params.get("template_variables") or {}, resolution_scope
             )
+            if (
+                isinstance(raw_variables, dict)
+                and "json" in raw_variables
+                and "output_var_name" in raw_variables
+                and set(raw_variables).issubset({"json", "output_var_name"})
+            ):
+                # Campos ``type=json`` salvos pelo canvas podem chegar no
+                # envelope do catálogo. O provedor RCS deve receber somente o
+                # objeto configurado pelo usuário, nunca metadados da UI.
+                raw_variables = raw_variables.get("json") or {}
             if isinstance(raw_variables, str):
                 raw_variables = json.loads(raw_variables or "{}")
             if not isinstance(raw_variables, dict):

@@ -2516,3 +2516,33 @@ V2. `ALPHA_FIX_OPTIONAL`, sem tocar Supplier V1 ou discagem.
 - canário real ainda pendente de merge/deploy e nova sessão limpa;
 - rollback por reversão de código e restart; não há persistência estrutural a
   desfazer.
+
+## 2026-09-29 — Normalização do campo JSON no envelope RCS
+
+### REQUEST / CLASSIFICATION
+
+Corrigir o primeiro envio real após a reutilização Voice -> RCS. A sessão
+`8731` consumiu a tabulação `improdutiva`, selecionou o membro Voice `11696`
+como telefone compatível e materializou o dispatch
+`68415d76-5ad7-4dd5-971e-f2bb77867753`, mas o provedor respondeu HTTP 500.
+`ALPHA_FIX_REQUIRED`, restrito ao envelope RCS da Supplier V2.
+
+### ROOT CAUSE / CHANGE / SAFETY
+
+- o canvas persistiu `template_variables` como envelope de campo JSON
+  (`json` + `output_var_name`), e o ORCH encaminhou esses metadados internos
+  como variáveis do template;
+- o runtime passa a desembrulhar somente o formato inequívoco do catálogo e
+  envia ao provedor apenas o objeto contido em `json`;
+- objetos JSON diretos continuam sendo renderizados sem alteração;
+- Supplier V1, SMS, seleção de contato, callbacks e idempotência não foram
+  modificados; o dispatch incerto não será reenviado automaticamente.
+
+### VALIDATION / ROLLBACK
+
+- `13 passed` na suíte dirigida de `send_with_rcs`, incluindo o formato direto
+  e o envelope real observado no canário;
+- `128 passed` na regressão ampliada de SMS/RCS, callbacks, tasks,
+  repositórios e seleção de canal;
+- rollback por reversão de código e restart dos workers/API ORCH afetados;
+  nenhuma migration ou compensação de dados é necessária.
