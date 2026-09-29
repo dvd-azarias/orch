@@ -41,13 +41,16 @@ class Settings:
     celery_channel_supplier_v2_queue: str
     celery_heartbeat_queue: str
     celery_journey_snapshot_queue: str
+    celery_metrics_events_queue: str
     celery_beat_heartbeat_enabled: bool
     celery_beat_dispatch_enabled: bool
     celery_beat_reconcile_pending_events_enabled: bool
     celery_beat_dialer_supplier_v2_reconcile_enabled: bool
     celery_beat_channel_supplier_v2_reconcile_enabled: bool
     celery_beat_journey_snapshot_enabled: bool
+    celery_beat_metrics_events_enabled: bool
     celery_journey_snapshot_interval_seconds: int
+    celery_metrics_events_interval_seconds: int
     celery_journey_snapshot_workspace_uuid: str | None
     celery_dispatch_workspace_uuid: str | None
     celery_reconcile_pending_events_workspace_uuid: str | None
@@ -58,6 +61,16 @@ class Settings:
     orch_journey_snapshot_lease_seconds: int
     orch_journey_redis_url: str | None
     orch_journey_ws_ticket_ttl_seconds: int
+    orch_metrics_events_enabled: bool
+    orch_metrics_api_base_url: str | None
+    orch_metrics_api_key: str | None
+    orch_metrics_events_workspace_allowlist: tuple[str, ...]
+    orch_metrics_events_http_timeout_seconds: float
+    orch_metrics_events_batch_size: int
+    orch_metrics_events_lease_seconds: int
+    orch_metrics_events_max_attempts: int
+    orch_metrics_events_retry_initial_seconds: int
+    orch_metrics_events_retry_max_seconds: int
     celery_generate_file_enabled: bool
     celery_generate_file_scan_enabled: bool
     celery_generate_file_scan_interval_seconds: int
@@ -314,6 +327,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
         "channel_supplier_v2": "orch_channel_supplier_v2",
         "heartbeat": "orch_heartbeat",
         "journey_snapshot": "orch_journey_snapshot",
+        "metrics_events": "orch_metrics_events",
         "fileapp_ingest": "orch_fileapp_ingest_events",
         "fileapp_process": "orch_fileapp_source_list_ingest",
         "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc",
@@ -334,6 +348,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "channel_supplier_v2": "orch_channel_supplier_v2_launchd_local",
             "heartbeat": "orch_heartbeat_launchd_local",
             "journey_snapshot": "orch_journey_snapshot_launchd_local",
+            "metrics_events": "orch_metrics_events_launchd_local",
             "fileapp_ingest": "orch_fileapp_ingest_launchd_local",
             "fileapp_process": "orch_fileapp_source_list_launchd_local",
             "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_launchd_local",
@@ -351,6 +366,7 @@ def _default_queue_by_profile(profile: str, queue_key: str) -> str:
             "channel_supplier_v2": "orch_channel_supplier_v2_f5_local",
             "heartbeat": "orch_heartbeat_f5_local",
             "journey_snapshot": "orch_journey_snapshot_f5_local",
+            "metrics_events": "orch_metrics_events_f5_local",
             "fileapp_ingest": "orch_fileapp_ingest_f5_local",
             "fileapp_process": "orch_fileapp_source_list_f5_local",
             "fileapp_mailing_assoc": "orch_fileapp_mailing_assoc_f5_local",
@@ -455,6 +471,13 @@ def get_settings() -> Settings:
             )
             or _default_queue_by_profile(queue_profile, "journey_snapshot")
         ),
+        celery_metrics_events_queue=(
+            _read_env_optional(
+                "CELERY_METRICS_EVENTS_QUEUE",
+                _default_queue_by_profile(queue_profile, "metrics_events"),
+            )
+            or _default_queue_by_profile(queue_profile, "metrics_events")
+        ),
         celery_beat_heartbeat_enabled=_read_env_bool("CELERY_BEAT_HEARTBEAT_ENABLED", True),
         celery_beat_dispatch_enabled=_read_env_bool("CELERY_BEAT_DISPATCH_ENABLED", True),
         celery_beat_reconcile_pending_events_enabled=_read_env_bool("CELERY_BEAT_RECONCILE_PENDING_EVENTS_ENABLED", True),
@@ -467,11 +490,20 @@ def get_settings() -> Settings:
         celery_beat_journey_snapshot_enabled=_read_env_bool(
             "CELERY_BEAT_JOURNEY_SNAPSHOT_ENABLED", False
         ),
+        celery_beat_metrics_events_enabled=_read_env_bool(
+            "CELERY_BEAT_METRICS_EVENTS_ENABLED", False
+        ),
         celery_journey_snapshot_interval_seconds=_read_env_int_range(
             "CELERY_JOURNEY_SNAPSHOT_INTERVAL_SECONDS",
             2,
             minimum=1,
             maximum=60,
+        ),
+        celery_metrics_events_interval_seconds=_read_env_int_range(
+            "CELERY_METRICS_EVENTS_INTERVAL_SECONDS",
+            5,
+            minimum=1,
+            maximum=300,
         ),
         celery_journey_snapshot_workspace_uuid=_read_env_optional(
             "CELERY_JOURNEY_SNAPSHOT_WORKSPACE_UUID",
@@ -502,6 +534,41 @@ def get_settings() -> Settings:
             30,
             minimum=10,
             maximum=120,
+        ),
+        orch_metrics_events_enabled=_read_env_bool(
+            "ORCH_METRICS_EVENTS_ENABLED", False
+        ),
+        orch_metrics_api_base_url=_read_env_optional("METRICS_API_BASE_URL"),
+        orch_metrics_api_key=_read_env_optional("METRICS_API_KEY"),
+        orch_metrics_events_workspace_allowlist=_read_env_csv(
+            "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST", ()
+        ),
+        orch_metrics_events_http_timeout_seconds=_read_env_float_range(
+            "ORCH_METRICS_EVENTS_HTTP_TIMEOUT_SECONDS",
+            5.0,
+            minimum=1.0,
+            maximum=60.0,
+        ),
+        orch_metrics_events_batch_size=_read_env_int_range(
+            "ORCH_METRICS_EVENTS_BATCH_SIZE", 100, minimum=1, maximum=100
+        ),
+        orch_metrics_events_lease_seconds=_read_env_int_range(
+            "ORCH_METRICS_EVENTS_LEASE_SECONDS", 120, minimum=30, maximum=900
+        ),
+        orch_metrics_events_max_attempts=_read_env_int_range(
+            "ORCH_METRICS_EVENTS_MAX_ATTEMPTS", 12, minimum=1, maximum=100
+        ),
+        orch_metrics_events_retry_initial_seconds=_read_env_int_range(
+            "ORCH_METRICS_EVENTS_RETRY_INITIAL_SECONDS",
+            5,
+            minimum=1,
+            maximum=3600,
+        ),
+        orch_metrics_events_retry_max_seconds=_read_env_int_range(
+            "ORCH_METRICS_EVENTS_RETRY_MAX_SECONDS",
+            900,
+            minimum=1,
+            maximum=86400,
         ),
         celery_generate_file_enabled=_read_env_bool("CELERY_GENERATE_FILE_ENABLED", True),
         celery_generate_file_scan_enabled=_read_env_bool("CELERY_GENERATE_FILE_SCAN_ENABLED", True),
@@ -907,6 +974,50 @@ def get_settings() -> Settings:
     )
     if settings.billing_retry_initial_seconds > settings.billing_retry_max_seconds:
         raise ValueError("BILLING_RETRY_INITIAL_SECONDS não pode exceder BILLING_RETRY_MAX_SECONDS.")
+    if (
+        settings.orch_metrics_events_retry_initial_seconds
+        > settings.orch_metrics_events_retry_max_seconds
+    ):
+        raise ValueError(
+            "ORCH_METRICS_EVENTS_RETRY_INITIAL_SECONDS não pode exceder "
+            "ORCH_METRICS_EVENTS_RETRY_MAX_SECONDS."
+        )
+    if settings.orch_metrics_events_enabled:
+        if not settings.celery_enabled:
+            raise ValueError(
+                "CELERY_ENABLED=true é obrigatório quando "
+                "ORCH_METRICS_EVENTS_ENABLED=true."
+            )
+        if not settings.orch_metrics_events_workspace_allowlist:
+            raise ValueError(
+                "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST é obrigatória quando "
+                "ORCH_METRICS_EVENTS_ENABLED=true."
+            )
+        try:
+            for workspace_uuid in settings.orch_metrics_events_workspace_allowlist:
+                if UUID(workspace_uuid).int == 0:
+                    raise ValueError
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST contém UUID inválido."
+            ) from exc
+        metrics_base_url = str(settings.orch_metrics_api_base_url or "").strip()
+        parsed_metrics_base_url = urlsplit(metrics_base_url)
+        if (
+            parsed_metrics_base_url.scheme not in {"http", "https"}
+            or not parsed_metrics_base_url.netloc
+            or parsed_metrics_base_url.query
+            or parsed_metrics_base_url.fragment
+        ):
+            raise ValueError(
+                "METRICS_API_BASE_URL deve ser uma base HTTP/HTTPS sem query "
+                "ou fragmento quando ORCH_METRICS_EVENTS_ENABLED=true."
+            )
+        if not str(settings.orch_metrics_api_key or "").strip():
+            raise ValueError(
+                "METRICS_API_KEY é obrigatória quando "
+                "ORCH_METRICS_EVENTS_ENABLED=true."
+            )
     if settings.orch_billing_enabled and not settings.billing_rabbitmq_url:
         raise ValueError("BILLING_RABBITMQ_URL é obrigatória quando ORCH_BILLING_ENABLED=true.")
     if settings.orch_billing_enabled and settings.celery_broker_url == "memory://":

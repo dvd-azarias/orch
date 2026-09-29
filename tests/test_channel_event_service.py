@@ -66,6 +66,7 @@ def test_extract_channel_events_returns_whatsapp_message_items() -> None:
                             "messages": [
                                 {
                                     "id": "wamid-message-1",
+                                    "context": {"id": "wamid-outbound-1"},
                                     "from": "5511975620806",
                                     "timestamp": "1781526585",
                                     "type": "interactive",
@@ -94,6 +95,8 @@ def test_extract_channel_events_returns_whatsapp_message_items() -> None:
     assert events[0].channel == "whatsapp"
     assert events[0].event_type == "message:otimo"
     assert events[0].event_id == "wamid-message-1"
+    assert events[0].dispatch_reference_id == "wamid-outbound-1"
+    assert events[0].metrics_metadata == {"provider_status": "message"}
     assert events[0].event_ts is not None
     assert events[1].event_type == "message:ola_bom_dia"
     assert events[1].event_id == "wamid-message-2"

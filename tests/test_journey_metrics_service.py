@@ -36,6 +36,7 @@ async def _prepare_schema(db_session, schema: str) -> None:
                 started_at TIMESTAMPTZ,
                 ended_at TIMESTAMPTZ,
                 abandoned_at TIMESTAMPTZ,
+                runtime_variables JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """

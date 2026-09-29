@@ -1072,6 +1072,10 @@ async def callback_dialer_supplier_v2_by_workspace(
                 component_kind="send_with_dialer_handoff",
                 provider_reference=str(request.attempt_id),
                 metadata={
+                    "provider_status": request.provider_status or request.outcome,
+                    "duration_seconds": request.duration_seconds,
+                    "error_code": request.error_code,
+                    "error_message": request.error_message,
                     "decision": request.decision,
                     "decision_source": request.decision_source,
                     "release_mapping_version": request.release_mapping_version,

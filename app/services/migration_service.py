@@ -45,6 +45,14 @@ MIGRATIONS: list[tuple[str, str]] = [
         "0024_create_orch_journey_workspace_snapshot_state",
         "sql/024_create_orch_journey_workspace_snapshot_state.sql",
     ),
+    (
+        "0025_create_orch_metrics_event_outbox",
+        "sql/025_create_orch_metrics_event_outbox.sql",
+    ),
+    (
+        "0026_create_orch_metrics_dispatch_snapshots",
+        "sql/026_create_orch_metrics_dispatch_snapshots.sql",
+    ),
 ]
 
 

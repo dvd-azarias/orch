@@ -62,6 +62,7 @@ As flags legada e nova sao mutuamente exclusivas. Detalhes: `docs/BILLING_BATCH_
 | generate scan | `orch_component_generate_file_scan` | sufixo launchd | sufixo f5 |
 | billing | `orch.billing.outbox` | `orch.billing.outbox_launchd_local` | `orch.billing.outbox_f5_local` |
 | snapshot da jornada | `orch_journey_snapshot` | `orch_journey_snapshot_launchd_local` | `orch_journey_snapshot_f5_local` |
+| eventos REST da Metrics | `orch_metrics_events` | `orch_metrics_events_launchd_local` | `orch_metrics_events_f5_local` |
 
 Overrides `CELERY_*_QUEUE` prevalecem. API, publishers e consumers precisam usar os mesmos nomes.
 
@@ -102,6 +103,30 @@ Defaults importantes:
   unico emitido ao BFF.
 
 ## Integracoes
+
+### Eventos de orquestracao para a Metrics API
+
+- `ORCH_METRICS_EVENTS_ENABLED=false`: gate global, desligado por padrao.
+- `ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST`: UUIDs explicitamente autorizados;
+  vazio falha fechado quando o gate esta ativo.
+- `METRICS_API_BASE_URL`: base terminada em `/api`; o publicador acrescenta
+  `/v1/events/ingest`.
+- `METRICS_API_KEY`: segredo enviado somente no header `X-API-Key`; nunca
+  registrar em log ou versionar.
+- `CELERY_METRICS_EVENTS_QUEUE`: fila exclusiva resolvida pelo profile.
+- `CELERY_BEAT_METRICS_EVENTS_ENABLED=false`: habilitar em exatamente um Beat
+  logico do ambiente. Writers e worker devem manter esta flag `false`; ela nao
+  controla a captura dos fatos.
+- `CELERY_METRICS_EVENTS_INTERVAL_SECONDS=5`: frequencia do scanner.
+- `ORCH_METRICS_EVENTS_BATCH_SIZE=100`: limite contratual maximo por POST.
+- `ORCH_METRICS_EVENTS_HTTP_TIMEOUT_SECONDS=5`,
+  `ORCH_METRICS_EVENTS_LEASE_SECONDS=120`,
+  `ORCH_METRICS_EVENTS_MAX_ATTEMPTS=12`,
+  `ORCH_METRICS_EVENTS_RETRY_INITIAL_SECONDS=5` e
+  `ORCH_METRICS_EVENTS_RETRY_MAX_SECONDS=900`: isolamento, lease e backoff.
+
+O WebSocket proprio de jornada, PDIAL e CTI Server nao dependem deste gate.
+Detalhes e gates: `docs/project-knowledge/METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
 
 - Files: `ARQUIVOS_*` e `SYNC_WS_*`.
 - Target Core: `SYNC_WEBHOOK_BASE_URL`, bearer configuravel e timeout `SYNC_WS_TIMEOUT_SECONDS`.

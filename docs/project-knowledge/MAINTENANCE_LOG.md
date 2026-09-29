@@ -1,5 +1,44 @@
 # Maintenance Log
 
+## 2026-09-29 — Eventos REST de jornadas para a Metrics API
+
+### REQUEST / CLASSIFICATION
+
+Emitir daqui em diante os eventos de sessão, execução, nós e acionamentos de
+orquestração previstos pela Metrics API, sem substituir a dashboard/WebSocket
+próprio, PDIAL ou CTI Server. `ALPHA_FIX_OPTIONAL`, opt-in por workspace.
+
+### CHANGE / SAFETY
+
+- duas migrations aditivas criam outbox durável e snapshot imutável por
+  dispatch; o gate nasce desligado e exige allowlist explícita;
+- writers usam savepoint e nunca aguardam rede; worker/fila exclusivos enviam
+  lotes de até 100 com lease, `SKIP LOCKED`, retry exponencial e estado `dead`;
+- sessão, execução e visita de card usam chaves idempotentes; todos os
+  envelopes levam `flow_type=orchestration`;
+- WhatsApp, SMS e RCS nascem somente de aceite/callback real. Resposta inbound
+  sem correlação e sem outbound anterior não fabrica disparo;
+- voz cria `dialing` somente após o HTTP `2xx` do MakeCall V2 e usa no terminal
+  exatamente a taxonomia PDIAL. ACK tardio não rebaixa ação já concluída;
+- Supplier V1, WebSockets existentes e fluxo funcional permanecem fora do
+  mecanismo. Não há backfill.
+
+### VALIDATION / ROLLBACK
+
+- migrations/outbox/lifecycle/dispatches, callbacks e projeções: `90 passed`
+  nos grupos dirigidos com PostgreSQL real;
+- regressão da engine M2: `174 passed`; a única falha também ocorre no `main`
+  sem esta mudança e é a assinatura histórica `trigger_orch(flow_uuid=...)` já
+  registrada como baseline;
+- stack local completa subiu com a nova fila isolada
+  `orch_metrics_events_f5_local`; API e sete processos Celery ficaram prontos,
+  e o smoke encadeado criou as sessões `8783` e `8784` nos dois fluxos de
+  desenvolvimento. A stack foi encerrada ao final;
+- rollback operacional: desligar `ORCH_METRICS_EVENTS_ENABLED`, scanner e
+  worker dedicado, preservando outbox/snapshots para auditoria;
+- rollout real permanece no Gate M5 do plano e exige o canário HighComm antes
+  de qualquer ampliação.
+
 ## 2026-09-29 — Reconciliador Supplier V2 cobre dispatch RCS registrado
 
 ### REQUEST / CLASSIFICATION

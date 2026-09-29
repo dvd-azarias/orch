@@ -17,6 +17,13 @@ from app.services.alarm_service import persist_alarm
 from app.services.journey_workspace_snapshot_service import (
     mark_journey_workspace_snapshot_dirty,
 )
+from app.services.metrics_orchestration_event_service import (
+    try_enqueue_metrics_dispatch_event,
+    try_enqueue_metrics_node_entered,
+    try_enqueue_metrics_node_exited,
+    try_enqueue_metrics_session_open_events,
+    try_enqueue_metrics_session_terminal_events,
+)
 
 logger = get_logger(__name__)
 
@@ -411,13 +418,20 @@ async def initialize_journey_session_metrics(
                     db_session,
                     observed_at=now,
                 )
-            return JourneyMetricsContext(
+            context = JourneyMetricsContext(
                 journey_session_id=int(projection_row["id"]),
                 source_session_id=source_session_id,
                 session_uuid=session_uuid,
                 flow_uuid=flow_uuid,
                 flow_revision_id=flow_revision_id,
             )
+        await try_enqueue_metrics_session_open_events(
+            db_session,
+            source_session_id=source_session_id,
+            flow_uuid=flow_uuid,
+            session_uuid=session_uuid,
+        )
+        return context
     except Exception as exc:
         await _persist_instrumentation_failure(
             db_session,
@@ -485,6 +499,9 @@ async def record_journey_component_entry(
 
     warning_issue: str | None = None
     warning_component_ref_id: str | None = None
+    entered_visit_number: int | None = None
+    entered_component_ref_id: str | None = None
+    entered_at: datetime | None = None
     try:
         component_ref_id = _component_ref_id(component, card_cursor)
         stage_id, stage_issue = _component_stage(component)
@@ -702,6 +719,9 @@ async def record_journey_component_entry(
                         "entered_at": now,
                     },
                 )
+                entered_visit_number = visit_number
+                entered_component_ref_id = component_ref_id
+                entered_at = now
                 await db_session.execute(
                     text(
                         """
@@ -747,6 +767,22 @@ async def record_journey_component_entry(
             await mark_journey_workspace_snapshot_dirty(
                 db_session,
                 observed_at=now,
+            )
+
+        if (
+            entered_visit_number is not None
+            and entered_component_ref_id is not None
+            and entered_at is not None
+        ):
+            await try_enqueue_metrics_node_entered(
+                db_session,
+                source_session_id=context.source_session_id,
+                flow_uuid=context.flow_uuid,
+                session_uuid=context.session_uuid,
+                component_ref_id=entered_component_ref_id,
+                component_kind=component_kind or "unknown",
+                visit_number=entered_visit_number,
+                occurred_at=entered_at,
             )
 
         if warning_issue is not None and warning_component_ref_id is not None:
@@ -802,9 +838,13 @@ async def record_journey_component_transition(
 ) -> None:
     if context is None:
         return
+    closed_visit_id: int | None = None
+    component_ref_id: str | None = None
+    transition_at: datetime | None = None
     try:
         component_ref_id = _component_ref_id(component, card_cursor)
         now = occurred_at or datetime.now(timezone.utc)
+        transition_at = now
         tx_context = (
             db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
         )
@@ -865,6 +905,21 @@ async def record_journey_component_transition(
                 db_session,
                 observed_at=now,
             )
+        if (
+            closed_visit_id is not None
+            and component_ref_id is not None
+            and transition_at is not None
+        ):
+            await try_enqueue_metrics_node_exited(
+                db_session,
+                source_session_id=context.source_session_id,
+                flow_uuid=context.flow_uuid,
+                session_uuid=context.session_uuid,
+                visit_id=int(closed_visit_id),
+                component_ref_id=component_ref_id,
+                component_kind=str(component.get("component_id") or "unknown"),
+                occurred_at=transition_at,
+            )
     except Exception as exc:
         await _persist_instrumentation_failure(
             db_session,
@@ -904,6 +959,9 @@ async def finalize_journey_session_metrics(
 ) -> None:
     if context is None:
         return
+    emitted_lifecycle_status: str | None = None
+    emitted_terminal_outcome: str | None = None
+    emitted_at: datetime | None = None
     try:
         now = occurred_at or datetime.now(timezone.utc)
         tx_context = (
@@ -1026,6 +1084,20 @@ async def finalize_journey_session_metrics(
                 db_session,
                 observed_at=ended_at or now,
             )
+            if is_terminal:
+                emitted_lifecycle_status = lifecycle_status
+                emitted_terminal_outcome = terminal_outcome
+                emitted_at = ended_at or now
+        if emitted_lifecycle_status is not None and emitted_at is not None:
+            await try_enqueue_metrics_session_terminal_events(
+                db_session,
+                source_session_id=context.source_session_id,
+                flow_uuid=context.flow_uuid,
+                session_uuid=context.session_uuid,
+                lifecycle_status=emitted_lifecycle_status,
+                terminal_outcome=emitted_terminal_outcome,
+                occurred_at=emitted_at,
+            )
     except Exception as exc:
         await _persist_instrumentation_failure(
             db_session,
@@ -1045,6 +1117,8 @@ def _channel_action_status(
     normalized_channel = str(channel or "").strip().lower()
     normalized_native = str(native_status or "").strip().lower()
     if normalized_channel == "voice":
+        if normalized_native == "dialing":
+            return "sent", "dialing"
         if normalized_native == "failed":
             return "failed", "failed"
         if normalized_native in {
@@ -1065,6 +1139,8 @@ def _channel_action_status(
             "failed": ("failed", "failed"),
             "limit_reached": ("failed", "limit_reached"),
         }
+        if normalized_native == "message" or normalized_native.startswith("message:"):
+            return "engaged", "response"
         if normalized_native in mapping:
             return mapping[normalized_native]
     if normalized_channel == "sms":
@@ -1340,6 +1416,7 @@ async def record_journey_channel_action_event(
     action_sequence: int | None = None,
     provider_reference: str | None = None,
     metadata: dict[str, Any] | None = None,
+    prefer_existing_latest_action: bool = False,
 ) -> JourneyChannelAction | None:
     resolved_session_uuid = session_uuid
     try:
@@ -1372,13 +1449,16 @@ async def record_journey_channel_action_event(
                     text(
                         """
                         SELECT
-                            id,
-                            session_uuid::text AS session_uuid,
-                            flow_revision_id::text AS flow_revision_id,
-                            current_component_ref_id::text AS current_component_ref_id
-                        FROM orch_journey_sessions
-                        WHERE source_session_id = :source_session_id
-                          AND flow_uuid = CAST(:flow_uuid AS uuid)
+                            journey.id,
+                            journey.session_uuid::text AS session_uuid,
+                            journey.flow_revision_id::text AS flow_revision_id,
+                            journey.current_component_ref_id::text AS current_component_ref_id,
+                            source.runtime_variables
+                        FROM orch_journey_sessions journey
+                        JOIN orch_sessions source
+                          ON source.id = journey.source_session_id
+                        WHERE journey.source_session_id = :source_session_id
+                          AND journey.flow_uuid = CAST(:flow_uuid AS uuid)
                         FOR UPDATE
                         """
                     ),
@@ -1391,8 +1471,56 @@ async def record_journey_channel_action_event(
             if projection is None:
                 return None
             resolved_session_uuid = str(projection["session_uuid"])
+            existing_action = None
+            if prefer_existing_latest_action:
+                existing_action = (
+                    await db_session.execute(
+                        text(
+                            """
+                            SELECT
+                                source_id,
+                                component_ref_id::text AS component_ref_id
+                            FROM orch_journey_channel_actions
+                            WHERE journey_session_id = :journey_session_id
+                              AND channel = :channel
+                            ORDER BY requested_at DESC, action_sequence DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "journey_session_id": int(projection["id"]),
+                            "channel": safe_channel,
+                        },
+                    )
+                ).mappings().first()
+                if existing_action is not None:
+                    safe_source_id = str(existing_action["source_id"])
+                else:
+                    # Uma mensagem inbound sem `context.id` so comprova resposta
+                    # quando existe um disparo WhatsApp anterior nesta jornada.
+                    # Sem essa ancora, criar uma action fabricaria um outbound.
+                    return None
+
+            runtime_variables = projection.get("runtime_variables")
+            if not isinstance(runtime_variables, dict):
+                runtime_variables = {}
+            whatsapp_outbound = runtime_variables.get("whatsapp_hsm_outbound")
+            if not isinstance(whatsapp_outbound, dict):
+                whatsapp_outbound = {}
             resolved_component_ref_id = str(
-                component_ref_id or projection["current_component_ref_id"] or ""
+                component_ref_id
+                or (
+                    existing_action.get("component_ref_id")
+                    if existing_action is not None
+                    else None
+                )
+                or (
+                    whatsapp_outbound.get("component_ref_id")
+                    if safe_channel == "whatsapp"
+                    else None
+                )
+                or projection["current_component_ref_id"]
+                or ""
             ).strip()
             resolved_component_ref_id = str(UUID(resolved_component_ref_id))
             action = await _insert_or_fetch_journey_channel_action(
@@ -1544,6 +1672,14 @@ async def record_journey_channel_action_event(
             await mark_journey_workspace_snapshot_dirty(
                 db_session,
                 observed_at=safe_received_at,
+            )
+            await try_enqueue_metrics_dispatch_event(
+                db_session,
+                action_id=action.action_id,
+                event_key=event_key,
+                native_status=safe_native_status,
+                occurred_at=safe_occurred_at,
+                metadata=safe_metadata,
             )
             return action
     except Exception as exc:

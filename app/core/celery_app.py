@@ -109,6 +109,12 @@ if (
         "schedule": max(1, settings.celery_journey_snapshot_interval_seconds),
         "options": {"queue": settings.celery_journey_snapshot_queue},
     }
+if settings.orch_metrics_events_enabled and settings.celery_beat_metrics_events_enabled:
+    beat_schedule["orch-metrics-events-publish-pending"] = {
+        "task": "app.tasks.metrics_events.publish_pending",
+        "schedule": max(1, settings.celery_metrics_events_interval_seconds),
+        "options": {"queue": settings.celery_metrics_events_queue},
+    }
 
 celery_app = Celery(
     "orch",
@@ -123,6 +129,7 @@ celery_app = Celery(
         "app.tasks.fileapp_ingest_tasks",
         "app.tasks.billing_tasks",
         "app.tasks.journey_dashboard_tasks",
+        "app.tasks.metrics_event_tasks",
     ],
 )
 
@@ -152,6 +159,9 @@ celery_app.conf.update(
         },
         "app.tasks.journey_dashboard.build_workspace_snapshot": {
             "queue": settings.celery_journey_snapshot_queue
+        },
+        "app.tasks.metrics_events.publish_pending": {
+            "queue": settings.celery_metrics_events_queue
         },
         "app.tasks.component_generate_file.scan_due": {"queue": settings.celery_generate_file_scan_queue},
         "app.tasks.component_generate_file.run": {"queue": settings.celery_generate_file_run_queue},

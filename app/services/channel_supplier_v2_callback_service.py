@@ -221,6 +221,51 @@ def _normalize_rcs_event(
     return "status"
 
 
+def _metrics_provider_metadata(event: NormalizedChannelCallback) -> dict[str, Any]:
+    payload = event.provider_payload
+    provider_status = _first_text(
+        payload,
+        "status",
+        "status_name",
+        "descricao",
+        "description",
+        "status_description",
+        "codigo_status",
+        "status_code",
+    )
+    metadata: dict[str, Any] = {
+        "provider_status": provider_status or event.event_type,
+    }
+    if event.event_type in {
+        "not_delivered",
+        "failed",
+        "unavailable",
+        "expired",
+    }:
+        error_code = _first_text(
+            payload,
+            "error_code",
+            "codigo_erro",
+            "code",
+            "status_code",
+            "codigo_status",
+        )
+        error_message = _first_text(
+            payload,
+            "error_message",
+            "error",
+            "message",
+            "descricao",
+            "description",
+            "status_description",
+        )
+        if error_code:
+            metadata["error_code"] = error_code
+        if error_message:
+            metadata["error_message"] = error_message
+    return metadata
+
+
 def normalize_channel_supplier_v2_callbacks(
     *,
     channel: str,
@@ -410,7 +455,10 @@ async def persist_channel_supplier_v2_callback(
             component_kind=f"send_with_{str(channel).strip().lower()}",
             action_sequence=int(claims["dispatch_sequence"]),
             provider_reference=event.event_id,
-            metadata={"event_kind": str(event_kind).strip().lower()},
+            metadata={
+                "event_kind": str(event_kind).strip().lower(),
+                **_metrics_provider_metadata(event),
+            },
         )
         if late_callback:
             pending_result = await db_session.execute(
