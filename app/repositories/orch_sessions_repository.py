@@ -1227,7 +1227,10 @@ async def persist_run_flow_event_for_recent_entity_address(
                     AND entity_address = :entity_address
                     AND unassigned_at IS NULL
                     AND created_at >= NOW() - make_interval(hours => CAST(:window_hours AS int))
-                    AND (:expected_session_id IS NULL OR id = :expected_session_id)
+                    AND (
+                        CAST(:expected_session_id AS bigint) IS NULL
+                        OR id = CAST(:expected_session_id AS bigint)
+                    )
                     AND (
                         :allow_confirmed_finish_flow_webhook
                         OR COALESCE(
