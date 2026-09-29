@@ -177,6 +177,7 @@ SPLIT_RANDOM_HASH_STRATEGY = "sha256_mod_100_v1"
 SELECT_CONTACT_CHANNEL_TYPES = {"voice", "whatsapp", "sms", "email", "rcs"}
 SELECT_CONTACT_CHANNEL_STRATEGIES = {"first_eligible", "next_eligible"}
 SELECT_CONTACT_CHANNEL_DIAL_RULE_MODES = {"respect_dial_rule", "flow_override"}
+SELECT_CONTACT_CHANNEL_MATCH_POLICIES = {"exact_type", "compatible_phone"}
 SELECT_CONTACT_CHANNEL_OUTPUT_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 SELECT_CONTACT_CHANNEL_MAX_LABEL_LENGTH = 128
 CHECK_RESTRICTION_LISTS_SCOPES = {"person", "current_channel"}
@@ -273,6 +274,7 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "select_contact_channel_invalid_output_var",
     "select_contact_channel_invalid_selection_strategy",
     "select_contact_channel_invalid_dial_rule_mode",
+    "select_contact_channel_invalid_match_policy",
     "select_contact_channel_missing_contact_context",
     "select_contact_channel_next_requires_person",
     "select_contact_channel_next_requires_selection",
@@ -282,6 +284,7 @@ TERMINAL_WORKFLOW_ERROR_CODES = {
     "select_contact_channel_persistence_failed",
     "select_contact_channel_rebind_failed",
     "send_with_rcs_contact_not_eligible",
+    "send_with_rcs_invalid_recipient_channel_policy",
     "send_with_sms_contact_not_eligible",
     "send_with_email_contact_not_eligible",
     "send_with_dialer_handoff_invalid_answer_action",
@@ -2954,6 +2957,30 @@ async def _prepare_send_with_sms_contact_member(
     return assignment
 
 
+def _send_with_rcs_recipient_channel_policy(component: dict[str, Any]) -> str:
+    raw_parameters = component.get("parameters")
+    if isinstance(raw_parameters, dict):
+        parameters = raw_parameters
+    elif isinstance(raw_parameters, list):
+        parameters = {
+            str(item.get("id") or item.get("name")): item.get("value")
+            for item in raw_parameters
+            if isinstance(item, dict) and (item.get("id") or item.get("name"))
+        }
+    else:
+        parameters = {}
+    policy = str(
+        _catalog_parameter_scalar(parameters.get("recipient_channel_policy"))
+        or "rcs_only"
+    ).strip().lower()
+    if policy not in {"rcs_only", "reuse_current_phone"}:
+        raise WorkflowExecutionError(
+            "send_with_rcs_invalid_recipient_channel_policy",
+            "A política do destinatário RCS é inválida.",
+        )
+    return policy
+
+
 async def _prepare_send_with_rcs_contact_member(
     *,
     db_session: AsyncSession,
@@ -2982,12 +3009,18 @@ async def _prepare_send_with_rcs_contact_member(
             "A sessão não possui membro, lista e mailing válidos para o handoff RCS.",
         ) from exc
 
+    recipient_channel_policy = _send_with_rcs_recipient_channel_policy(component)
     channel_type = _normalize_channel_type(contact_row.get("contact_channel_type"))
     channel_address = str(contact_row.get("contact_channel_address") or "").strip()
+    accepted_channel_types = (
+        {"rcs", "voice"}
+        if recipient_channel_policy == "reuse_current_phone"
+        else {"rcs"}
+    )
     if (
         contact_list_member_id <= 0
         or mailing_id <= 0
-        or channel_type != "rcs"
+        or channel_type not in accepted_channel_types
         or not channel_address
     ):
         raise WorkflowExecutionError(
@@ -3014,6 +3047,7 @@ async def _prepare_send_with_rcs_contact_member(
         contact_list_id=contact_list_id,
         mailing_id=mailing_id,
         person_uuid=person_uuid,
+        allow_phone_source=recipient_channel_policy == "reuse_current_phone",
     )
     if assignment is None:
         raise WorkflowExecutionError(
@@ -3023,6 +3057,8 @@ async def _prepare_send_with_rcs_contact_member(
 
     runtime_variables["send_with_rcs_routing"] = {
         "component_ref_id": component.get("ref_id"),
+        "recipient_channel_policy": recipient_channel_policy,
+        "selected_source_type": channel_type,
         "assignment": assignment,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -5326,7 +5362,7 @@ def _select_contact_channel_parameters(component: dict[str, Any]) -> dict[str, A
 
 def _select_contact_channel_config(
     component: dict[str, Any],
-) -> tuple[str, str | None, str, str, str | None]:
+) -> tuple[str, str | None, str, str, str | None, str]:
     params = _select_contact_channel_parameters(component)
     raw_channel_type = params.get("channel_type")
     if isinstance(raw_channel_type, list) and len(raw_channel_type) != 1:
@@ -5400,6 +5436,22 @@ def _select_contact_channel_config(
             "O campo selection_strategy deve ser first_eligible ou next_eligible.",
         )
 
+    raw_match_policy = params.get("channel_match_policy")
+    if isinstance(raw_match_policy, list) and len(raw_match_policy) > 1:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_match_policy",
+            "O campo channel_match_policy deve conter uma única opção.",
+        )
+    channel_match_policy = str(
+        _catalog_parameter_scalar(raw_match_policy)
+        or ("compatible_phone" if channel_type == "sms" else "exact_type")
+    ).strip().lower()
+    if channel_match_policy not in SELECT_CONTACT_CHANNEL_MATCH_POLICIES:
+        raise WorkflowExecutionError(
+            "select_contact_channel_invalid_match_policy",
+            "O campo channel_match_policy deve exigir o tipo ou reutilizar telefone compatível.",
+        )
+
     dial_rule_mode: str | None = None
     if selection_strategy == "next_eligible" and channel_type == "voice":
         raw_dial_rule_mode = params.get("dial_rule_mode")
@@ -5422,6 +5474,7 @@ def _select_contact_channel_config(
         output_var,
         selection_strategy,
         dial_rule_mode,
+        channel_match_policy,
     )
 
 
@@ -5704,6 +5757,7 @@ async def _run_select_contact_channel(
         output_var,
         selection_strategy,
         dial_rule_mode,
+        channel_match_policy,
     ) = _select_contact_channel_config(component)
     if selection_strategy == "next_eligible" and session_scope != "person":
         raise WorkflowExecutionError(
@@ -5927,6 +5981,8 @@ async def _run_select_contact_channel(
                     "selection_strategy": selection_strategy,
                     "dial_rule_mode": dial_rule_mode,
                     "requested_type": channel_type,
+                    "channel_match_policy": channel_match_policy,
+                    "address_family": "phone",
                     "requested_label": channel_label,
                     "output_var": output_var,
                     "supplier_eligibility": copy.deepcopy(supplier_resolution),
@@ -5962,6 +6018,8 @@ async def _run_select_contact_channel(
                     "selection_strategy": selection_strategy,
                     "dial_rule_mode": dial_rule_mode,
                     "requested_type": channel_type,
+                    "channel_match_policy": channel_match_policy,
+                    "address_family": "phone",
                     "requested_label": channel_label,
                     "output_var": output_var,
                     "supplier_eligibility": copy.deepcopy(supplier_resolution),
@@ -5992,6 +6050,7 @@ async def _run_select_contact_channel(
                 mailing_id=mailing_id,
                 person_uuid=person_uuid,
                 channel_type=channel_type,
+                channel_match_policy=channel_match_policy,
                 channel_label=channel_label,
                 excluded_contact_list_member_id=excluded_member_id,
                 authorized_contact_list_member_id=authorized_member_id,
@@ -6063,6 +6122,8 @@ async def _run_select_contact_channel(
             "selection_strategy": selection_strategy,
             "dial_rule_mode": dial_rule_mode,
             "requested_type": channel_type,
+            "channel_match_policy": channel_match_policy,
+            "address_family": "phone" if channel_type != "email" else "email",
             "requested_label": channel_label,
             "output_var": output_var,
             "updated_at": updated_at.isoformat(),
@@ -6109,11 +6170,27 @@ async def _run_select_contact_channel(
         "session_scope": session_scope,
         "selection_strategy": selection_strategy,
         "dial_rule_mode": dial_rule_mode,
+        "requested_type": channel_type,
+        "channel_match_policy": channel_match_policy,
         "contact_list_member_id": int(candidate["contact_list_member_id"]),
         "contact_list_id": str(candidate["contact_list_id"]),
         "mailing_id": int(candidate["mailing_id"]),
         "person_uuid": candidate.get("person_uuid"),
         "type": _normalize_channel_type(candidate.get("contact_channel_type")),
+        "selected_source_type": _normalize_channel_type(
+            candidate.get("contact_channel_type")
+        ),
+        "address_family": (
+            "email"
+            if _normalize_channel_type(candidate.get("contact_channel_type")) == "email"
+            else "phone"
+        ),
+        "capability_match": (
+            "exact"
+            if _normalize_channel_type(candidate.get("contact_channel_type"))
+            == channel_type
+            else "compatible_phone"
+        ),
         "label": candidate.get("contact_channel_label"),
         "address": str(candidate.get("contact_channel_address") or "").strip(),
         "is_primary": bool(candidate.get("is_primary")),

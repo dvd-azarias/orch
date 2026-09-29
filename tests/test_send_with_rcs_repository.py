@@ -68,7 +68,25 @@ async def test_assign_rcs_is_guarded_by_exact_active_session_and_rcs_member() ->
     assert "= 'rcs'" in session.statement
     assert "FOR UPDATE OF clm, os" in session.statement
     assert "linked_actuator = 'rcs'" in session.statement
-    assert session.parameters == BASE
+    assert session.parameters == {**BASE, "allow_phone_source": False}
+
+
+@pytest.mark.asyncio
+async def test_assign_rcs_can_reuse_phone_only_with_explicit_opt_in() -> None:
+    session = _RecordingSession(
+        {"id": 77, "linked_actuator": "rcs", "previous_linked_actuator": "dialer"}
+    )
+
+    assignment = await assign_rcs_routing_for_session(
+        session,  # type: ignore[arg-type]
+        **BASE,
+        allow_phone_source=True,
+    )
+
+    assert assignment is not None
+    assert assignment["linked_actuator"] == "rcs"
+    assert "IN ('phone', 'voice')" in session.statement
+    assert session.parameters["allow_phone_source"] is True
 
 
 @pytest.mark.asyncio

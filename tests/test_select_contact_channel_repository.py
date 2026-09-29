@@ -42,6 +42,7 @@ BASE = {
     "mailing_id": 1140,
     "person_uuid": "cccccccc-cccc-cccc-cccc-cccccccccccc",
     "channel_type": "voice",
+    "channel_match_policy": "exact_type",
     "channel_label": None,
 }
 
@@ -66,10 +67,9 @@ async def test_channel_candidate_is_pinned_to_source_member_and_session_address(
     )
     assert "os.entity = clm.contact_identifier" in session.statement
     assert "source_channel.is_primary" in session.statement
-    assert (
-        "ORDER BY COALESCE(source_channel.is_primary, false) DESC, clm.id ASC"
-        in session.statement
-    )
+    assert "CASE WHEN" in session.statement
+    assert "COALESCE(source_channel.is_primary, false) DESC" in session.statement
+    assert "clm.id ASC" in session.statement
     assert "FOR UPDATE OF clm, os" in session.statement
     assert "linked_actuator" not in session.statement
 
@@ -131,16 +131,46 @@ async def test_sms_candidate_accepts_phone_source_without_reclassifying_it() -> 
     row = await fetch_select_contact_channel_candidate(
         session,  # type: ignore[arg-type]
         session_scope="channel",
-        **{**BASE, "channel_type": "sms"},
+        **{
+            **BASE,
+            "channel_type": "sms",
+            "channel_match_policy": "compatible_phone",
+        },
     )
 
     assert row == {
         "contact_list_member_id": 77,
         "contact_channel_type": "voice",
     }
-    assert ":channel_type = 'sms'" in session.statement
+    assert ":channel_type IN ('sms', 'whatsapp', 'rcs')" in session.statement
     assert "= 'voice'" in session.statement
     assert session.parameters["channel_type"] == "sms"
+    assert session.parameters["channel_match_policy"] == "compatible_phone"
+
+
+@pytest.mark.asyncio
+async def test_sms_candidate_without_policy_preserves_legacy_phone_compatibility() -> None:
+    session = _RecordingSession(
+        {
+            "contact_list_member_id": 77,
+            "contact_channel_type": "voice",
+        }
+    )
+    legacy_parameters = {
+        key: value for key, value in BASE.items() if key != "channel_match_policy"
+    }
+
+    row = await fetch_select_contact_channel_candidate(
+        session,  # type: ignore[arg-type]
+        session_scope="channel",
+        **{**legacy_parameters, "channel_type": "sms"},
+    )
+
+    assert row == {
+        "contact_list_member_id": 77,
+        "contact_channel_type": "voice",
+    }
+    assert session.parameters["channel_match_policy"] == "compatible_phone"
 
 
 @pytest.mark.asyncio
@@ -157,8 +187,36 @@ async def test_rcs_candidate_uses_exact_persisted_type_without_phone_fallback() 
 
     assert row == {"contact_list_member_id": 77, "contact_channel_type": "rcs"}
     assert session.parameters["channel_type"] == "rcs"
-    assert ":channel_type = 'sms'" in session.statement
-    assert ":channel_type = 'rcs'" not in session.statement
+    assert session.parameters["channel_match_policy"] == "exact_type"
+    assert ":channel_type IN ('sms', 'whatsapp', 'rcs')" in session.statement
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_type", ["whatsapp", "rcs"])
+async def test_compatible_phone_policy_accepts_voice_without_reclassifying_source(
+    requested_type: str,
+) -> None:
+    session = _RecordingSession(
+        {"contact_list_member_id": 77, "contact_channel_type": "voice"}
+    )
+
+    row = await fetch_select_contact_channel_candidate(
+        session,  # type: ignore[arg-type]
+        session_scope="channel",
+        **{
+            **BASE,
+            "channel_type": requested_type,
+            "channel_match_policy": "compatible_phone",
+        },
+    )
+
+    assert row == {
+        "contact_list_member_id": 77,
+        "contact_channel_type": "voice",
+    }
+    assert session.parameters["channel_match_policy"] == "compatible_phone"
+    assert "= 'voice'" in session.statement
+    assert "CASE WHEN" in session.statement
 
 
 @pytest.mark.asyncio

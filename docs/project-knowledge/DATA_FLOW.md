@@ -362,14 +362,26 @@ ao mesmo wait, seu timeout absoluto não é renovado.
 ## Handoff RCS e dispatch opt-in pela Supplier V2
 
 ```text
-select_contact_channel(rcs) seleciona somente um membro explicitamente RCS
+select_contact_channel(rcs) seleciona o membro RCS explícito ou, com opt-in,
+reutiliza o telefone genérico em foco
   -> send_with_rcs valida membro, endereço, lista, mailing e pessoa
   -> ORCH grava linked_actuator=rcs
   -> ORCH bloqueia a sessão em state=1
   -> nenhum POST RCS é executado
 ```
 
-RCS não é inferido de um número telefônico genérico. A Identidade materializa um canal `rcs` separado somente quando recebe `has_rcs=true` em telefone fora de “não perturbe”; o seletor usa correspondência exata e o repositório recusa `voice`, `phone`, `sms`, `whatsapp` e `email`. Em `person`, o card exige seleção explícita anterior; em `channel`, preserva o membro/endereço de origem. Marcador, cursor bloqueado e `state=1` pertencem à mesma transação, e a reentrada em `blocked_send_with_rcs` não repete o handoff.
+Por padrão legado, RCS não é inferido de um telefone genérico: seletor e card
+exigem `rcs`. O caminho compatível é duplamente explícito:
+`select_contact_channel.channel_match_policy=compatible_phone` autoriza o
+fallback para `voice|phone`, e
+`send_with_rcs.recipient_channel_policy=reuse_current_phone` autoriza o
+handoff nesse mesmo membro. Um canal `rcs` materializado continua tendo
+precedência. A seleção não reclassifica o endereço e não escreve atuador; o
+card grava `linked_actuator=rcs`, e a Supplier V2 volta a conferir a política
+na revisão publicada. `sms`, `whatsapp` e `email` não viram RCS por inferência.
+Em `person`, o card exige seleção explícita anterior; em `channel`, preserva o
+membro/endereço de origem. Marcador, cursor bloqueado e `state=1` pertencem à
+mesma transação, e a reentrada em `blocked_send_with_rcs` não repete o handoff.
 
 Com o Gate desligado, o runtime continua apenas marker-only. Com o Gate ativo,
 o ORCH cifra `authorization_token`, broker, cliente, template, variáveis
@@ -440,7 +452,7 @@ ORCH recebe a sessão
 
 Na criação explícita pelo endpoint `/sessions`, um payload com `session_scope=channel` e `contact_list_member_id` válido acrescenta o membro à identidade de reuso. O advisory lock histórico e o `entity_session_id=entity_address:::flow_uuid` permanecem inalterados: o mesmo membro reutiliza sua sessão ativa, mas dois membros diferentes podem gerar duas sessões mesmo quando compartilham pessoa, tipo e endereço. A identidade fica imutável em `runtime_variables.session_identity`; `input_payload`/`last_payload` são fallback para sessões anteriores ao patch. Chamadas `person`, sem escopo explícito ou sem membro válido continuam sob a correlação legada. Isso não resolve a ambiguidade de callbacks que chegam sem uma chave de sessão; consulte R32 e R35.
 
-Em `channel`, `select_contact_channel` só pode selecionar o membro/endereço que já originou a sessão. Em `person`, a busca exige `person_uuid`, permanece dentro da mesma pessoa, `contact_list_id` e `mailing_id`, prioriza o canal marcado como primário e usa o menor `contact_list_member_id` como desempate. O rebind altera apenas `orch_sessions.entity_address` e falha de forma diagnosticável diante de perda de escopo ou colisão com outra sessão ativa. Uma tentativa posterior em `not_found` ou `exception` limpa a seleção anterior e volta a bloquear comunicação até novo `selected`.
+Em `channel`, `select_contact_channel` só pode selecionar o membro/endereço que já originou a sessão. Em `person`, a busca exige `person_uuid`, permanece dentro da mesma pessoa, `contact_list_id` e `mailing_id`; no modo compatível, prefere primeiro o tipo especializado solicitado e depois aplica prioridade/menor `contact_list_member_id` ao fallback `voice|phone`. O rebind altera apenas `orch_sessions.entity_address` e falha de forma diagnosticável diante de perda de escopo ou colisão com outra sessão ativa. O resultado mantém `requested_type`, `selected_source_type`, `address_family`, `channel_match_policy` e `capability_match`, evitando confundir transporte com o tipo persistido. Uma tentativa posterior em `not_found` ou `exception` limpa a seleção anterior e volta a bloquear comunicação até novo `selected`.
 
 ## Gerenciamento cadastral de canais
 

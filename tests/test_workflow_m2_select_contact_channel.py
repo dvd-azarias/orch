@@ -282,6 +282,7 @@ def test_select_contact_channel_accepts_catalog_serialization() -> None:
         "canal_escolhido",
         "first_eligible",
         None,
+        "exact_type",
     )
 
 
@@ -292,6 +293,7 @@ def test_select_contact_channel_accepts_rcs_type() -> None:
         "selected_channel",
         "first_eligible",
         None,
+        "exact_type",
     )
 
 
@@ -324,6 +326,21 @@ def test_select_contact_channel_rejects_invalid_output_var(output_var: str) -> N
         workflow._select_contact_channel_config(_component(output_var=output_var))
 
     assert exc_info.value.code == "select_contact_channel_invalid_output_var"
+
+
+def test_select_contact_channel_preserves_legacy_sms_phone_compatibility() -> None:
+    assert workflow._select_contact_channel_config(_component(channel_type="sms"))[-1] == (
+        "compatible_phone"
+    )
+
+
+def test_select_contact_channel_rejects_invalid_match_policy() -> None:
+    with pytest.raises(workflow.WorkflowExecutionError) as exc_info:
+        workflow._select_contact_channel_config(
+            _component(channel_match_policy="qualquer")
+        )
+
+    assert exc_info.value.code == "select_contact_channel_invalid_match_policy"
 
 
 @pytest.mark.asyncio
@@ -396,6 +413,48 @@ async def test_person_scope_selects_another_member_and_rebinds_session(
     assert selection["contact_list_member_id"] == 88
     assert selection["type"] == "whatsapp"
     assert selection["address"] == "5511988880002"
+
+
+@pytest.mark.asyncio
+async def test_person_scope_reuses_voice_as_whatsapp_without_reclassifying_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _contact_row(channel_type="voice")
+    fetch_candidate = AsyncMock(return_value=candidate)
+    monkeypatch.setattr(
+        workflow, "fetch_select_contact_channel_candidate", fetch_candidate
+    )
+    monkeypatch.setattr(
+        workflow,
+        "rebind_person_session_to_contact_channel",
+        AsyncMock(return_value=True),
+    )
+    runtime = _runtime(session_scope="person")
+
+    execution = await workflow._run_select_contact_channel(
+        db_session=_Session(),  # type: ignore[arg-type]
+        flow_uuid=FLOW_UUID,
+        session_id=123,
+        session_scope="person",
+        component=_component(
+            channel_type="whatsapp",
+            channel_match_policy="compatible_phone",
+        ),
+        runtime_variables=runtime,
+        contact_row=_contact_row(),
+    )
+
+    assert execution.branch_label == "selected"
+    assert fetch_candidate.await_args.kwargs["channel_match_policy"] == (
+        "compatible_phone"
+    )
+    selection = workflow._active_selected_contact_channel(runtime)
+    assert selection is not None
+    assert selection["type"] == "voice"
+    assert selection["requested_type"] == "whatsapp"
+    assert selection["selected_source_type"] == "voice"
+    assert selection["address_family"] == "phone"
+    assert selection["capability_match"] == "compatible_phone"
 
 
 @pytest.mark.asyncio
