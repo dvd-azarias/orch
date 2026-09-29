@@ -12,9 +12,20 @@ from app.services.channel_supplier_v2_service import (
 )
 from app.services.journey_supplier_projection_service import (
     project_supplier_v2_journey_actions,
+    voice_provider_metadata,
 )
 from app.services.journey_metrics_service import record_journey_channel_action_event
 from app.services.migration_service import _run_migration_file
+
+
+def test_voice_provider_metadata_preserves_release_and_duration() -> None:
+    assert voice_provider_metadata(
+        raw_outcome="16",
+        payload={"hangup": {"Cause": "16", "Cause-txt": "Normal", "Duration": "9"}},
+    ) == {
+        "provider_status": "16",
+        "duration_seconds": 9,
+    }
 
 
 @pytest.mark.asyncio
@@ -33,6 +44,8 @@ async def test_supplier_projection_records_each_voice_attempt_and_channel_accept
     attempt_two_id = uuid4()
     event_one_id = uuid4()
     event_two_id = uuid4()
+    dialing_event_id = uuid4()
+    late_dialing_event_id = uuid4()
     dispatch_id = uuid4()
     now = datetime.now(UTC)
     session_factory = get_session_factory()
@@ -55,7 +68,8 @@ async def test_supplier_projection_records_each_voice_attempt_and_channel_accept
                     """
                         CREATE TABLE orch_sessions (
                             id BIGSERIAL PRIMARY KEY,
-                            uuid UUID NOT NULL UNIQUE
+                            uuid UUID NOT NULL UNIQUE,
+                            runtime_variables JSONB NOT NULL DEFAULT '{}'::jsonb
                         )
                     """,
                     """
@@ -101,6 +115,7 @@ async def test_supplier_projection_records_each_voice_attempt_and_channel_accept
                             provider_unique_id TEXT,
                             outcome TEXT,
                             state TEXT NOT NULL,
+                            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                             completed_at TIMESTAMPTZ
                         )
                     """,
@@ -108,7 +123,10 @@ async def test_supplier_projection_records_each_voice_attempt_and_channel_accept
                         CREATE TABLE contact_supplier_dial_events_v2 (
                             id UUID PRIMARY KEY,
                             attempt_id UUID NOT NULL,
+                            provider_source TEXT,
+                            raw_outcome TEXT,
                             normalized_outcome TEXT,
+                            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                             occurred_at TIMESTAMPTZ,
                             decision TEXT,
                             terminal BOOLEAN,
@@ -209,26 +227,47 @@ async def test_supplier_projection_records_each_voice_attempt_and_channel_accept
                     text(
                         """
                         INSERT INTO contact_supplier_dial_events_v2 (
-                            id, attempt_id, normalized_outcome, occurred_at,
+                            id, attempt_id, provider_source, raw_outcome,
+                            normalized_outcome, payload, occurred_at,
                             decision, terminal, terminal_reason, processed_at
                         ) VALUES
                             (
-                                :event_one_id, :attempt_one_id, 'machine', :first_at,
+                                :dialing_event_id, :attempt_one_id,
+                                'service_dialer', 'makecall_accepted', 'dialing',
+                                '{"status":"dialing"}'::jsonb, :dialing_at,
+                                'intermediate', FALSE, NULL, :dialing_at
+                            ),
+                            (
+                                :event_one_id, :attempt_one_id, 'sbc', '490',
+                                'machine', '{"hangup":{"Duration":"0"}}'::jsonb,
+                                :first_at,
                                 'intermediate', FALSE, 'retry_same_phone', :first_at
                             ),
                             (
-                                :event_two_id, :attempt_two_id, 'answered', :second_at,
+                                :event_two_id, :attempt_two_id, 'sbc', '16',
+                                'answered', '{"hangup":{"Duration":"9"}}'::jsonb,
+                                :second_at,
                                 'terminal', TRUE, 'answered', :second_at
+                            ),
+                            (
+                                :late_dialing_event_id, :attempt_two_id,
+                                'service_dialer', 'makecall_accepted', 'dialing',
+                                '{"status":"dialing"}'::jsonb, :late_dialing_at,
+                                'intermediate', FALSE, NULL, :late_dialing_at
                             )
                         """
                     ),
                     {
                         "event_one_id": event_one_id,
                         "event_two_id": event_two_id,
+                        "dialing_event_id": dialing_event_id,
+                        "late_dialing_event_id": late_dialing_event_id,
                         "attempt_one_id": attempt_one_id,
                         "attempt_two_id": attempt_two_id,
                         "first_at": now + timedelta(seconds=1),
                         "second_at": now + timedelta(seconds=2),
+                        "dialing_at": now + timedelta(milliseconds=500),
+                        "late_dialing_at": now + timedelta(seconds=3),
                     },
                 )
                 await db_session.execute(
@@ -287,7 +326,7 @@ async def test_supplier_projection_records_each_voice_attempt_and_channel_accept
                     )
                 ).all()
 
-        assert first.voice_projected == 1
+        assert first.voice_projected == 2
         assert first.channel_projected == 1
         assert second.voice_projected == 0
         assert second.channel_projected == 0

@@ -184,6 +184,10 @@ class OrchDialerSupplierV2TerminalRequest(BaseModel):
     ] | None = None
     decision_effective_until: datetime | None = None
     release_mapping_version: Literal["pdial_v1"] | None = None
+    provider_status: str | None = Field(default=None, max_length=128)
+    duration_seconds: int | None = Field(default=None, ge=0)
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=1024)
     occurred_at: datetime
 
     @model_validator(mode="after")

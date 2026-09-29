@@ -34,6 +34,8 @@ class ChannelEventItem:
     event_id: str | None
     event_ts: datetime | None
     payload: dict[str, Any]
+    dispatch_reference_id: str | None = None
+    metrics_metadata: dict[str, Any] | None = None
 
 
 async def _session_has_finish_flow_webhook(
@@ -161,6 +163,14 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
                 event_id = str(event_id_raw).strip() if event_id_raw is not None else None
                 if event_id == "":
                     event_id = None
+                errors = status_item.get("errors")
+                first_error = (
+                    errors[0]
+                    if isinstance(errors, list)
+                    and errors
+                    and isinstance(errors[0], dict)
+                    else {}
+                )
                 items.append(
                     ChannelEventItem(
                         channel="whatsapp",
@@ -168,6 +178,13 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
                         event_id=event_id,
                         event_ts=_parse_unix_timestamp(status_item.get("timestamp")),
                         payload=payload,
+                        dispatch_reference_id=event_id,
+                        metrics_metadata={
+                            "provider_status": event_type,
+                            "error_code": first_error.get("code"),
+                            "error_message": first_error.get("message")
+                            or first_error.get("title"),
+                        },
                     )
                 )
 
@@ -182,6 +199,12 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
                     event_id = None
                 message_key = _extract_whatsapp_message_key(message)
                 event_type = f"message:{message_key}" if message_key else "message"
+                message_context = message.get("context")
+                if not isinstance(message_context, dict):
+                    message_context = {}
+                dispatch_reference_id = str(
+                    message_context.get("id") or ""
+                ).strip() or None
                 items.append(
                     ChannelEventItem(
                         channel="whatsapp",
@@ -189,6 +212,8 @@ def _extract_whatsapp_channel_events(payload: dict[str, Any]) -> list[ChannelEve
                         event_id=event_id,
                         event_ts=_parse_unix_timestamp(message.get("timestamp")),
                         payload=payload,
+                        dispatch_reference_id=dispatch_reference_id,
+                        metrics_metadata={"provider_status": "message"},
                     )
                 )
     return items
@@ -292,8 +317,12 @@ async def persist_channel_events(
                     if (
                         event.channel == "whatsapp"
                         and event.event_id is not None
-                        and event.event_type
-                        in {"sent", "delivered", "read", "failed", "limit_reached"}
+                        and (
+                            event.event_type
+                            in {"sent", "delivered", "read", "failed", "limit_reached"}
+                            or event.event_type == "message"
+                            or event.event_type.startswith("message:")
+                        )
                     ):
                         await record_journey_channel_action_event(
                             db_session,
@@ -302,13 +331,23 @@ async def persist_channel_events(
                             session_uuid=None,
                             channel="whatsapp",
                             source_kind="whatsapp_provider_message",
-                            source_id=str(event.event_id),
+                            source_id=str(
+                                event.dispatch_reference_id or event.event_id
+                            ),
                             native_status=event.event_type,
                             event_id=str(event.event_id),
                             occurred_at=event.event_ts,
                             component_kind="send_whatsapp",
                             provider_reference=str(event.event_id),
-                            metadata={"provider": "whatsapp"},
+                            metadata={
+                                "provider": "whatsapp",
+                                **(event.metrics_metadata or {}),
+                            },
+                            prefer_existing_latest_action=(
+                                event.event_type == "message"
+                                or event.event_type.startswith("message:")
+                            )
+                            and event.dispatch_reference_id is None,
                         )
                     if event.channel == "dialer" and await _session_has_finish_flow_webhook(
                         db_session,

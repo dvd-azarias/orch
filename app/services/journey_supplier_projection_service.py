@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,58 @@ class JourneySupplierProjectionResult:
     voice_projected: int = 0
     channel_scanned: int = 0
     channel_projected: int = 0
+
+
+def voice_provider_metadata(
+    *,
+    raw_outcome: Any,
+    payload: Any,
+) -> dict[str, Any]:
+    raw_payload = dict(payload) if isinstance(payload, Mapping) else {}
+    hangup = raw_payload.get("hangup")
+    if not isinstance(hangup, Mapping):
+        hangup = {}
+
+    provider_status = str(raw_outcome or "").strip() or None
+    if provider_status is None:
+        for candidate in (
+            hangup.get("ReleaseText"),
+            hangup.get("Disposition"),
+            hangup.get("Cause"),
+            raw_payload.get("release"),
+            raw_payload.get("status"),
+        ):
+            text_value = str(candidate or "").strip()
+            if text_value:
+                provider_status = text_value
+                break
+
+    duration_seconds: int | None = None
+    for candidate in (
+        hangup.get("Billsec"),
+        hangup.get("Duration"),
+        raw_payload.get("Billsec"),
+        raw_payload.get("Duration"),
+        raw_payload.get("duration_seconds"),
+    ):
+        try:
+            parsed = int(float(str(candidate).strip()))
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            duration_seconds = parsed
+            break
+
+    metadata: dict[str, Any] = {"provider_status": provider_status}
+    if duration_seconds is not None:
+        metadata["duration_seconds"] = duration_seconds
+    error_code = str(raw_payload.get("error_code") or "").strip()
+    error_message = str(raw_payload.get("error_message") or "").strip()
+    if error_code:
+        metadata["error_code"] = error_code
+    if error_message:
+        metadata["error_message"] = error_message
+    return metadata
 
 
 async def _tables_available(
@@ -55,6 +108,90 @@ async def _project_voice_attempts(
     ):
         return 0, 0
 
+    dialing_rows = (
+        await db_session.execute(
+            text(
+                """
+                SELECT
+                    attempt.id::text AS attempt_id,
+                    attempt.attempt_sequence,
+                    attempt.provider_action_id,
+                    attempt.provider_unique_id,
+                    attempt.started_at,
+                    cycle.session_uuid::text AS session_uuid,
+                    cycle.flow_uuid::text AS flow_uuid,
+                    cycle.component_ref_id,
+                    journey.source_session_id,
+                    event.id::text AS event_id,
+                    event.raw_outcome,
+                    event.payload,
+                    event.occurred_at
+                FROM contact_supplier_dial_events_v2 AS event
+                JOIN contact_supplier_dial_attempts_v2 AS attempt
+                  ON attempt.id = event.attempt_id
+                JOIN contact_supplier_dial_cycles_v2 AS cycle
+                  ON cycle.id = attempt.cycle_id
+                JOIN orch_journey_sessions AS journey
+                  ON journey.session_uuid = cycle.session_uuid
+                 AND journey.flow_uuid = cycle.flow_uuid
+                LEFT JOIN orch_journey_channel_actions AS action
+                  ON action.source_kind = 'dialer_supplier_v2_attempt'
+                 AND action.source_id = attempt.id::text
+                WHERE event.provider_source = 'service_dialer'
+                  AND event.normalized_outcome = 'dialing'
+                  AND event.processed_at IS NOT NULL
+                  AND (
+                      action.action_id IS NULL
+                      OR (
+                          action.sent_at IS NULL
+                          AND action.completed_at IS NULL
+                      )
+                  )
+                ORDER BY event.occurred_at, event.id
+                LIMIT :batch_size
+                """
+            ),
+            {"batch_size": batch_size},
+        )
+    ).mappings().all()
+
+    projected = 0
+    for row in dialing_rows:
+        metadata = voice_provider_metadata(
+            raw_outcome=row["raw_outcome"],
+            payload=row["payload"],
+        )
+        metadata.update(
+            {
+                "supplier_attempt_sequence": int(row["attempt_sequence"]),
+                "projection_source": "supplier_v2_reconciler",
+            }
+        )
+        action = await record_journey_channel_action_event(
+            db_session,
+            source_session_id=int(row["source_session_id"]),
+            flow_uuid=str(row["flow_uuid"]),
+            session_uuid=str(row["session_uuid"]),
+            channel="voice",
+            source_kind="dialer_supplier_v2_attempt",
+            source_id=str(row["attempt_id"]),
+            native_status="dialing",
+            event_id=str(row["event_id"]),
+            occurred_at=row["occurred_at"] or row["started_at"],
+            component_ref_id=str(row["component_ref_id"]),
+            component_kind="send_with_dialer_handoff",
+            provider_reference=(
+                str(
+                    row["provider_unique_id"]
+                    or row["provider_action_id"]
+                    or row["attempt_id"]
+                )
+            ),
+            metadata=metadata,
+        )
+        if action is not None:
+            projected += 1
+
     rows = (
         await db_session.execute(
             text(
@@ -72,6 +209,8 @@ async def _project_voice_attempts(
                     journey.source_session_id,
                     event.id::text AS event_id,
                     event.normalized_outcome,
+                    event.raw_outcome,
+                    event.payload,
                     event.occurred_at,
                     event.decision,
                     event.terminal,
@@ -86,6 +225,8 @@ async def _project_voice_attempts(
                     SELECT
                         dial_event.id,
                         dial_event.normalized_outcome,
+                        dial_event.raw_outcome,
+                        dial_event.payload,
                         dial_event.occurred_at,
                         dial_event.decision,
                         dial_event.terminal,
@@ -94,16 +235,18 @@ async def _project_voice_attempts(
                     WHERE dial_event.attempt_id = attempt.id
                       AND dial_event.processed_at IS NOT NULL
                       AND dial_event.normalized_outcome IS NOT NULL
+                      AND dial_event.normalized_outcome <> 'dialing'
                     ORDER BY dial_event.processed_at DESC, dial_event.id DESC
                     LIMIT 1
                 ) AS event ON TRUE
+                LEFT JOIN orch_journey_channel_actions AS action
+                  ON action.source_kind = 'dialer_supplier_v2_attempt'
+                 AND action.source_id = attempt.id::text
                 WHERE attempt.state = 'completed'
                   AND attempt.outcome IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM orch_journey_channel_actions AS action
-                      WHERE action.source_kind = 'dialer_supplier_v2_attempt'
-                        AND action.source_id = attempt.id::text
+                  AND (
+                      action.action_id IS NULL
+                      OR action.completed_at IS NULL
                   )
                 ORDER BY attempt.completed_at, attempt.id
                 LIMIT :batch_size
@@ -113,11 +256,23 @@ async def _project_voice_attempts(
         )
     ).mappings().all()
 
-    projected = 0
     for row in rows:
         outcome = str(row["normalized_outcome"] or row["outcome"] or "").strip()
         if not outcome:
             continue
+        metadata = voice_provider_metadata(
+            raw_outcome=row["raw_outcome"],
+            payload=row["payload"],
+        )
+        metadata.update(
+            {
+                "decision": row["decision"],
+                "terminal": bool(row["terminal"]),
+                "terminal_reason": row["terminal_reason"],
+                "supplier_attempt_sequence": int(row["attempt_sequence"]),
+                "projection_source": "supplier_v2_reconciler",
+            }
+        )
         action = await record_journey_channel_action_event(
             db_session,
             source_session_id=int(row["source_session_id"]),
@@ -138,17 +293,11 @@ async def _project_voice_attempts(
                     or row["attempt_id"]
                 )
             ),
-            metadata={
-                "decision": row["decision"],
-                "terminal": bool(row["terminal"]),
-                "terminal_reason": row["terminal_reason"],
-                "supplier_attempt_sequence": int(row["attempt_sequence"]),
-                "projection_source": "supplier_v2_reconciler",
-            },
+            metadata=metadata,
         )
-        if action is not None and action.created:
+        if action is not None:
             projected += 1
-    return len(rows), projected
+    return len(dialing_rows) + len(rows), projected
 
 
 async def _project_accepted_channel_dispatches(

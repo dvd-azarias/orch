@@ -16,9 +16,12 @@ MIGRATION_PATH = "sql/023_create_orch_journey_metrics_tables.sql"
 
 def test_journey_metrics_migration_precedes_workspace_snapshot_state() -> None:
     versions = [version for version, _path in MIGRATIONS]
-    assert versions[-3] == "0022_create_orch_billing_batch_tables"
-    assert versions[-2] == "0023_create_orch_journey_metrics_tables"
-    assert versions[-1] == "0024_create_orch_journey_workspace_snapshot_state"
+    assert versions.index("0022_create_orch_billing_batch_tables") < versions.index(
+        "0023_create_orch_journey_metrics_tables"
+    )
+    assert versions.index("0023_create_orch_journey_metrics_tables") < versions.index(
+        "0024_create_orch_journey_workspace_snapshot_state"
+    )
 
 
 def test_journey_metrics_migration_is_additive_and_has_required_guards() -> None:

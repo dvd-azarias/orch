@@ -121,6 +121,16 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     sendo persistido primeiro; quando houver colisão, o `payload` retornado vence.
     Payload não-objeto permanece somente no campo diagnóstico. A correção é
     local ao executor e não altera schema, filas, canvas ou contratos HTTP.
+36. A integração de eventos de orquestração com a Metrics API é aditiva e
+    independente da dashboard/WebSocket próprio, PDIAL e CTI Server. Quando o
+    gate e a allowlist autorizam o workspace, fatos de sessão, execução, nós e
+    dispatches são gravados em outbox durável e publicados em lote por worker
+    exclusivo. `interaction_id` é o UUID da sessão ORCH; `contact_id` segue
+    `person_uuid -> contact_list_member_id -> contact_draft_id -> external`;
+    todo envelope leva `flow_type=orchestration`. Voz espelha a taxonomia do
+    PDIAL e só produz `dialing` após aceite 2xx do MakeCall V2; o terminal
+    continua vindo do CDR/Hangup. Supplier V1 e WebSockets não participam.
+    Consulte `METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
 
 ## O que e o ORCH
 
@@ -140,6 +150,7 @@ Aplicacoes detectadas, nesta ordem: `ArquivosApp`, `WhatsApp`, `DialerApp`, `Gen
 | Beat generate_file | scan periodico | publica `generate_file_scan` |
 | Worker billing | agrega, publica, reconcilia e reprocessa | `orch.billing.outbox` |
 | Beat billing | quatro schedules exclusivos | publica em `orch.billing.outbox` |
+| Worker Metrics REST | drena outbox de eventos de orquestração | `orch_metrics_events` |
 
 Entrypoints:
 
@@ -172,6 +183,7 @@ Objetos ORCH por schema de workspace:
 - `orch_sessions`, `orch_sessions_alarms`, `orch_session_metrics`, `orch_discarded_events`, `orch_channel_events`;
 - `orch_generate_file_job`, `orch_generate_file_row_buffer`, `orch_generate_file_dispatch_audit`;
 - `orch_whatsapp_limits`, `orch_whatsapp_rate_limit_per_flow`;
+- `orch_metrics_event_outbox`, `orch_metrics_dispatch_snapshots`;
 - legado `orch_billing_usage_snapshots`; batch `orch_billing_events`, `orch_billing_snapshots`, `orch_billing_reprocess_requests`;
 - `orch_alembic_version`.
 

@@ -174,6 +174,34 @@ dedicado e reiniciar API/workers que escrevem telemetria. Preservar as tabelas
 e o ultimo snapshot; nao executar migration reversa nem apagar fatos. PDIAL e
 `dialer_metrics` ficam fora desse mecanismo.
 
+## Eventos REST de orquestracao para a Metrics API
+
+Rollout seguro e separado do WebSocket:
+
+1. aplicar as migrations `0025` e `0026` primeiro somente no workspace
+   HighComm e validar constraints, indices e segunda execucao idempotente;
+2. implantar ORCH, Target Core Supplier e ORCHESTRATOR com o gate ainda
+   desligado; reiniciar apenas as familias afetadas;
+3. configurar no ORCH a base Metrics terminada em `/api`, API key fora do Git,
+   allowlist contendo somente `ba7eb0ec-e565-447c-8c11-8f870cf72a60` e fila
+   exclusiva `orch_metrics_events`;
+4. subir um worker exclusivo da fila e habilitar
+   `CELERY_BEAT_METRICS_EVENTS_ENABLED=true` em exatamente um Beat. Todos os
+   outros Beats devem manter a flag `false`;
+5. ativar `ORCH_METRICS_EVENTS_ENABLED=true` e reiniciar API, workers de
+   workflow, worker Metrics e o Beat escolhido;
+6. no canario `f77b70f0-849b-4d11-9ccc-449b3c4ba981`, comprovar outbox,
+   batches HTTP, retries, eventos de sessao/no e dispatches reais de voz,
+   WhatsApp, SMS e RCS;
+7. comparar voz evento a evento com o PDIAL. `dialing` deve nascer apenas do
+   aceite 2xx do MakeCall e o terminal deve vir do CDR/Hangup pela Supplier V2;
+8. confirmar que indisponibilidade da Metrics apenas acumula outbox e nao
+   interrompe sessao, Supplier, callbacks ou WebSocket.
+
+Rollback nao destrutivo: definir `ORCH_METRICS_EVENTS_ENABLED=false`, desabilitar
+o scanner no Beat e parar o worker exclusivo. Preservar outbox e snapshots para
+auditoria; nao apagar eventos nem reverter as migrations.
+
 Reparacao historica e uma operacao separada. Nao executar backfill em massa: reconstruir a relacao sessao/lista pelo payload, conferir ownership externo e aplicar updates guardados por IDs aprovados.
 
 ### Piloto de cardinalidade por pessoa
