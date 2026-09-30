@@ -56,6 +56,7 @@ TERMINAL_FAILURE_STOP_REASONS = {
     "pinned_revision_not_found",
     "send_with_dialer_handoff_invalid_answer_action",
     "send_with_dialer_handoff_cycle_intent_invalid",
+    "send_with_dialer_handoff_attempt_resolution_invalid",
     "send_with_dialer_handoff_invalid_dial_profile_id",
     "send_with_dialer_handoff_invalid_list_validity_days",
     "send_with_dialer_handoff_invalid_list_validity_mode",

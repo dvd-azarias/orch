@@ -1,5 +1,40 @@
 # Maintenance Log
 
+## 2026-09-29 — Canvas opt-in entre tentativas do novo Discador
+
+### REQUEST / CLASSIFICATION
+
+Permitir que cada tentativa não terminal percorra SMS/RCS/WhatsApp ou outras
+ações do canvas antes da próxima chamada, sem substituir a Dial Rule nem mudar
+o comportamento de produção. `ALPHA_FIX_OPTIONAL`, restrito ao novo Discador e
+ao Supplier V2.
+
+### CHANGE / SAFETY
+
+- novo endpoint interno autenticado recebe somente o evento intermediário
+  pinado a sessão, flow, revisão, card, ciclo, tentativa e membro;
+- replay idêntico não reenfileira novamente; divergência, sessão inativa ou
+  identidade diferente falham fechados;
+- o executor consome o evento uma vez. Retorno ao mesmo card prepara
+  `retry_same_phone`; fim da jornada prepara `finish_flow`;
+- a resolução ocorre em task pós-commit, com lease, retry limitado,
+  compare-and-set, histórico e recuperação pelo reconciliador existente;
+- o ORCH não calcula nem antecipa cooldown: o `next_eligible_at` continua
+  pertencendo ao Perfil/Dial Rule no Target Core;
+- campo ausente ou `terminal_only`, `send_with_dialer`, Supplier V1 e retorno
+  terminal permanecem inalterados. Não há migration.
+
+### VALIDATION / ROLLBACK
+
+- regressão dirigida de cliente HTTP, callbacks, state machine, tasks e
+  executor: `208 passed`;
+- PostgreSQL real com tabelas temporárias: `8 passed`, incluindo callback
+  intermediário pinado/idempotente, encerramento explícito e recuperação de
+  estados de resolução;
+- rollback: voltar o card a `terminal_only`, drenar/resolver ciclos opt-in
+  retidos e então reverter código/reiniciar os serviços. Não publicar o canário
+  com `each_attempt` antes dos dois repositórios estarem implantados.
+
 ## 2026-09-29 — Eventos REST de jornadas para a Metrics API
 
 ### REQUEST / CLASSIFICATION

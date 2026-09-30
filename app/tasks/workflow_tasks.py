@@ -15,6 +15,7 @@ from app.core.workspace import normalize_workspace_uuid
 from app.repositories.orch_channel_events_repository import list_stale_pending_channel_event_sessions
 from app.repositories.orch_sessions_repository import (
     fetch_session_workflow_state,
+    prepare_dialer_supplier_v2_finish_resolution,
     replace_session_workflow_state,
 )
 from app.services.alarm_service import persist_alarm
@@ -522,6 +523,7 @@ async def _advance_session_task(
         return
 
     started_at = datetime.now(timezone.utc)
+    dialer_attempt_resolution_requested = False
     session_factory = get_session_factory()
     async with session_factory() as db_session:
         safe_workspace_uuid = normalize_workspace_uuid(workspace_uuid)
@@ -548,6 +550,26 @@ async def _advance_session_task(
                     },
                     flow_uuid=flow_uuid,
                     app_name="Celery",
+                )
+            supplier_v2_context_enabled = bool(
+                getattr(settings, "dialer_supplier_v2_enabled", False)
+                and dialer_supplier_v2_enabled_for_context(
+                    settings=settings,
+                    workspace_uuid=workspace_uuid,
+                    flow_uuid=flow_uuid,
+                )
+            )
+            terminal_stop = stopped_reason in {
+                "finished_by_component",
+                "end_of_branch",
+                "no_next_card",
+            } or is_terminal_failure_stop_reason(stopped_reason)
+            if supplier_v2_context_enabled and terminal_stop:
+                dialer_attempt_resolution_requested = (
+                    await prepare_dialer_supplier_v2_finish_resolution(
+                        db_session,
+                        session_id=session_id,
+                    )
                 )
         except Exception as exc:
             stopped_reason = "task_exception"
@@ -667,6 +689,23 @@ async def _advance_session_task(
             },
             queue=settings.celery_channel_supplier_v2_queue,
             routing_key=settings.celery_channel_supplier_v2_queue,
+        )
+    if (
+        dialer_attempt_resolution_requested
+        and stopped_reason != "blocked_send_with_dialer_handoff"
+    ):
+        from app.tasks.dialer_supplier_v2_tasks import (
+            resolve_dialer_supplier_v2_attempt_task,
+        )
+
+        resolve_dialer_supplier_v2_attempt_task.apply_async(
+            kwargs={
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+            queue=settings.celery_dialer_supplier_v2_queue,
+            routing_key=settings.celery_dialer_supplier_v2_queue,
         )
     logger.info(
         "workflow session advanced",

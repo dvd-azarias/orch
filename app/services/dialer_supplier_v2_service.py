@@ -24,6 +24,17 @@ _INTENT_FIELDS = (
     "contact_list_member_id",
     "dial_profile_id",
 )
+_ATTEMPT_RESOLUTION_FIELDS = (
+    "session_uuid",
+    "flow_uuid",
+    "flow_revision_id",
+    "component_ref_id",
+    "cycle_id",
+    "event_id",
+    "contact_list_member_id",
+    "action",
+    "resolved_at",
+)
 
 
 class DialerSupplierV2RegistrationError(RuntimeError):
@@ -79,6 +90,28 @@ class DialerCycleRegistrationResult:
             "attempt_limit_id": self.attempt_limit_id,
             "profile_snapshot_checksum": self.profile_snapshot_checksum,
             "ready_at": self.ready_at,
+        }
+
+
+@dataclass(frozen=True)
+class DialerAttemptResolutionResult:
+    cycle_id: str
+    event_id: str
+    action: str
+    state: str
+    next_eligible_at: str | None
+    audit_event_id: str
+    replayed: bool
+
+    def runtime_payload(self) -> dict[str, Any]:
+        return {
+            "cycle_id": self.cycle_id,
+            "event_id": self.event_id,
+            "action": self.action,
+            "state": self.state,
+            "next_eligible_at": self.next_eligible_at,
+            "audit_event_id": self.audit_event_id,
+            "replayed": self.replayed,
         }
 
 
@@ -343,6 +376,177 @@ def register_dialer_cycle(
             status_code=status_code,
         )
     return _parse_cycle_response(response_body, parsed_intent=parsed_intent)
+
+
+def resolve_dialer_attempt(
+    *,
+    workspace_uuid: str,
+    resolution: Mapping[str, Any],
+    settings: Settings | None = None,
+) -> DialerAttemptResolutionResult:
+    resolved_settings = settings or get_settings()
+    normalized_workspace = _required_uuid(workspace_uuid, "workspace_uuid")
+    parsed = _parse_attempt_resolution(resolution)
+
+    base_url = str(
+        resolved_settings.target_core_supplier_api_base_url or ""
+    ).strip().rstrip("/")
+    bearer = str(resolved_settings.target_core_api_bearer_token or "").strip()
+    if not base_url:
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_base_url_missing",
+            "TARGET_CORE_SUPPLIER_API_BASE_URL não está configurada.",
+            retryable=False,
+        )
+    if not bearer:
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_bearer_missing",
+            "TARGET_CORE_API_BEARER_TOKEN não está configurado.",
+            retryable=False,
+        )
+
+    body = json.dumps(
+        {field: parsed[field] for field in _ATTEMPT_RESOLUTION_FIELDS},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    req = request.Request(
+        url=f"{base_url}/v2/contact-supplier/dialer-attempts/resolve",
+        method="POST",
+        data=body,
+    )
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", f"Bearer {bearer}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-WORKSPACE-UUID", normalized_workspace)
+
+    status_code = 599
+    response_body = b""
+    try:
+        with request.urlopen(
+            req,
+            timeout=float(resolved_settings.dialer_supplier_v2_http_timeout_seconds),
+        ) as response:  # noqa: S310
+            status_code = int(response.status)
+            response_body = response.read(_MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        status_code = int(exc.code)
+        response_body = exc.read(_MAX_RESPONSE_BYTES + 1)
+    except (URLError, TimeoutError, OSError) as exc:
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_attempt_resolution_unavailable",
+            "O Supplier V2 está indisponível para resolver a tentativa.",
+            retryable=True,
+        ) from exc
+
+    if len(response_body) > _MAX_RESPONSE_BYTES:
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_response_too_large",
+            "A resposta do Supplier V2 excedeu o limite seguro.",
+            retryable=True,
+            status_code=status_code,
+        )
+    if status_code != 200:
+        error_code = _extract_error_code(response_body)
+        raise DialerSupplierV2RegistrationError(
+            error_code or "dialer_supplier_v2_attempt_resolution_http_error",
+            "O Supplier V2 recusou a resolução da tentativa.",
+            retryable=status_code in _RETRYABLE_STATUS_CODES,
+            status_code=status_code,
+        )
+    return _parse_attempt_resolution_response(
+        response_body,
+        parsed_resolution=parsed,
+    )
+
+
+def _parse_attempt_resolution(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = {
+            "session_uuid": _required_uuid(value["session_uuid"], "session_uuid"),
+            "flow_uuid": _required_uuid(value["flow_uuid"], "flow_uuid"),
+            "flow_revision_id": _required_uuid(
+                value["flow_revision_id"], "flow_revision_id"
+            ),
+            "component_ref_id": str(value["component_ref_id"] or "").strip(),
+            "cycle_id": _required_uuid(value["cycle_id"], "cycle_id"),
+            "event_id": _required_uuid(value["event_id"], "event_id"),
+            "contact_list_member_id": _required_member_id(
+                value["contact_list_member_id"]
+            ),
+            "action": str(value["action"] or "").strip(),
+            "resolved_at": _required_iso_datetime(
+                value["resolved_at"], "resolved_at"
+            ),
+        }
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_attempt_resolution_invalid",
+            "A resolução da tentativa Supplier V2 é inválida.",
+            retryable=False,
+        ) from exc
+    if (
+        not parsed["component_ref_id"]
+        or len(parsed["component_ref_id"]) > 255
+        or parsed["action"] not in {"retry_same_phone", "finish_flow"}
+    ):
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_attempt_resolution_invalid",
+            "A resolução da tentativa Supplier V2 é inválida.",
+            retryable=False,
+        )
+    return parsed
+
+
+def _parse_attempt_resolution_response(
+    response_body: bytes,
+    *,
+    parsed_resolution: Mapping[str, Any],
+) -> DialerAttemptResolutionResult:
+    try:
+        payload = json.loads(response_body.decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            raise ValueError("missing data")
+        cycle_id = _required_uuid(data["cycle_id"], "cycle_id")
+        event_id = _required_uuid(data["event_id"], "event_id")
+        action = str(data["action"] or "").strip()
+        state = str(data["state"] or "").strip().lower()
+        audit_event_id = _required_uuid(data["audit_event_id"], "audit_event_id")
+        replayed = data["replayed"]
+        next_eligible_at = data.get("next_eligible_at")
+        if next_eligible_at is not None:
+            next_eligible_at = _required_iso_datetime(
+                next_eligible_at, "next_eligible_at"
+            )
+        if (
+            cycle_id != parsed_resolution["cycle_id"]
+            or event_id != parsed_resolution["event_id"]
+            or action != parsed_resolution["action"]
+            or state
+            != (
+                "ready"
+                if parsed_resolution["action"] == "retry_same_phone"
+                else "cancelled"
+            )
+            or not isinstance(replayed, bool)
+        ):
+            raise ValueError("mismatched response")
+    except (KeyError, TypeError, ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DialerSupplierV2RegistrationError(
+            "dialer_supplier_v2_attempt_resolution_invalid_response",
+            "O Supplier V2 devolveu uma resolução incompatível.",
+            retryable=True,
+        ) from exc
+    return DialerAttemptResolutionResult(
+        cycle_id=cycle_id,
+        event_id=event_id,
+        action=action,
+        state=state,
+        next_eligible_at=next_eligible_at,
+        audit_event_id=audit_event_id,
+        replayed=replayed,
+    )
 
 
 def _parse_cycle_response(
@@ -949,6 +1153,7 @@ def _required_iso_datetime(value: Any, field: str) -> str:
 
 
 __all__ = [
+    "DialerAttemptResolutionResult",
     "DialerCycleRegistrationResult",
     "DialerNextChannelResult",
     "DialerPostAnswerRetryResult",
@@ -959,6 +1164,7 @@ __all__ = [
     "dialer_supplier_v2_multilane_enabled_for_context",
     "parse_dialer_cycle_intent",
     "register_dialer_cycle",
+    "resolve_dialer_attempt",
     "resolve_next_dialer_channel",
     "retry_dialer_after_answered_tabulation",
 ]
