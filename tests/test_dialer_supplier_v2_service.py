@@ -706,6 +706,50 @@ def test_register_cycle_accepts_terminal_idempotent_replay(
     assert result.state == "terminal"
 
 
+def test_register_cycle_accepts_pending_idempotent_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = _intent()
+    response = _response(intent, replayed=True)
+    response["data"]["state"] = "pending"
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(response, status=200),
+    )
+
+    result = service.register_dialer_cycle(
+        workspace_uuid=WORKSPACE_UUID,
+        intent=intent,
+        settings=_settings(),  # type: ignore[arg-type]
+    )
+
+    assert result.replayed is True
+    assert result.state == "pending"
+
+
+def test_register_cycle_rejects_pending_on_initial_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = _intent()
+    response = _response(intent, replayed=False)
+    response["data"]["state"] = "pending"
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(response, status=201),
+    )
+
+    with pytest.raises(service.DialerSupplierV2RegistrationError) as exc_info:
+        service.register_dialer_cycle(
+            workspace_uuid=WORKSPACE_UUID,
+            intent=intent,
+            settings=_settings(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.code == "dialer_supplier_v2_invalid_response"
+
+
 def test_register_cycle_rejects_terminal_on_initial_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

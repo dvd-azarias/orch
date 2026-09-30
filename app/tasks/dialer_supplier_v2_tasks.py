@@ -438,6 +438,16 @@ async def _claim_registration_attempt(
                 }
             if current_status == "ready":
                 return {"status": "ready", "cycle_id": intent.get("cycle_id")}
+            if current_status in {"attempt_received", "attempt_consumed"}:
+                # Um callback intermediario pode vencer a corrida contra uma
+                # tarefa de registro que ja estava na fila. Nesses estados o
+                # ciclo existente pertence ao fluxo de retomada/resolucao; ele
+                # nunca deve voltar para `registering` nem chamar o Supplier
+                # novamente.
+                return {
+                    "status": current_status,
+                    "cycle_id": intent.get("cycle_id"),
+                }
             if current_status == "failed":
                 return {"status": "failed"}
             effective_attempt = attempt
