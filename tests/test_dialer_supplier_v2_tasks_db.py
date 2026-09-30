@@ -52,6 +52,21 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
                 (3, "registering", now.isoformat(), now),
                 (4, "pending_retry", None, now - timedelta(hours=1)),
                 (5, "pending_retry", None, now),
+                (6, "attempt_resolution_pending", None, now),
+                (
+                    7,
+                    "attempt_resolving",
+                    None,
+                    now - timedelta(hours=2),
+                ),
+                (8, "attempt_resolving", None, now),
+                (
+                    9,
+                    "attempt_resolution_retry",
+                    None,
+                    now - timedelta(hours=1),
+                ),
+                (10, "attempt_resolution_retry", None, now),
             ]
             for session_id, status, started_at, updated_at in rows:
                 registration = {"status": status}
@@ -100,7 +115,46 @@ async def test_reconciler_query_selects_pending_and_expired_lease_in_postgres(
             )
 
             assert result == [
-                {"id": 2, "flow_uuid": FLOW_UUID, "attempts": 0},
-                {"id": 1, "flow_uuid": FLOW_UUID, "attempts": 0},
-                {"id": 4, "flow_uuid": FLOW_UUID, "attempts": 0},
+                {
+                    "id": 2,
+                    "flow_uuid": FLOW_UUID,
+                    "attempts": 0,
+                    "resolution_attempts": 0,
+                    "status": "registering",
+                },
+                {
+                    "id": 7,
+                    "flow_uuid": FLOW_UUID,
+                    "attempts": 0,
+                    "resolution_attempts": 0,
+                    "status": "attempt_resolving",
+                },
+                {
+                    "id": 1,
+                    "flow_uuid": FLOW_UUID,
+                    "attempts": 0,
+                    "resolution_attempts": 0,
+                    "status": "pending",
+                },
+                {
+                    "id": 4,
+                    "flow_uuid": FLOW_UUID,
+                    "attempts": 0,
+                    "resolution_attempts": 0,
+                    "status": "pending_retry",
+                },
+                {
+                    "id": 9,
+                    "flow_uuid": FLOW_UUID,
+                    "attempts": 0,
+                    "resolution_attempts": 0,
+                    "status": "attempt_resolution_retry",
+                },
+                {
+                    "id": 6,
+                    "flow_uuid": FLOW_UUID,
+                    "attempts": 0,
+                    "resolution_attempts": 0,
+                    "status": "attempt_resolution_pending",
+                },
             ]

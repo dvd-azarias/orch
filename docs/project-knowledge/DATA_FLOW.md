@@ -218,6 +218,31 @@ legado preservam o comportamento anterior.
     contextual existente permanece: `channel` preserva o membro da sessão e
     `person` exige a escolha prévia de canal de voz.
 
+### Retorno opt-in entre tentativas
+
+Quando o card declara `attempt_feedback_mode=each_attempt`, uma decisão
+telefônica ainda não terminal também chega ao ORCH em
+`POST /v1/orch/{workspace_uuid}/{flow_uuid}/supplier-v2/dialer-attempt`. A
+persistência exige correspondência integral do ciclo corrente e grava o evento
+em `intermediate_delivery`; replay idêntico é aceito sem nova retomada e evento
+conflitante falha fechado.
+
+O executor consome o evento uma única vez e percorre a branch normalizada do
+outcome. Há somente duas saídas sistêmicas para o hold criado na Supplier:
+
+- se o grafo voltar ao mesmo card, o ORCH prepara `retry_same_phone` para o
+  mesmo ciclo/evento. A task pós-commit chama a rota de resolução do Target e o
+  ciclo volta a `ready` sem alterar o `next_eligible_at` calculado pela Dial
+  Rule;
+- se a jornada terminar sem voltar ao card, o ORCH prepara `finish_flow` e
+  cancela explicitamente o ciclo retido.
+
+Enquanto a resolução está pendente, claims e reconciliadores não criam um novo
+ciclo. A task usa lease, retry limitado, compare-and-set e histórico do evento;
+o reconciliador recupera `attempt_resolution_pending`, lease vencido e retry
+stale. `terminal_only`, campo ausente, card legado e Supplier V1 preservam o
+fluxo anterior. Não há migration.
+
 O modo BOT pode reutilizar o consumo já existente de `flow_uuid`, campanha e `runner_token`. O modo humano exige que o consumidor externo reconheça `answer_action.type=human`, use `queue_voice_uuid` e não exija token Runner. Enquanto essa adaptação e um canário PBX não existirem, o envelope humano é contrato preparado, não entrega homologada.
 
 ## Card `split_random`

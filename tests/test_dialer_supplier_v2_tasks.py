@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.dialer_supplier_v2_service import (
+    DialerAttemptResolutionResult,
     DialerCycleRegistrationResult,
     DialerSupplierV2RegistrationError,
     build_dialer_cycle_intent,
@@ -60,6 +61,77 @@ def _result() -> DialerCycleRegistrationResult:
         profile_snapshot_checksum="c" * 64,
         ready_at="2026-09-14T19:00:00-03:00",
     )
+
+
+def _resolution_result() -> DialerAttemptResolutionResult:
+    return DialerAttemptResolutionResult(
+        cycle_id=CYCLE_ID,
+        event_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        action="retry_same_phone",
+        state="ready",
+        next_eligible_at="2026-09-29T13:03:00+00:00",
+        audit_event_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        replayed=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_attempt_resolution_task_rearms_same_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registration = {
+        **_intent(),
+        "cycle_id": CYCLE_ID,
+        "status": "attempt_resolution_pending",
+    }
+    resolution = {
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "component_ref_id": COMPONENT_REF_ID,
+        "cycle_id": CYCLE_ID,
+        "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "contact_list_member_id": 71,
+        "action": "retry_same_phone",
+        "resolved_at": "2026-09-29T13:00:00+00:00",
+    }
+    stored: dict[str, object] = {}
+    monkeypatch.setattr(tasks, "get_settings", lambda: _settings())
+
+    async def _claim(**_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "status": "claimed",
+            "registration": registration,
+            "resolution": resolution,
+            "attempt": 1,
+        }
+
+    async def _store(**kwargs):  # type: ignore[no-untyped-def]
+        stored.update(kwargs)
+        return True
+
+    monkeypatch.setattr(tasks, "_claim_attempt_resolution", _claim)
+    monkeypatch.setattr(
+        tasks,
+        "resolve_dialer_attempt",
+        lambda **_kwargs: _resolution_result(),
+    )
+    monkeypatch.setattr(tasks, "_store_attempt_resolution_success", _store)
+
+    result = await tasks._resolve_dialer_supplier_v2_attempt_task(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        session_id=71,
+        attempt=1,
+    )
+
+    assert result == {
+        "status": "ready",
+        "cycle_id": CYCLE_ID,
+        "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }
+    assert stored["resolution"] == resolution
+    assert stored["result"]["state"] == "ready"  # type: ignore[index]
 
 
 @pytest.mark.asyncio
@@ -410,6 +482,71 @@ async def test_reconciler_recovers_pending_intent_on_dedicated_queue(
     assert enqueued[0]["queue"] == "orch_dialer_supplier_v2_test"
     assert enqueued[0]["kwargs"]["session_id"] == 71
     assert enqueued[0]["kwargs"]["recovery_attempt"] == 3
+
+
+@pytest.mark.asyncio
+async def test_reconciler_routes_attempt_resolution_to_its_dedicated_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    registration_enqueued: list[dict] = []
+    resolution_enqueued: list[dict] = []
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: (lambda: _Session()))
+    monkeypatch.setattr(
+        tasks,
+        "list_completed_workspaces",
+        lambda _session: _async_value([{"workspace_uuid": WORKSPACE_UUID}]),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "bind_workspace_context",
+        lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"),
+    )
+
+    async def _list_resolutions(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return [
+            {
+                "id": 72,
+                "flow_uuid": FLOW_UUID,
+                "attempts": 0,
+                "resolution_attempts": 2,
+                "status": "attempt_resolution_retry",
+            }
+        ]
+
+    monkeypatch.setattr(
+        tasks,
+        "_list_reconcilable_dialer_supplier_v2_cycles",
+        _list_resolutions,
+    )
+    monkeypatch.setattr(
+        tasks.register_dialer_supplier_v2_cycle_task,
+        "apply_async",
+        lambda **kwargs: registration_enqueued.append(kwargs),
+    )
+    monkeypatch.setattr(
+        tasks.resolve_dialer_supplier_v2_attempt_task,
+        "apply_async",
+        lambda **kwargs: resolution_enqueued.append(kwargs),
+    )
+
+    result = await tasks._reconcile_pending_dialer_supplier_v2_cycles_task()
+
+    assert result == {"scanned": 1, "enqueued": 1}
+    assert registration_enqueued == []
+    assert resolution_enqueued == [
+        {
+            "kwargs": {
+                "workspace_uuid": WORKSPACE_UUID,
+                "flow_uuid": FLOW_UUID,
+                "session_id": 72,
+                "recovery_attempt": 3,
+            },
+            "queue": "orch_dialer_supplier_v2_test",
+            "routing_key": "orch_dialer_supplier_v2_test",
+        }
+    ]
 
 
 async def _async_value(value):  # type: ignore[no-untyped-def]

@@ -244,6 +244,59 @@ class OrchDialerSupplierV2TerminalResponse(BaseModel):
     idempotent: bool
 
 
+class OrchDialerSupplierV2AttemptRequest(BaseModel):
+    """Intermediate decision emitted by Target Core for one pinned cycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID
+    cycle_id: UUID
+    attempt_id: UUID
+    attempt_sequence: int = Field(ge=1)
+    session_uuid: UUID
+    flow_revision_id: UUID
+    component_ref_id: str = Field(min_length=1, max_length=255)
+    contact_list_member_id: int = Field(gt=0)
+    dial_profile_id: UUID
+    dial_profile_revision_id: UUID
+    attempt_policy_id: UUID
+    outcome: Literal[
+        "answered",
+        "busy",
+        "machine",
+        "no_answer",
+        "rejected",
+        "invalid_number",
+        "failed",
+        "limit_reached",
+    ]
+    decision: Literal["retry_same_phone"]
+    decision_source: Literal["dial_profile"]
+    terminal: Literal[False]
+    terminal_reason: Literal["retry_same_phone"]
+    next_eligible_at: datetime
+    person_attempts: int = Field(ge=0)
+    phone_attempts: int = Field(ge=0)
+    outcome_attempts: int = Field(ge=0)
+    release_mapping_version: Literal["pdial_v1"]
+    provider_status: str | None = Field(default=None, max_length=128)
+    duration_seconds: int | None = Field(default=None, ge=0)
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=1024)
+    occurred_at: datetime
+
+
+class OrchDialerSupplierV2AttemptResponse(BaseModel):
+    api_version: str = "v1"
+    status: str
+    accepted: bool
+    flow_uuid: str
+    session_uuid: str
+    cycle_id: str
+    event_id: str
+    idempotent: bool
+
+
 class OrchChannelSupplierV2CallbackResponse(BaseModel):
     api_version: str = "v1"
     status: Literal["accepted"] = "accepted"

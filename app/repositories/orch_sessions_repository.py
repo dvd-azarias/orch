@@ -1795,6 +1795,173 @@ async def apply_dialer_supplier_v2_terminal_callback(
     }
 
 
+async def apply_dialer_supplier_v2_attempt_callback(
+    db_session: AsyncSession,
+    *,
+    flow_uuid: str,
+    callback_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Persist one intermediate decision against the exact active dialer cycle."""
+
+    session_uuid = str(callback_payload.get("session_uuid") or "").strip()
+    cycle_id = str(callback_payload.get("cycle_id") or "").strip()
+    event_id = str(callback_payload.get("event_id") or "").strip()
+    candidate = (
+        await db_session.execute(
+            text(
+                """
+                SELECT id
+                FROM orch_sessions
+                WHERE uuid = CAST(:session_uuid AS uuid)
+                  AND flow_uuid = CAST(:flow_uuid AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"session_uuid": session_uuid, "flow_uuid": flow_uuid},
+        )
+    ).scalar()
+    if candidate is None:
+        return None
+
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
+        {"class_id": 92021, "object_id": int(candidate)},
+    )
+    row = (
+        await db_session.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    uuid::text AS uuid,
+                    ended_at,
+                    unassigned_at,
+                    runtime_variables,
+                    last_card_uuid::text AS last_card_uuid,
+                    next_card_uuid::text AS next_card_uuid
+                FROM orch_sessions
+                WHERE id = :session_id
+                  AND uuid = CAST(:session_uuid AS uuid)
+                  AND flow_uuid = CAST(:flow_uuid AS uuid)
+                LIMIT 1
+                """
+            ),
+            {
+                "session_id": int(candidate),
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+            },
+        )
+    ).mappings().first()
+    if row is None:
+        return None
+
+    runtime_variables = row.get("runtime_variables")
+    workflow_meta = (
+        runtime_variables.get("workflow_v2")
+        if isinstance(runtime_variables, dict)
+        else None
+    )
+    registration = (
+        workflow_meta.get("dialer_supplier_v2")
+        if isinstance(workflow_meta, dict)
+        else None
+    )
+    if not isinstance(registration, dict):
+        return {"status": "invalid_registration", "session_id": int(row["id"])}
+
+    identity_matches = all(
+        str(registration.get(registration_field) or "").strip()
+        == str(callback_payload.get(payload_field) or "").strip()
+        for registration_field, payload_field in (
+            ("cycle_id", "cycle_id"),
+            ("session_uuid", "session_uuid"),
+            ("flow_uuid", "flow_uuid"),
+            ("flow_revision_id", "flow_revision_id"),
+            ("component_ref_id", "component_ref_id"),
+            ("contact_list_member_id", "contact_list_member_id"),
+        )
+    )
+    if not identity_matches:
+        return {"status": "identity_mismatch", "session_id": int(row["id"])}
+
+    history = registration.get("attempt_delivery_history")
+    historical_delivery = history.get(event_id) if isinstance(history, dict) else None
+    if isinstance(historical_delivery, dict):
+        same_delivery = (
+            str(historical_delivery.get("cycle_id") or "") == cycle_id
+            and str(historical_delivery.get("outcome") or "")
+            == str(callback_payload.get("outcome") or "")
+            and str(historical_delivery.get("decision") or "")
+            == str(callback_payload.get("decision") or "")
+        )
+        return {
+            "status": "accepted" if same_delivery else "attempt_conflict",
+            "session_id": int(row["id"]),
+            "session_uuid": str(row["uuid"]),
+            "idempotent": same_delivery,
+            "accepted": same_delivery,
+            "resume_required": False,
+        }
+
+    previous = registration.get("intermediate_delivery")
+    if isinstance(previous, dict):
+        same_delivery = (
+            str(previous.get("event_id") or "") == event_id
+            and str(previous.get("cycle_id") or "") == cycle_id
+            and str(previous.get("outcome") or "")
+            == str(callback_payload.get("outcome") or "")
+            and str(previous.get("decision") or "")
+            == str(callback_payload.get("decision") or "")
+            and str(previous.get("next_eligible_at") or "")
+            == str(callback_payload.get("next_eligible_at") or "")
+        )
+        return {
+            "status": "accepted" if same_delivery else "attempt_conflict",
+            "session_id": int(row["id"]),
+            "session_uuid": str(row["uuid"]),
+            "idempotent": same_delivery,
+            "accepted": same_delivery,
+            "resume_required": False,
+        }
+
+    if row.get("unassigned_at") is not None or row.get("ended_at") is not None:
+        return {
+            "status": "inactive_session",
+            "session_id": int(row["id"]),
+            "session_uuid": str(row["uuid"]),
+            "idempotent": False,
+            "accepted": False,
+            "resume_required": False,
+        }
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    registration["intermediate_delivery"] = {
+        **callback_payload,
+        "event_id": event_id,
+        "cycle_id": cycle_id,
+        "terminal": False,
+        "received_at": now_iso,
+    }
+    registration["status"] = "attempt_received"
+    registration["updated_at"] = now_iso
+    await replace_session_workflow_state(
+        db_session,
+        session_id=int(row["id"]),
+        runtime_variables=runtime_variables,
+        last_card_uuid=row.get("last_card_uuid"),
+        next_card_uuid=row.get("next_card_uuid") or row.get("last_card_uuid"),
+    )
+    return {
+        "status": "accepted",
+        "session_id": int(row["id"]),
+        "session_uuid": str(row["uuid"]),
+        "idempotent": False,
+        "accepted": True,
+        "resume_required": True,
+    }
+
+
 async def fetch_session_webhook_snapshot(
     db_session: AsyncSession,
     *,
@@ -2695,6 +2862,82 @@ async def patch_session_dialer_supplier_v2_registration(
         },
     )
     return result.first() is not None
+
+
+async def prepare_dialer_supplier_v2_finish_resolution(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+) -> bool:
+    """Close a held intermediate cycle when the canvas ends without returning."""
+
+    row = (
+        await db_session.execute(
+            text(
+                """
+                SELECT
+                    runtime_variables,
+                    last_card_uuid::text AS last_card_uuid,
+                    next_card_uuid::text AS next_card_uuid
+                FROM orch_sessions
+                WHERE id = :session_id
+                FOR UPDATE
+                """
+            ),
+            {"session_id": session_id},
+        )
+    ).mappings().first()
+    if row is None:
+        return False
+    runtime_variables = row.get("runtime_variables")
+    workflow_meta = (
+        runtime_variables.get("workflow_v2")
+        if isinstance(runtime_variables, dict)
+        else None
+    )
+    registration = (
+        workflow_meta.get("dialer_supplier_v2")
+        if isinstance(workflow_meta, dict)
+        else None
+    )
+    if not isinstance(registration, dict):
+        return False
+    status = str(registration.get("status") or "").strip().lower()
+    delivery = registration.get("intermediate_delivery")
+    if (
+        status != "attempt_consumed"
+        or not isinstance(delivery, dict)
+        or delivery.get("terminal") is not False
+        or not str(delivery.get("event_id") or "").strip()
+        or not str(delivery.get("consumed_at") or "").strip()
+    ):
+        return False
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    registration["attempt_resolution"] = {
+        "session_uuid": str(registration.get("session_uuid") or ""),
+        "flow_uuid": str(registration.get("flow_uuid") or ""),
+        "flow_revision_id": str(registration.get("flow_revision_id") or ""),
+        "component_ref_id": str(registration.get("component_ref_id") or ""),
+        "cycle_id": str(registration.get("cycle_id") or ""),
+        "event_id": str(delivery.get("event_id") or ""),
+        "contact_list_member_id": registration.get("contact_list_member_id"),
+        "action": "finish_flow",
+        "resolved_at": now_iso,
+        "attempts": 0,
+        "requested_at": now_iso,
+    }
+    registration["status"] = "attempt_resolution_pending"
+    registration["updated_at"] = now_iso
+    registration["last_error"] = None
+    await replace_session_workflow_state(
+        db_session,
+        session_id=session_id,
+        runtime_variables=runtime_variables,
+        last_card_uuid=row.get("last_card_uuid"),
+        next_card_uuid=row.get("next_card_uuid"),
+    )
+    return True
 
 
 async def patch_session_channel_supplier_v2_registration(

@@ -8,7 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.v1 import orch as orch_api
-from app.schemas.orch import OrchDialerSupplierV2TerminalRequest
+from app.schemas.orch import (
+    OrchDialerSupplierV2AttemptRequest,
+    OrchDialerSupplierV2TerminalRequest,
+)
 
 
 WORKSPACE_UUID = UUID("ba7eb0ec-e565-447c-8c11-8f870cf72a60")
@@ -58,6 +61,35 @@ def _request() -> OrchDialerSupplierV2TerminalRequest:
         terminal=True,
         terminal_reason="answered",
         occurred_at=datetime.now(timezone.utc),
+    )
+
+
+def _attempt_request() -> OrchDialerSupplierV2AttemptRequest:
+    return OrchDialerSupplierV2AttemptRequest(
+        event_id=EVENT_UUID,
+        cycle_id=CYCLE_UUID,
+        attempt_id=ATTEMPT_UUID,
+        attempt_sequence=1,
+        session_uuid=SESSION_UUID,
+        flow_revision_id=REVISION_UUID,
+        component_ref_id=COMPONENT_REF_ID,
+        contact_list_member_id=71,
+        dial_profile_id=UUID("77777777-7777-4777-8777-777777777777"),
+        dial_profile_revision_id=UUID(
+            "88888888-8888-4888-8888-888888888888"
+        ),
+        attempt_policy_id=UUID("99999999-9999-4999-8999-999999999999"),
+        outcome="machine",
+        decision="retry_same_phone",
+        decision_source="dial_profile",
+        terminal=False,
+        terminal_reason="retry_same_phone",
+        next_eligible_at=datetime(2026, 9, 29, 13, 3, tzinfo=timezone.utc),
+        person_attempts=1,
+        phone_attempts=1,
+        outcome_attempts=1,
+        release_mapping_version="pdial_v1",
+        occurred_at=datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc),
     )
 
 
@@ -329,6 +361,90 @@ async def test_active_terminal_callback_keeps_existing_resume_contract(
                 "workspace_uuid": str(WORKSPACE_UUID),
                 "flow_uuid": str(FLOW_UUID),
                 "session_id": 9101,
+            },
+            "queue": queue,
+            "routing_key": queue,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_intermediate_callback_persists_metrics_and_resumes_same_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_session = _DbSession()
+    enqueued: list[dict] = []
+    metrics: list[dict] = []
+    queue = "orch_execute_test"
+
+    monkeypatch.setattr(
+        orch_api,
+        "_require_dialer_supplier_v2_client",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orch_api,
+        "bind_workspace_context",
+        lambda value: (value, f"ws_{value}"),
+    )
+
+    async def ensure_workspace(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def persist_callback(*_args: object, **_kwargs: object) -> dict:
+        return {
+            "status": "accepted",
+            "accepted": True,
+            "idempotent": False,
+            "resume_required": True,
+            "session_id": 9103,
+            "session_uuid": str(SESSION_UUID),
+        }
+
+    async def record_metric(*_args: object, **kwargs: object) -> None:
+        metrics.append(kwargs)
+
+    monkeypatch.setattr(orch_api, "ensure_active_workspace", ensure_workspace)
+    monkeypatch.setattr(
+        orch_api,
+        "apply_dialer_supplier_v2_attempt_callback",
+        persist_callback,
+    )
+    monkeypatch.setattr(
+        orch_api,
+        "record_journey_channel_action_event",
+        record_metric,
+    )
+    monkeypatch.setattr(
+        orch_api.resume_dialer_supplier_v2_terminal_task,
+        "apply_async",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(celery_execute_queue=queue),
+    )
+
+    response = await orch_api.callback_dialer_supplier_v2_attempt_by_workspace(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        request=_attempt_request(),
+        x_client_id="client",
+        x_client_secret="secret",
+        db_session=db_session,  # type: ignore[arg-type]
+    )
+
+    assert response.accepted is True
+    assert response.idempotent is False
+    assert metrics[0]["native_status"] == "machine"
+    assert metrics[0]["metadata"]["attempt_sequence"] == 1
+    assert enqueued == [
+        {
+            "kwargs": {
+                "workspace_uuid": str(WORKSPACE_UUID),
+                "flow_uuid": str(FLOW_UUID),
+                "session_id": 9103,
             },
             "queue": queue,
             "routing_key": queue,

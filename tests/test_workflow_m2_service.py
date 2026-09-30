@@ -1056,6 +1056,85 @@ def test_supplier_v2_keeps_telephone_branch_separate_from_operational_decision()
     }
 
 
+def test_supplier_v2_intermediate_attempt_is_consumed_exactly_once() -> None:
+    runtime_variables = {
+        "workflow_v2": {
+            "dialer_supplier_v2": {
+                "status": "attempt_received",
+                "cycle_id": "11111111-1111-4111-8111-111111111111",
+                "component_ref_id": "dialer-handoff-1",
+                "intermediate_delivery": {
+                    "event_id": "22222222-2222-4222-8222-222222222222",
+                    "attempt_id": "33333333-3333-4333-8333-333333333333",
+                    "attempt_sequence": 1,
+                    "terminal": False,
+                    "outcome": "machine",
+                    "decision": "retry_same_phone",
+                    "next_eligible_at": "2026-09-29T13:03:00+00:00",
+                },
+            }
+        }
+    }
+    component = {
+        "component_id": "send_with_dialer_handoff",
+        "ref_id": "dialer-handoff-1",
+    }
+
+    assert (
+        _resolve_send_with_dialer_branch_label(component, runtime_variables)
+        == "machine"
+    )
+    registration = runtime_variables["workflow_v2"]["dialer_supplier_v2"]
+    assert registration["status"] == "attempt_consumed"
+    assert registration["intermediate_delivery"]["consumed_at"]
+    assert runtime_variables["dialer_last_response"]["terminal"] is False
+    assert runtime_variables["dialer_last_response"]["attempt_sequence"] == 1
+    assert _resolve_send_with_dialer_branch_label(component, runtime_variables) is None
+
+
+def test_prepare_attempt_resolution_keeps_same_cycle_identity() -> None:
+    registration = {
+        "session_uuid": "11111111-1111-4111-8111-111111111111",
+        "flow_uuid": "22222222-2222-4222-8222-222222222222",
+        "flow_revision_id": "33333333-3333-4333-8333-333333333333",
+        "component_ref_id": "dialer-handoff-1",
+        "cycle_id": "44444444-4444-4444-8444-444444444444",
+        "contact_list_id": "66666666-6666-4666-8666-666666666666",
+        "contact_list_member_id": 71,
+        "status": "attempt_consumed",
+        "intermediate_delivery": {
+            "event_id": "55555555-5555-4555-8555-555555555555",
+            "terminal": False,
+            "consumed_at": "2026-09-29T13:00:00+00:00",
+        },
+    }
+
+    prepared = workflow_m2_service._prepare_dialer_supplier_v2_attempt_resolution(
+        registration,
+        action="retry_same_phone",
+        contact_list_id=registration["contact_list_id"],
+        contact_list_member_id=registration["contact_list_member_id"],
+    )
+
+    assert prepared["status"] == "attempt_resolution_pending"
+    assert prepared["attempt_resolution"]["cycle_id"] == registration["cycle_id"]
+    assert prepared["attempt_resolution"]["event_id"] == (
+        registration["intermediate_delivery"]["event_id"]
+    )
+    assert prepared["attempt_resolution"]["action"] == "retry_same_phone"
+
+    with pytest.raises(
+        WorkflowExecutionError,
+        match="mesmo ciclo telefônico não pode ser rearmado",
+    ):
+        workflow_m2_service._prepare_dialer_supplier_v2_attempt_resolution(
+            registration,
+            action="retry_same_phone",
+            contact_list_id=registration["contact_list_id"],
+            contact_list_member_id=72,
+        )
+
+
 def test_extract_send_with_whatsapp_numbers_deduplicates_and_ignores_invalid() -> None:
     component = {
         "parameters": {

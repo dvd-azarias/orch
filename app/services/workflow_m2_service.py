@@ -1657,16 +1657,33 @@ def _resolve_send_with_dialer_branch_label(
     component: dict[str, Any],
     runtime_variables: dict[str, Any],
 ) -> str | None:
+    delivery: dict[str, Any] | None = None
     registration = _dialer_supplier_v2_registration_for_handoff(
         runtime_variables,
         component=component,
     )
     if registration is not None:
         terminal_delivery = registration.get("terminal_delivery")
-        status = (
-            str(terminal_delivery.get("outcome") or "").strip().lower()
-            if isinstance(terminal_delivery, dict)
+        intermediate_delivery = registration.get("intermediate_delivery")
+        if (
+            isinstance(terminal_delivery, dict)
             and terminal_delivery.get("terminal") is True
+        ):
+            delivery = terminal_delivery
+        elif (
+            isinstance(intermediate_delivery, dict)
+            and intermediate_delivery.get("terminal") is False
+            and not intermediate_delivery.get("consumed_at")
+        ):
+            delivery = intermediate_delivery
+            intermediate_delivery["consumed_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            registration["status"] = "attempt_consumed"
+            registration["updated_at"] = intermediate_delivery["consumed_at"]
+        status = (
+            str(delivery.get("outcome") or "").strip().lower()
+            if isinstance(delivery, dict)
             else None
         )
     elif (
@@ -1679,11 +1696,23 @@ def _resolve_send_with_dialer_branch_label(
     if status is None:
         return None
     branch = DIALER_RESPONSE_BRANCH_BY_STATUS.get(status)
-    runtime_variables["dialer_last_response"] = {
+    last_response = {
         "component_ref_id": component.get("ref_id"),
         "status": status,
         "branch": branch,
     }
+    if isinstance(delivery, dict) and delivery.get("terminal") is False:
+        last_response.update(
+            {
+                "event_id": delivery.get("event_id"),
+                "attempt_id": delivery.get("attempt_id"),
+                "attempt_sequence": delivery.get("attempt_sequence"),
+                "terminal": False,
+                "decision": delivery.get("decision"),
+                "next_eligible_at": delivery.get("next_eligible_at"),
+            }
+        )
+    runtime_variables["dialer_last_response"] = last_response
     return branch
 
 
@@ -1717,7 +1746,15 @@ def _dialer_supplier_v2_registration_for_handoff(
         if not str(registration.get("cycle_id") or "").strip():
             continue
         status = str(registration.get("status") or "").strip().lower()
-        if status not in {"ready", "terminal_received"}:
+        if status not in {
+            "ready",
+            "terminal_received",
+            "attempt_received",
+            "attempt_consumed",
+            "attempt_resolution_pending",
+            "attempt_resolving",
+            "attempt_resolution_retry",
+        }:
             continue
         if component is not None and str(
             registration.get("component_ref_id") or ""
@@ -2673,6 +2710,59 @@ def _archive_dialer_supplier_v2_registration(
     )
 
 
+def _prepare_dialer_supplier_v2_attempt_resolution(
+    registration: dict[str, Any],
+    *,
+    action: str,
+    contact_list_id: str,
+    contact_list_member_id: int,
+) -> dict[str, Any]:
+    delivery = registration.get("intermediate_delivery")
+    if (
+        action not in {"retry_same_phone", "finish_flow"}
+        or not isinstance(delivery, dict)
+        or delivery.get("terminal") is not False
+        or not str(delivery.get("event_id") or "").strip()
+        or not str(delivery.get("consumed_at") or "").strip()
+    ):
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_attempt_resolution_invalid",
+            "O retorno intermediário do discador não pode ser resolvido com segurança.",
+        )
+    if (
+        str(registration.get("contact_list_id") or "").strip()
+        != str(contact_list_id or "").strip()
+        or int(registration.get("contact_list_member_id") or 0)
+        != int(contact_list_member_id or 0)
+    ):
+        raise WorkflowExecutionError(
+            "send_with_dialer_handoff_attempt_context_changed",
+            (
+                "O membro selecionado mudou durante o retorno intermediário; "
+                "o mesmo ciclo telefônico não pode ser rearmado."
+            ),
+        )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    prepared = dict(registration)
+    prepared["attempt_resolution"] = {
+        "session_uuid": str(registration.get("session_uuid") or ""),
+        "flow_uuid": str(registration.get("flow_uuid") or ""),
+        "flow_revision_id": str(registration.get("flow_revision_id") or ""),
+        "component_ref_id": str(registration.get("component_ref_id") or ""),
+        "cycle_id": str(registration.get("cycle_id") or ""),
+        "event_id": str(delivery.get("event_id") or ""),
+        "contact_list_member_id": registration.get("contact_list_member_id"),
+        "action": action,
+        "resolved_at": now_iso,
+        "attempts": 0,
+        "requested_at": now_iso,
+    }
+    prepared["status"] = "attempt_resolution_pending"
+    prepared["updated_at"] = now_iso
+    prepared["last_error"] = None
+    return prepared
+
+
 @asynccontextmanager
 async def _dialer_handoff_atomic_scope(db_session: AsyncSession | None):
     begin_nested = getattr(db_session, "begin_nested", None)
@@ -2776,18 +2866,34 @@ async def _prepare_send_with_dialer_handoff_contact_member(
             )
         if supplier_v2_enabled:
             try:
-                prepared_intent = build_dialer_cycle_intent(
-                    session_uuid=str(session_uuid or ""),
-                    flow_uuid=flow_uuid,
-                    flow_revision_id=str(flow_revision_id or ""),
-                    component_ref_id=component_ref_id,
-                    contact_list_id=str(assignment.get("contact_list_id") or ""),
-                    contact_list_member_id=int(
-                        assignment.get("contact_list_member_id") or 0
-                    ),
-                    dial_profile_id=str(profile_id or ""),
-                    existing=existing_intent,
-                )
+                if (
+                    isinstance(existing_intent, dict)
+                    and str(existing_intent.get("status") or "").strip().lower()
+                    == "attempt_consumed"
+                ):
+                    prepared_intent = _prepare_dialer_supplier_v2_attempt_resolution(
+                        existing_intent,
+                        action="retry_same_phone",
+                        contact_list_id=str(
+                            assignment.get("contact_list_id") or ""
+                        ),
+                        contact_list_member_id=int(
+                            assignment.get("contact_list_member_id") or 0
+                        ),
+                    )
+                else:
+                    prepared_intent = build_dialer_cycle_intent(
+                        session_uuid=str(session_uuid or ""),
+                        flow_uuid=flow_uuid,
+                        flow_revision_id=str(flow_revision_id or ""),
+                        component_ref_id=component_ref_id,
+                        contact_list_id=str(assignment.get("contact_list_id") or ""),
+                        contact_list_member_id=int(
+                            assignment.get("contact_list_member_id") or 0
+                        ),
+                        dial_profile_id=str(profile_id or ""),
+                        existing=existing_intent,
+                    )
             except DialerSupplierV2RegistrationError as exc:
                 raise WorkflowExecutionError(
                     "send_with_dialer_handoff_cycle_intent_invalid",
@@ -3538,11 +3644,21 @@ def _should_resume_dialer_blocking_execution(runtime_variables: dict[str, Any]) 
         )
         if registration is not None:
             terminal_delivery = registration.get("terminal_delivery")
+            intermediate_delivery = registration.get("intermediate_delivery")
             return bool(
-                isinstance(terminal_delivery, dict)
-                and terminal_delivery.get("terminal") is True
-                and str(terminal_delivery.get("outcome") or "")
-                in DIALER_RESPONSE_BRANCH_BY_STATUS
+                (
+                    isinstance(terminal_delivery, dict)
+                    and terminal_delivery.get("terminal") is True
+                    and str(terminal_delivery.get("outcome") or "")
+                    in DIALER_RESPONSE_BRANCH_BY_STATUS
+                )
+                or (
+                    isinstance(intermediate_delivery, dict)
+                    and intermediate_delivery.get("terminal") is False
+                    and not intermediate_delivery.get("consumed_at")
+                    and str(intermediate_delivery.get("outcome") or "")
+                    in DIALER_RESPONSE_BRANCH_BY_STATUS
+                )
             )
         if _has_active_dialer_supplier_v2_registration(runtime_variables):
             return False

@@ -320,6 +320,105 @@ def test_register_cycle_posts_exact_contract_and_discards_callback_token(
     assert "callback_token" not in runtime_payload
 
 
+def test_resolve_attempt_posts_explicit_canvas_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    resolution = {
+        "session_uuid": SESSION_UUID,
+        "flow_uuid": FLOW_UUID,
+        "flow_revision_id": REVISION_UUID,
+        "component_ref_id": COMPONENT_REF_ID,
+        "cycle_id": CYCLE_ID,
+        "event_id": EVENT_ID,
+        "contact_list_member_id": 71,
+        "action": "retry_same_phone",
+        "resolved_at": "2026-09-29T13:00:00+00:00",
+    }
+
+    def _urlopen(req, *, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _Response(
+            {
+                "data": {
+                    "supplier_contract": "v2",
+                    "cycle_id": CYCLE_ID,
+                    "event_id": EVENT_ID,
+                    "action": "retry_same_phone",
+                    "state": "ready",
+                    "next_eligible_at": "2026-09-29T13:03:00+00:00",
+                    "audit_event_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "replayed": False,
+                }
+            },
+            status=200,
+        )
+
+    monkeypatch.setattr(service.request, "urlopen", _urlopen)
+
+    result = service.resolve_dialer_attempt(
+        workspace_uuid=WORKSPACE_UUID,
+        resolution=resolution,
+        settings=_settings(),  # type: ignore[arg-type]
+    )
+
+    assert captured["url"] == (
+        "https://supplier.internal/v2/contact-supplier/dialer-attempts/resolve"
+    )
+    assert captured["headers"]["X-workspace-uuid"] == WORKSPACE_UUID  # type: ignore[index]
+    assert captured["body"] == resolution
+    assert result.action == "retry_same_phone"
+    assert result.state == "ready"
+    assert result.next_eligible_at == "2026-09-29T13:03:00+00:00"
+
+
+def test_resolve_attempt_rejects_state_incompatible_with_requested_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            {
+                "data": {
+                    "cycle_id": CYCLE_ID,
+                    "event_id": EVENT_ID,
+                    "action": "retry_same_phone",
+                    "state": "cancelled",
+                    "next_eligible_at": None,
+                    "audit_event_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "replayed": False,
+                }
+            },
+            status=200,
+        ),
+    )
+
+    with pytest.raises(service.DialerSupplierV2RegistrationError) as exc_info:
+        service.resolve_dialer_attempt(
+            workspace_uuid=WORKSPACE_UUID,
+            resolution={
+                "session_uuid": SESSION_UUID,
+                "flow_uuid": FLOW_UUID,
+                "flow_revision_id": REVISION_UUID,
+                "component_ref_id": COMPONENT_REF_ID,
+                "cycle_id": CYCLE_ID,
+                "event_id": EVENT_ID,
+                "contact_list_member_id": 71,
+                "action": "retry_same_phone",
+                "resolved_at": "2026-09-29T13:00:00+00:00",
+            },
+            settings=_settings(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.code == (
+        "dialer_supplier_v2_attempt_resolution_invalid_response"
+    )
+
+
 def test_resolve_next_channel_posts_terminal_identity_and_parses_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

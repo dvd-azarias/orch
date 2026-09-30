@@ -353,3 +353,87 @@ async def test_advance_session_does_not_enqueue_supplier_v2_for_unlisted_flow(
     )
 
     assert events == ["commit"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_canvas_path_closes_held_attempt_only_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_uuid = "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
+    flow_uuid = "4e163399-e9a0-4335-895f-316c6a161299"
+    queue = "orch_dialer_supplier_v2_test"
+    events: list[str] = []
+    enqueued: list[dict] = []
+    session_context = _DummySessionContext(events)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            dialer_supplier_v2_enabled=True,
+            dialer_supplier_v2_workspace_allowlist=(workspace_uuid,),
+            dialer_supplier_v2_flow_allowlist=(flow_uuid,),
+            celery_dialer_supplier_v2_queue=queue,
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_session_factory",
+        lambda: (lambda: session_context),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "bind_workspace_context",
+        lambda value: (value, f"ws_{value}"),
+    )
+
+    async def _advance(*_args, **_kwargs) -> str:
+        return "finished_by_component"
+
+    async def _persist_metrics(*_args, **_kwargs) -> None:
+        return None
+
+    async def _prepare(*_args, **_kwargs) -> bool:
+        return True
+
+    def _enqueue(**kwargs) -> None:  # type: ignore[no-untyped-def]
+        events.append("enqueue")
+        enqueued.append(kwargs)
+
+    monkeypatch.setattr(workflow_tasks, "advance_session_once", _advance)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "persist_session_metrics",
+        _persist_metrics,
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "prepare_dialer_supplier_v2_finish_resolution",
+        _prepare,
+    )
+    from app.tasks import dialer_supplier_v2_tasks
+
+    monkeypatch.setattr(
+        dialer_supplier_v2_tasks.resolve_dialer_supplier_v2_attempt_task,
+        "apply_async",
+        _enqueue,
+    )
+
+    await workflow_tasks._advance_session_task(
+        workspace_uuid=workspace_uuid,
+        flow_uuid=flow_uuid,
+        session_id=123,
+    )
+
+    assert events == ["commit", "enqueue"]
+    assert enqueued == [
+        {
+            "kwargs": {
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": 123,
+            },
+            "queue": queue,
+            "routing_key": queue,
+        }
+    ]

@@ -11,12 +11,14 @@ from app.repositories.orch_channel_events_repository import (
     discard_pending_channel_events,
 )
 from app.repositories.orch_sessions_repository import (
+    apply_dialer_supplier_v2_attempt_callback,
     apply_dialer_supplier_v2_terminal_callback,
     assign_dialer_handoff_routing_for_session,
     assign_dialer_routing_for_session,
     assign_whatsapp_routing_for_session,
     fetch_contact_runtime_context_for_session,
     patch_session_dialer_supplier_v2_registration,
+    prepare_dialer_supplier_v2_finish_resolution,
 )
 
 
@@ -866,6 +868,163 @@ async def test_supplier_v2_terminal_callback_is_pinned_and_idempotent() -> None:
             assert terminal["decision_source"] == "telephone_outcome"
             assert terminal["contact_list_member_id"] == 123
             assert terminal["release_mapping_version"] == "pdial_v1"
+
+
+@pytest.mark.asyncio
+async def test_supplier_v2_intermediate_callback_is_pinned_and_can_be_closed(
+) -> None:
+    flow_uuid = str(uuid4())
+    session_uuid = str(uuid4())
+    revision_uuid = str(uuid4())
+    card_uuid = str(uuid4())
+    cycle_uuid = str(uuid4())
+    attempt_uuid = str(uuid4())
+    event_uuid = str(uuid4())
+    session_factory = get_session_factory()
+
+    async with session_factory() as db_session:
+        async with db_session.begin():
+            await db_session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE orch_sessions (
+                        id BIGINT PRIMARY KEY,
+                        uuid UUID NOT NULL,
+                        flow_uuid UUID NOT NULL,
+                        state INTEGER NOT NULL,
+                        ended_at TIMESTAMPTZ NULL,
+                        unassigned_at TIMESTAMPTZ NULL,
+                        runtime_variables JSONB NOT NULL,
+                        last_card_uuid UUID NULL,
+                        next_card_uuid UUID NULL,
+                        frozen_until TIMESTAMPTZ NULL,
+                        updated_at TIMESTAMPTZ NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            registration = {
+                "status": "ready",
+                "cycle_id": cycle_uuid,
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+                "flow_revision_id": revision_uuid,
+                "component_ref_id": card_uuid,
+                "contact_list_member_id": 123,
+            }
+            await db_session.execute(
+                text(
+                    """
+                    INSERT INTO orch_sessions (
+                        id, uuid, flow_uuid, state, runtime_variables,
+                        last_card_uuid, next_card_uuid
+                    ) VALUES (
+                        9102, CAST(:session_uuid AS uuid), CAST(:flow_uuid AS uuid), 1,
+                        CAST(:runtime_variables AS jsonb),
+                        CAST(:card_uuid AS uuid), CAST(:card_uuid AS uuid)
+                    )
+                    """
+                ),
+                {
+                    "session_uuid": session_uuid,
+                    "flow_uuid": flow_uuid,
+                    "card_uuid": card_uuid,
+                    "runtime_variables": json.dumps(
+                        {
+                            "workflow_v2": {
+                                "blocking_execution": True,
+                                "blocking_stop_reason": (
+                                    "blocked_send_with_dialer_handoff"
+                                ),
+                                "dialer_supplier_v2": registration,
+                            }
+                        }
+                    ),
+                },
+            )
+            payload = {
+                "event_id": event_uuid,
+                "cycle_id": cycle_uuid,
+                "attempt_id": attempt_uuid,
+                "attempt_sequence": 1,
+                "session_uuid": session_uuid,
+                "flow_uuid": flow_uuid,
+                "flow_revision_id": revision_uuid,
+                "component_ref_id": card_uuid,
+                "contact_list_member_id": 123,
+                "outcome": "machine",
+                "decision": "retry_same_phone",
+                "terminal": False,
+                "terminal_reason": "retry_same_phone",
+                "next_eligible_at": "2026-09-29T12:05:00+00:00",
+                "occurred_at": "2026-09-29T12:00:00+00:00",
+            }
+
+            first = await apply_dialer_supplier_v2_attempt_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload=payload,
+            )
+            replay = await apply_dialer_supplier_v2_attempt_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload=payload,
+            )
+            conflict = await apply_dialer_supplier_v2_attempt_callback(
+                db_session,
+                flow_uuid=flow_uuid,
+                callback_payload={**payload, "outcome": "busy"},
+            )
+
+            assert first is not None and first["resume_required"] is True
+            assert replay is not None and replay["idempotent"] is True
+            assert conflict is not None and conflict["status"] == "attempt_conflict"
+
+            runtime = (
+                await db_session.execute(
+                    text(
+                        "SELECT runtime_variables FROM orch_sessions WHERE id = 9102"
+                    )
+                )
+            ).scalar_one()
+            delivery = runtime["workflow_v2"]["dialer_supplier_v2"][
+                "intermediate_delivery"
+            ]
+            assert delivery["event_id"] == event_uuid
+            assert delivery["outcome"] == "machine"
+
+            delivery["consumed_at"] = "2026-09-29T12:00:01+00:00"
+            runtime["workflow_v2"]["dialer_supplier_v2"]["status"] = (
+                "attempt_consumed"
+            )
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                       SET runtime_variables = CAST(:runtime_variables AS jsonb)
+                     WHERE id = 9102
+                    """
+                ),
+                {"runtime_variables": json.dumps(runtime)},
+            )
+            prepared = await prepare_dialer_supplier_v2_finish_resolution(
+                db_session,
+                session_id=9102,
+            )
+            closed_runtime = (
+                await db_session.execute(
+                    text(
+                        "SELECT runtime_variables FROM orch_sessions WHERE id = 9102"
+                    )
+                )
+            ).scalar_one()
+
+            assert prepared is True
+            resolution = closed_runtime["workflow_v2"]["dialer_supplier_v2"][
+                "attempt_resolution"
+            ]
+            assert resolution["event_id"] == event_uuid
+            assert resolution["action"] == "finish_flow"
 
 
 @pytest.mark.asyncio
