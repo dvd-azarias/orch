@@ -84,6 +84,18 @@ Advertencias:
 
 Limitacao: `/health/celery` nao comprova que todos os workers, beats ou consumidores obrigatorios estejam presentes. Validar filas/consumers separadamente no RabbitMQ/Flower.
 
+## Ativação de flow/workspace no Supplier V2
+
+Discador, materialização SMS/RCS, execução real no Target Core e callbacks no
+pool HTTP possuem gates independentes. Antes de habilitar um novo flow ou
+workspace, seguir integralmente
+`docs/project-knowledge/SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md`.
+
+Em particular, `.239/.249` hospedam duas aplicações e dois arquivos distintos:
+`/etc/gohp/target-core/.env`, que governa o envio real SMS/RCS, e
+`/etc/gohp/orch/.env`, que governa os callbacks ORCH distribuídos. Alterar um
+não configura o outro.
+
 ## Smoke
 
 O smoke do script envia GenericApp para dois flows e comprova apenas resposta HTTP nao vazia/aceite. Para regressao real, acrescentar:

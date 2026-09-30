@@ -2774,3 +2774,48 @@ discagem Supplier V2; Supplier V1 e o contrato do canvas permanecem intactos.
   pinagem de revisão; total dirigido: `266 passed`;
 - validação final exige deploy e nova sessão limpa reproduzindo
   `machine -> SMS`; rollback é reversão de código e restart, sem migration.
+
+## 2026-09-30 — Ativação multicanal completa do TRC 003
+
+### CAUSE / CLASSIFICATION
+
+Depois da correção da corrida, a sessão `8797` recebeu `no_answer`, consumiu o
+ciclo e alcançou `send_with_sms`. O ORCH materializou
+`workflow_v2.channel_dispatch_v2`, mas as três tentativas de registro receberam
+HTTP 503 `channel_dispatch_v2_disabled`. O flow já estava autorizado no ORCH
+`.237`, porém faltava na allowlist de execução real do Target Core `.239/.249`.
+As APIs ORCH de callback `.239/.249` também ainda desconheciam o flow.
+`ALPHA_FIX_REQUIRED` de configuração; Supplier V1 e WhatsApp não foram
+alterados.
+
+### ACTION / SAFETY
+
+- O flow `34496bfd-478c-4030-8382-ec0416e1efd0` foi adicionado a
+  `CONTACT_SUPPLIER_CHANNEL_DISPATCH_V2_FLOW_UUIDS` no
+  `/etc/gohp/target-core/.env` de `.239/.249`.
+- Nos mesmos hosts, ele foi adicionado separadamente a
+  `CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST` no `/etc/gohp/orch/.env`, garantindo
+  paridade do callback público SMS/RCS.
+- Cada arquivo recebeu backup restrito; hashes calculados removendo somente a
+  linha alterada comprovaram que o restante permaneceu idêntico.
+- Target Core foi promovido em rolling: worker dedicado e API Supplier no
+  `.239`, health, depois o mesmo no `.249`. As APIs ORCH foram reiniciadas na
+  mesma ordem. Nenhum worker Supplier V1, feedback, FileApp, beat, Kerberos,
+  container dinâmico ou serviço WhatsApp foi reiniciado.
+
+### EVIDENCE / NEXT GATE
+
+- Target Core Supplier `.239/.249`: `/health=200`, worker de channel dispatch
+  `ready`, `NRestarts=0` e contexto do canário avaliado como habilitado em
+  processo novo.
+- API ORCH `.239/.249`: `/health/live=200`, `/health/db=200`, `NRestarts=0` e
+  callback do canário avaliado como habilitado em processo novo.
+- `.237`: Dialer, Channel e callback do TRC 003 avaliados como habilitados; os
+  cinco workers workflow e o worker Dialer Supplier V2 estão ativos com zero
+  restart.
+- A sessão `8797` não deve ser reanimada: atravessou o card antes do gate
+  efetivo e esgotou o registro. O E2E final exige vínculo/sessão novos, envio
+  real, callback HTTP 202 e retomada da mesma sessão.
+- O procedimento reutilizável foi consolidado em
+  `SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` para evitar redescoberta em novos
+  flows/workspaces.
