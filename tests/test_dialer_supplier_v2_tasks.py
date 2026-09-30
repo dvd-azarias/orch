@@ -361,6 +361,109 @@ async def test_registration_task_skips_terminal_received_before_http(
     assert result == {"status": "terminal_received", "cycle_id": CYCLE_ID}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["attempt_received", "attempt_consumed"])
+async def test_registration_task_preserves_intermediate_callback_before_http(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    monkeypatch.setattr(tasks, "get_settings", lambda: _settings())
+
+    async def _claim(**_kwargs):  # type: ignore[no-untyped-def]
+        return {"status": status, "cycle_id": CYCLE_ID}
+
+    def _unexpected_register(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("callback intermediario nao deve registrar outro ciclo")
+
+    monkeypatch.setattr(tasks, "_claim_registration_attempt", _claim)
+    monkeypatch.setattr(tasks, "register_dialer_cycle", _unexpected_register)
+
+    result = await tasks._register_dialer_supplier_v2_cycle_task(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        session_id=71,
+        attempt=1,
+    )
+
+    assert result == {"status": status, "cycle_id": CYCLE_ID}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["attempt_received", "attempt_consumed"])
+async def test_claim_registration_preserves_intermediate_callback_state(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    intent = {
+        **_intent(),
+        "cycle_id": CYCLE_ID,
+        "status": status,
+        "intermediate_delivery": {
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "terminal": False,
+            "outcome": "machine",
+        },
+    }
+
+    class _LockResult:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _ClaimTransaction:
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN204, ANN002
+            return None
+
+    class _ClaimSession:
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN204, ANN002
+            return None
+
+        def begin(self) -> _ClaimTransaction:
+            return _ClaimTransaction()
+
+        async def execute(self, *_args, **_kwargs) -> _LockResult:  # noqa: ANN002, ANN003
+            return _LockResult()
+
+    async def _fetch(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "flow_uuid": FLOW_UUID,
+            "runtime_variables": {
+                "workflow_v2": {"dialer_supplier_v2": intent}
+            },
+        }
+
+    async def _unexpected_patch(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("callback intermediario nao deve ser sobrescrito")
+
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: (lambda: _ClaimSession()))
+    monkeypatch.setattr(
+        tasks,
+        "bind_workspace_context",
+        lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"),
+    )
+    monkeypatch.setattr(tasks, "fetch_session_workflow_state", _fetch)
+    monkeypatch.setattr(
+        tasks,
+        "patch_session_dialer_supplier_v2_registration",
+        _unexpected_patch,
+    )
+
+    result = await tasks._claim_registration_attempt(
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+        session_id=71,
+        attempt=1,
+        registration_lease_seconds=120,
+    )
+
+    assert result == {"status": status, "cycle_id": CYCLE_ID}
+
+
 class _Transaction:
     async def __aenter__(self):  # noqa: ANN204
         return self

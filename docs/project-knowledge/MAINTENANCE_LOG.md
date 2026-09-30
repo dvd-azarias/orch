@@ -2744,3 +2744,33 @@ a transação antes da retomada da sessão correlacionada.
   sob callback real; rollback é somente reversão de código e restart da API;
 - concluído o incidente, retomar a homologação dos novos eventos da Metrics API
   no fluxo canário, incluindo o evento real de SMS ainda pendente.
+
+## 2026-09-30 — Corrida entre callback intermediário e registro Supplier V2
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a sessão canária TRC 003 que recebeu e contabilizou `machine`, mas não
+retomou o branch que leva ao SMS. `ALPHA_FIX_REQUIRED`, restrito ao ciclo de
+discagem Supplier V2; Supplier V1 e o contrato do canvas permanecem intactos.
+
+### ROOT CAUSE / CHANGE / SAFETY
+
+- uma tarefa de registro já enfileirada podia executar depois de o callback
+  intermediário persistir `attempt_received`;
+- o claim tratava esse estado como um novo registro, enquanto o replay
+  idempotente do Supplier devolvia o ciclo legítimo em `pending`;
+- o ORCH rejeitava `pending`, gravava `failed` e tornava o callback salvo
+  invisível para a retomada do fluxo;
+- `attempt_received` e `attempt_consumed` passam a ser estados protegidos contra
+  novo registro, e `pending` passa a ser aceito somente em replay idempotente;
+- criação inicial continua aceitando exclusivamente `ready`; respostas com
+  identidade divergente continuam rejeitadas.
+
+### VALIDATION / ROLLBACK
+
+- `45 passed` nas suítes do serviço, tasks e persistência Supplier V2;
+- `170 passed` na regressão de callback e execução Workflow M2;
+- `51 passed` na regressão do mapper, configuração, engine legado, dispatcher e
+  pinagem de revisão; total dirigido: `266 passed`;
+- validação final exige deploy e nova sessão limpa reproduzindo
+  `machine -> SMS`; rollback é reversão de código e restart, sem migration.

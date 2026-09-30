@@ -587,7 +587,7 @@ def _parse_cycle_response(
         ready_at = _required_iso_datetime(data["ready_at"], "ready_at")
         callback_token = str(data["callback_token"] or "").strip()
         accepted_states = (
-            {"ready", "deferred", "terminal"}
+            {"ready", "pending", "deferred", "terminal"}
             if replayed is True
             else {"ready"}
         )
