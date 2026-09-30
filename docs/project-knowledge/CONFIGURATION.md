@@ -197,6 +197,14 @@ Detalhes e gates: `docs/project-knowledge/METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
   V1, marker-only ou o Gate 1. Não rotacionar/remover a chave enquanto houver
   dispatches pendentes de callback; primeiro fechar a origem, aguardar o drain
   e somente então trocar a chave nos dois serviços.
+- A ativação operacional completa não termina nas variáveis do ORCH. O Target
+  Core `.239/.249` exige, em seu próprio `/etc/gohp/target-core/.env`,
+  `CONTACT_SUPPLIER_CHANNEL_DISPATCH_V2_ENABLED`, allowlists de workspace/flow,
+  mapa de chaves, endpoints e timeout. Nos mesmos hosts, a API ORCH usa outro
+  arquivo, `/etc/gohp/orch/.env`, e precisa de paridade nas allowlists de
+  callback. WhatsApp não usa essas variáveis do outbox SMS/RCS. Matriz de
+  consumidores, reinícios e provas:
+  `docs/project-knowledge/SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md`.
 - `switch_bot_flow`: `SWITCH_BOT_FLOW_ENABLED`, `TARGET_CORE_API_BASE_URL`, `TARGET_CORE_API_BEARER_TOKEN`, `SWITCH_BOT_FLOW_HTTP_TIMEOUT_SECONDS`, `SWITCH_BOT_FLOW_MAX_ATTEMPTS`, `SWITCH_BOT_FLOW_RETRY_BACKOFF_SECONDS` e `CELERY_SWITCH_BOT_FLOW_QUEUE`. A flag e `false` por default e exige restart de API/worker.
 - LLM: `OTIMA_LLM_*`.
 

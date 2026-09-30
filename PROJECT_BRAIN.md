@@ -135,6 +135,15 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     para UTC. Offset explícito e timestamps SMS preservam os contratos
     anteriores.
     Consulte `METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
+37. Habilitar um flow no Supplier V2 exige gates independentes. Voz usa
+    `DIALER_SUPPLIER_V2_*` nos executores do `.237`; SMS/RCS exigem também
+    `CHANNEL_SUPPLIER_V2_*` no ORCH `.237`,
+    `CONTACT_SUPPLIER_CHANNEL_DISPATCH_V2_*` no Target Core `.239/.249` e
+    paridade de callback `CHANNEL_SUPPLIER_V2_*` nas APIs ORCH
+    `.237/.239/.249`. `.239/.249` possuem dois projetos e dois `.env`; alterar
+    um não configura o outro. WhatsApp permanece um caminho independente.
+    Consultar `SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` antes de ativar flow ou
+    workspace novo.
 
 ## O que e o ORCH
 
@@ -319,6 +328,9 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `docs/project-knowledge/MULTI_DIALER_EXECUTION_PLAN.md` — fonte única da verdade para N cards do novo Dialer por flow, com contratos, gates T1–H1, evidências, rollout fail-closed e retorno obrigatório ao flow completo.
 - `docs/project-knowledge/FLOW_SESSION_SCOPE_CONTRACT.md` — contrato normativo Person/Channel, seleção de canal, Dial Rule, validações 422 e ordem segura para retomar o canário multidialer e o flow completo.
 - `docs/project-knowledge/JOURNEY_TRACKING.md` — contrato read-only, privacidade, guardrails, UI, rollout e retorno ao flow completo do Rastreamento de Jornadas.
+- `docs/project-knowledge/SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` — matriz
+  canônica para habilitar Discador V2, SMS, RCS, callbacks e WhatsApp em novo
+  flow/workspace, com consumers, smokes e diagnóstico por sintoma.
 - `docs/project-knowledge/CONTACT_CHANNEL_MANAGEMENT.md` — contrato, normalização, idempotência, projeção primária legada, segurança, testes e sequência de homologação do card genérico de canais.
 - `docs/project-knowledge/ORCHESTRATION_REPORTING_PLAN.md` — fonte unica da verdade para a dashboard propria de jornadas. O ORCH persiste fatos estruturados por retencao configuravel de 1 a 30 dias, sem backfill, agrega um snapshot logico por workspace e o entrega por WebSocket proprio a UI de Gestao de Extensoes. Nao existe emissao por sessao/flow nem dependencia de SYNC/Metrics; Redis e apenas fan-out e PostgreSQL permanece fonte duravel. O PDIAL continua independente e o retorno ao canario/fluxo completo e obrigatorio.
 - `docs/project-knowledge/ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` — contrato historico `0.2.0` com Metrics/SYNC, superseded antes de receber writer ou publisher. Serve apenas como evidencia das decisoes anteriores e nao deve orientar runtime novo.
