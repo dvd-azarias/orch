@@ -34,6 +34,10 @@ from app.schemas.orch import (
     OrchMigrateAllResponse,
     OrchMigrateWorkspaceResponse,
     OrchResubmitRequest,
+    OrchRunnerBridgeBindRequest,
+    OrchRunnerBridgeBindResponse,
+    OrchRunnerBridgeTabulationRequest,
+    OrchRunnerBridgeTabulationResponse,
     OrchSessionListResponse,
     OrchSessionSummary,
     OrchSwitchBotFlowCallbackRequest,
@@ -92,6 +96,10 @@ from app.services.fileapp_tipo1_service import (
     resolve_monitored_folders,
 )
 from app.services.orch_trigger_service import m2_alarm_from_stopped_reason, process_single_payload
+from app.services.runner_orch_tabulation_bridge_service import (
+    bind_runner_session,
+    register_runner_tabulation,
+)
 from app.services.session_extractor import extract_session_fields
 from app.services.session_query_service import (
     get_session_by_uuid,
@@ -245,6 +253,62 @@ def _require_billing_admin(*, client_id: str | None, client_secret: str | None) 
     )
     if not allowed:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciais de billing inválidas.")
+
+
+def _require_runner_orch_bridge_client(
+    *, client_id: str | None, client_secret: str | None
+) -> None:
+    settings = get_settings()
+    expected_id = str(settings.runner_orch_bridge_client_id or "").strip()
+    expected_secret = str(settings.runner_orch_bridge_client_secret or "").strip()
+    provided_id = str(client_id or "").strip()
+    provided_secret = str(client_secret or "").strip()
+    allowed = bool(
+        expected_id
+        and expected_secret
+        and provided_id
+        and provided_secret
+        and secrets.compare_digest(provided_id, expected_id)
+        and secrets.compare_digest(provided_secret, expected_secret)
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciais inválidas para a ponte Runner/ORCH.",
+        )
+
+
+async def _enqueue_runner_bridge_resume(
+    *, workspace_uuid: str, flow_uuid: str, session_id: int
+) -> None:
+    settings = get_settings()
+    if not settings.celery_enabled:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: advance_session_task.apply_async(
+                    kwargs={
+                        "workspace_uuid": workspace_uuid,
+                        "flow_uuid": flow_uuid,
+                        "session_id": session_id,
+                    },
+                    queue=settings.celery_execute_queue,
+                    routing_key=settings.celery_execute_queue,
+                )
+            ),
+            timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception(
+            "runner bridge callback persisted but immediate resume enqueue failed",
+            extra={
+                "event": "orch.runner_bridge.resume_enqueue_failed",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+        )
 
 
 def _extract_switch_bot_flow_terminal_signal(payload: dict[str, Any]) -> dict[str, str] | None:
@@ -964,6 +1028,177 @@ async def trigger_orch_by_workspace(
         flow_uuid=flow_uuid,
         payload=payload,
         db_session=db_session,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/runner-bridge/bind",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchRunnerBridgeBindResponse,
+)
+async def bind_runner_session_to_orch(
+    workspace_uuid: UUID,
+    request: OrchRunnerBridgeBindRequest = Body(...),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchRunnerBridgeBindResponse:
+    _require_runner_orch_bridge_client(
+        client_id=x_client_id,
+        client_secret=x_client_secret,
+    )
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(
+        str(workspace_uuid)
+    )
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    tx_context = (
+        db_session.begin_nested()
+        if db_session.in_transaction()
+        else db_session.begin()
+    )
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        result = await bind_runner_session(
+            db_session,
+            runner_session_id=str(request.runner_session_id),
+            runner_flow_uuid=str(request.runner_flow_uuid),
+            provider_context_message_id=request.provider_context_message_id.strip(),
+        )
+    if result.status == "conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A correlação Runner/ORCH é ambígua ou divergente.",
+                "error_code": "runner_orch_bridge_bind_conflict",
+            },
+        )
+    if db_session.in_transaction():
+        await db_session.commit()
+    if (
+        result.resume_session_id is not None
+        and result.orch_flow_uuid is not None
+    ):
+        await _enqueue_runner_bridge_resume(
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=result.orch_flow_uuid,
+            session_id=result.resume_session_id,
+        )
+    logger.info(
+        "runner session correlation handled",
+        extra={
+            "event": "orch.runner_bridge.bind",
+            "workspace_uuid": safe_workspace_uuid,
+            "runner_session_id": result.runner_session_id,
+            "orch_session_id": result.orch_session_id,
+            "status": result.status,
+            "idempotent": result.idempotent,
+        },
+    )
+    return OrchRunnerBridgeBindResponse(
+        status=result.status,
+        accepted=result.accepted,
+        idempotent=result.idempotent,
+        runner_session_id=result.runner_session_id,
+        orch_session_id=result.orch_session_id,
+        orch_session_uuid=result.orch_session_uuid,
+        orch_flow_uuid=result.orch_flow_uuid,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/runner-bridge/tabulations",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchRunnerBridgeTabulationResponse,
+)
+async def relay_runner_tabulation_to_orch(
+    workspace_uuid: UUID,
+    request: OrchRunnerBridgeTabulationRequest = Body(...),
+    x_client_id: str | None = Header(default=None, alias="x-client-id"),
+    x_client_secret: str | None = Header(default=None, alias="x-client-secret"),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchRunnerBridgeTabulationResponse:
+    _require_runner_orch_bridge_client(
+        client_id=x_client_id,
+        client_secret=x_client_secret,
+    )
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(
+        str(workspace_uuid)
+    )
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+    callback_payload = {
+        "outcome": request.outcome.strip().lower(),
+        "disposition_code": request.disposition_code,
+        "disposition_category": request.disposition_category,
+        "disposition_description": request.disposition_description,
+        "reason": request.reason,
+        "conversation_id": request.conversation_id,
+        "occurred_at": (
+            request.occurred_at.isoformat() if request.occurred_at else None
+        ),
+        "additional_data": request.additional_data,
+        "source": "runner_v5_live",
+        "runner_session_id": str(request.runner_session_id),
+        "event_key": request.event_key,
+    }
+    tx_context = (
+        db_session.begin_nested()
+        if db_session.in_transaction()
+        else db_session.begin()
+    )
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        result = await register_runner_tabulation(
+            db_session,
+            runner_session_id=str(request.runner_session_id),
+            runner_flow_uuid=str(request.runner_flow_uuid),
+            event_key=request.event_key.strip(),
+            callback_payload=callback_payload,
+        )
+    if result.status == "conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A tabulação diverge de um evento já registrado.",
+                "error_code": "runner_orch_bridge_tabulation_conflict",
+            },
+        )
+    if db_session.in_transaction():
+        await db_session.commit()
+    if (
+        result.resume_required
+        and result.orch_session_id is not None
+        and result.orch_flow_uuid is not None
+    ):
+        await _enqueue_runner_bridge_resume(
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=result.orch_flow_uuid,
+            session_id=result.orch_session_id,
+        )
+    logger.info(
+        "runner tabulation bridge handled",
+        extra={
+            "event": "orch.runner_bridge.tabulation",
+            "workspace_uuid": safe_workspace_uuid,
+            "runner_session_id": result.runner_session_id,
+            "event_key": result.event_key,
+            "orch_session_id": result.orch_session_id,
+            "status": result.status,
+            "idempotent": result.idempotent,
+            "resume_required": result.resume_required,
+        },
+    )
+    return OrchRunnerBridgeTabulationResponse(
+        status=result.status,
+        accepted=result.accepted,
+        idempotent=result.idempotent,
+        runner_session_id=result.runner_session_id,
+        event_key=result.event_key,
+        orch_session_id=result.orch_session_id,
+        orch_session_uuid=result.orch_session_uuid,
+        orch_flow_uuid=result.orch_flow_uuid,
+        resume_required=result.resume_required,
     )
 
 
