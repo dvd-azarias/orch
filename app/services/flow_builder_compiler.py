@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict, deque
 from copy import deepcopy
 from typing import Any
@@ -10,6 +11,8 @@ from app.schemas.orch_flow_builder import (
     FlowBuilderIssue,
     FlowBuilderPlan,
     FlowBuilderPlanNode,
+    FlowBuilderPreview,
+    FlowBuilderPreviewNode,
 )
 
 
@@ -64,6 +67,97 @@ def _required_branch_keys(catalog_component: dict[str, Any]) -> set[str]:
     }
 
 
+def _catalog_parameter_specs(catalog_component: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = catalog_component.get("parameters")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict) and str(item.get("id") or "").strip()]
+
+
+def _option_identity(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("id", "value", "key_value", "uuid"):
+            if key in value:
+                return _option_identity(value[key])
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _effective_parameters(
+    node: FlowBuilderPlanNode,
+    catalog_component: dict[str, Any],
+) -> dict[str, Any]:
+    parameters = deepcopy(node.parameters)
+    for spec in _catalog_parameter_specs(catalog_component):
+        parameter_id = str(spec["id"]).strip()
+        if parameter_id not in parameters and spec.get("value") is not None:
+            parameters[parameter_id] = deepcopy(spec.get("value"))
+    return parameters
+
+
+def _validate_parameters(
+    *,
+    node: FlowBuilderPlanNode,
+    node_index: int,
+    catalog_component: dict[str, Any],
+    parameters: dict[str, Any],
+) -> list[FlowBuilderIssue]:
+    issues: list[FlowBuilderIssue] = []
+    for spec in _catalog_parameter_specs(catalog_component):
+        parameter_id = str(spec["id"]).strip()
+        path = f"nodes[{node_index}].parameters.{parameter_id}"
+        if bool(spec.get("required")) and parameter_id not in parameters:
+            issues.append(
+                _issue(
+                    "error",
+                    "required_parameter_missing",
+                    path,
+                    f"O card '{node.component_id}' exige o parâmetro '{parameter_id}'.",
+                )
+            )
+            continue
+        if parameter_id not in parameters:
+            continue
+        value = parameters.get(parameter_id)
+        if bool(spec.get("required")) and (
+            value is None or (isinstance(value, str) and not value.strip())
+        ):
+            issues.append(
+                _issue(
+                    "error",
+                    "required_parameter_empty",
+                    path,
+                    f"O parâmetro obrigatório '{parameter_id}' não pode ficar vazio.",
+                )
+            )
+            continue
+        options = spec.get("options")
+        if not isinstance(options, list) or not options or value is None:
+            continue
+        allowed = {_option_identity(option) for option in options}
+        selected = value if isinstance(value, list) else [value]
+        invalid = [
+            _option_identity(item)
+            for item in selected
+            if _option_identity(item) not in allowed
+        ]
+        if invalid:
+            issues.append(
+                _issue(
+                    "error",
+                    "parameter_option_not_allowed",
+                    path,
+                    f"O parâmetro '{parameter_id}' contém opção fora do catálogo.",
+                )
+            )
+    return issues
+
+
 def _layout_positions(plan: FlowBuilderPlan, ref_by_key: dict[str, str]) -> list[dict[str, Any]]:
     outgoing: dict[str, list[str]] = defaultdict(list)
     for edge in plan.edges:
@@ -106,6 +200,17 @@ def compile_orchestration_flow(
     issues: list[FlowBuilderIssue] = []
     catalog = _catalog_index(component_catalog)
     nodes_by_key: dict[str, FlowBuilderPlanNode] = {}
+    effective_parameters_by_key: dict[str, dict[str, Any]] = {}
+
+    if len(plan.name) > 40:
+        issues.append(
+            _issue(
+                "error",
+                "flow_name_too_long",
+                "name",
+                "O nome do fluxo deve ter no máximo 40 caracteres.",
+            )
+        )
 
     for index, node in enumerate(plan.nodes):
         if node.key in nodes_by_key:
@@ -123,6 +228,17 @@ def compile_orchestration_flow(
                     f"O componente '{node.component_id}' não está disponível no catálogo deste workspace.",
                 )
             )
+            continue
+        effective_parameters = _effective_parameters(node, catalog[node.component_id])
+        effective_parameters_by_key[node.key] = effective_parameters
+        issues.extend(
+            _validate_parameters(
+                node=node,
+                node_index=index,
+                catalog_component=catalog[node.component_id],
+                parameters=effective_parameters,
+            )
+        )
 
     if plan.trigger_key not in nodes_by_key:
         issues.append(
@@ -200,7 +316,7 @@ def compile_orchestration_flow(
     ref_by_key = {node.key: _component_ref_id(plan.plan_id, node) for node in plan.nodes}
     components: list[dict[str, Any]] = []
     for node in plan.nodes:
-        parameters = deepcopy(node.parameters)
+        parameters = deepcopy(effective_parameters_by_key.get(node.key, node.parameters))
         stage_id = node.stage.value
         parameters["stage"] = {"id": stage_id, "name": _STAGE_LABELS[stage_id]}
         outgoing_branches = {edge.branch for _, edge in edges_by_source.get(node.key, [])}
@@ -253,3 +369,34 @@ def compile_orchestration_flow(
         },
     }
     return FlowBuilderCompilation(valid=True, definition=definition, issues=issues)
+
+
+def build_flow_builder_preview(
+    plan: FlowBuilderPlan,
+    *,
+    compilation: FlowBuilderCompilation,
+) -> FlowBuilderPreview:
+    outgoing: dict[str, list[str]] = defaultdict(list)
+    for edge in plan.edges:
+        outgoing[edge.source].append(edge.branch)
+    stages: dict[str, int] = defaultdict(int)
+    nodes: list[FlowBuilderPreviewNode] = []
+    for node in plan.nodes:
+        stages[node.stage.value] += 1
+        nodes.append(
+            FlowBuilderPreviewNode(
+                key=node.key,
+                component_id=node.component_id,
+                description=node.description,
+                stage=node.stage,
+                outgoing_branches=sorted(set(outgoing.get(node.key, []))),
+            )
+        )
+    return FlowBuilderPreview(
+        valid=compilation.valid,
+        node_count=len(plan.nodes),
+        edge_count=len(plan.edges),
+        stages=dict(stages),
+        nodes=nodes,
+        issues=compilation.issues,
+    )

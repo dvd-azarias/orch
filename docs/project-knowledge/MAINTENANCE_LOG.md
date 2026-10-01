@@ -2867,3 +2867,38 @@ superfície de control-plane isolada, sem alterar a execução das sessões.
   telefone nem mudança no callback genérico.
 - Migration, deploy e canário real ainda pendentes neste checkpoint. Consulte
   `RUNNER_ORCH_TABULATION_BRIDGE.md`.
+
+## 2026-10-01 — AI Flow Builder do ORCH — Gate 3 textual
+
+### CHANGE / SAFETY
+
+- Implementado planejador LLM com saída Pydantic, conversa guiada e compilação
+  determinística contra o catálogo real do workspace.
+- A criação no Target Core é explícita, draft-only e idempotente por slug e
+  `builder_session_id`; não foi criada rota de publicação.
+- O catálogo enviado ao modelo é reduzido e defaults/planos com nomes
+  sensíveis são redigidos. Logs registram somente resultado, sessão, status e
+  flow, nunca prompt ou credenciais.
+- A UI oficial recebeu conversa, prévia e confirmação de draft; o BFF aceita
+  somente quatro rotas exatas, valida Basic Auth, same-origin/CSRF e workspace,
+  e guarda a credencial dedicada no servidor.
+
+### EVIDENCE / PENDING
+
+- ORCH: `31 passed` nos testes rápidos dirigidos e `4 passed` em PostgreSQL
+  real com rollback.
+- UI: ESLint, TypeScript, build Vinext e smoke completo do BFF passaram. O smoke
+  prova também que `/publish` é recusado.
+- O smoke real estritamente sem escrita leu os 27 cards do catálogo HighComm,
+  obteve resposta estruturada do GPT-5 em 24,5 segundos e compilou em memória
+  um fluxo de dois cards com `valid=true`, zero pendências e zero chamadas de
+  criação/publicação. O planejador usa timeout próprio de 60 segundos; os cards
+  de IA existentes conservam o limite compartilhado anterior.
+- Quando o modelo fornece um `trigger_key` inexistente, o ORCH infere a entrada
+  somente se o grafo tiver uma única raiz inequívoca; com múltiplas raízes, a
+  validação continua falhando fechada.
+- Ainda pendem commits/PRs, merge, deploy desligado, ativação controlada no
+  HighComm, smoke visual e E2E real `texto -> preview -> draft -> canvas`.
+- Imagem, edição de flow existente, bot e rollout geral permanecem fora deste
+  gate. Depois dos gates previstos, retomar os canários de cards registrados no
+  plano.

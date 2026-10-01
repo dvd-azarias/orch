@@ -9,9 +9,12 @@ from app.core.database import get_session_factory
 from app.core.request_context import set_workspace_context
 from app.repositories.orch_flow_builder_repository import (
     FlowBuilderVersionConflictError,
+    apply_flow_builder_assistant_turn,
     append_flow_builder_message,
     create_flow_builder_session,
     fetch_flow_builder_session,
+    lock_flow_builder_session_for_draft,
+    store_flow_builder_draft_result,
     store_flow_builder_compilation,
 )
 from app.services.migration_service import _run_migration_file
@@ -94,5 +97,61 @@ async def test_flow_builder_repository_persists_order_and_rejects_stale_version(
                     compiled_definition=None,
                     issues=[],
                 )
+
+            await apply_flow_builder_assistant_turn(
+                db_session,
+                workspace_uuid=workspace_uuid,
+                session_id=session_id,
+                expected_version=3,
+                user_content="Inclua uma pergunta.",
+                assistant_content="Qual resultado deseja?",
+                assistant_payload={"planner_outcome": {"status": "needs_input"}},
+                plan={"name": "Cobrança parcial"},
+                compiled_definition=None,
+                issues=[{"severity": "warning", "code": "pending"}],
+            )
+            planning = await fetch_flow_builder_session(
+                db_session,
+                workspace_uuid=workspace_uuid,
+                session_id=session_id,
+            )
+            assert planning["version"] == 4
+            assert planning["status"] == "planning"
+            assert [message["sequence"] for message in planning["messages"]] == [1, 2, 3, 4]
+            assert planning["messages"][-1]["structured_payload"]["planner_outcome"]["status"] == (
+                "needs_input"
+            )
+
+            await store_flow_builder_compilation(
+                db_session,
+                workspace_uuid=workspace_uuid,
+                session_id=session_id,
+                expected_version=4,
+                plan={"name": "Cobrança final"},
+                compiled_definition={"mode": "orchestration"},
+                issues=[],
+            )
+            locked = await lock_flow_builder_session_for_draft(
+                db_session,
+                workspace_uuid=workspace_uuid,
+                session_id=session_id,
+            )
+            assert locked["version"] == 5
+            await store_flow_builder_draft_result(
+                db_session,
+                workspace_uuid=workspace_uuid,
+                session_id=session_id,
+                expected_version=5,
+                flow_uuid=str(uuid4()),
+                draft_checksum="c" * 64,
+            )
+            saved = await fetch_flow_builder_session(
+                db_session,
+                workspace_uuid=workspace_uuid,
+                session_id=session_id,
+            )
+            assert saved["status"] == "saved"
+            assert saved["version"] == 6
+            assert saved["draft_checksum"] == "c" * 64
         finally:
             await transaction.rollback()
