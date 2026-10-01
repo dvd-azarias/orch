@@ -249,3 +249,15 @@ Antes de investigar, alterar, implantar ou reverter essa UI, ler integralmente
 `docs/project-knowledge/DIALING_MANAGEMENT_UI_RUNBOOK.md`. A fonte oficial é o
 repositório privado `GOHP-LAB/target-extensions-ui`; nenhuma nova funcionalidade
 deve partir de `/private/tmp`, do servidor ou da working copy histórica.
+
+# Ponte Runner v5 → ORCH
+
+- Confirmar migration `0027` em todos os workspaces antes de permitir tráfego.
+- Correlacionar pelos campos `runner_session_id`, `event_key`,
+  `provider_context_message_id` e `orch_session_id`; nunca forçar vínculo por
+  telefone.
+- `pending_link` pode ser consistência eventual; `conflict` é fail-closed e
+  exige investigação. `ignored/orch_session_inactive` prova que a sessão não
+  foi revivida.
+- Em incidente, desligar o rollout no Target Core. Não truncar as tabelas de
+  receipts/links e não alterar o endpoint genérico de callback.

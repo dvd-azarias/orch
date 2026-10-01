@@ -53,6 +53,10 @@ MIGRATIONS: list[tuple[str, str]] = [
         "0026_create_orch_metrics_dispatch_snapshots",
         "sql/026_create_orch_metrics_dispatch_snapshots.sql",
     ),
+    (
+        "0027_create_runner_orch_tabulation_bridge",
+        "sql/027_create_runner_orch_tabulation_bridge.sql",
+    ),
 ]
 
 

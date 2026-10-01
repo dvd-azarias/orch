@@ -216,3 +216,13 @@ Detalhes e gates: `docs/project-knowledge/METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
 ## Configuracao efetiva
 
 `UNKNOWN`: valores e overrides de producao, secrets manager, flags de beats, profiles e filas instaladas.
+
+# Ponte Runner v5 → ORCH
+
+- `RUNNER_ORCH_BRIDGE_CLIENT_ID` e `RUNNER_ORCH_BRIDGE_CLIENT_SECRET` formam o
+  par interno dedicado dos endpoints `/runner-bridge/*`. Ambos são
+  obrigatórios; ausência mantém o acesso fail-closed com `401`.
+- O ORCH não contém allowlist de workspace para esta ponte. A autoridade de
+  rollout é o Target Core (`off|allowlist|all`), evitando duas fontes de
+  verdade divergentes.
+- Consulte `RUNNER_ORCH_TABULATION_BRIDGE.md` antes de ativar o canário.

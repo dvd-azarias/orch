@@ -2819,3 +2819,15 @@ alterados.
 - O procedimento reutilizável foi consolidado em
   `SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` para evitar redescoberta em novos
   flows/workspaces.
+
+# 2026-10-01 — Receipt e correlação exata de tabulação Runner v5
+
+- Classificação: `ALPHA_FIX_REQUIRED`.
+- Adicionados endpoints internos autenticados, vínculo durável pela mensagem
+  do provider e receipt idempotente por sessão Runner/evento.
+- Evento antes do vínculo permanece pendente; sessão encerrada é ignorada; o
+  `wait_for_event(callback/tabulation)` só acorda na sessão exata.
+- Advisory lock comum remove a corrida entre bind e tabulação. Não há busca por
+  telefone nem mudança no callback genérico.
+- Migration, deploy e canário real ainda pendentes neste checkpoint. Consulte
+  `RUNNER_ORCH_TABULATION_BRIDGE.md`.
