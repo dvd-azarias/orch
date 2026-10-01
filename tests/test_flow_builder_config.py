@@ -26,8 +26,13 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ORCH_FLOW_BUILDER_CLIENT_SECRET",
         "ORCH_FLOW_BUILDER_WORKSPACE_ALLOWLIST",
         "ORCH_FLOW_BUILDER_TARGET_TIMEOUT_SECONDS",
+        "ORCH_FLOW_BUILDER_LLM_MODEL",
+        "ORCH_FLOW_BUILDER_LLM_TIMEOUT_SECONDS",
         "TARGET_CORE_API_BASE_URL",
         "TARGET_CORE_API_BEARER_TOKEN",
+        "OTIMA_LLM_API_BASE_URL",
+        "OTIMA_LLM_API_GATEWAY",
+        "OTIMA_LLM_API_KEY",
         "SYNC_WEBHOOK_BASE_URL",
         "SYNC_WEBHOOK_BEARER_TOKEN",
     ):
@@ -43,6 +48,8 @@ def test_flow_builder_is_fail_closed_by_default(monkeypatch: pytest.MonkeyPatch)
     assert settings.orch_flow_builder_client_id is None
     assert settings.orch_flow_builder_client_secret is None
     assert settings.orch_flow_builder_target_timeout_seconds == 10.0
+    assert settings.orch_flow_builder_llm_model == "gpt-5"
+    assert settings.orch_flow_builder_llm_timeout_seconds == 60.0
     config.get_settings.cache_clear()
 
 
@@ -67,6 +74,12 @@ def test_flow_builder_requires_allowlist_credentials_and_target(
         config.get_settings()
     config.get_settings.cache_clear()
 
+    monkeypatch.setenv("TARGET_CORE_API_BASE_URL", "https://target.example.test")
+    monkeypatch.setenv("TARGET_CORE_API_BEARER_TOKEN", "target-secret")
+    with pytest.raises(ValueError, match="OTIMA_LLM_API_BASE_URL"):
+        config.get_settings()
+    config.get_settings.cache_clear()
+
 
 def test_flow_builder_accepts_complete_isolated_configuration(
     monkeypatch: pytest.MonkeyPatch,
@@ -78,8 +91,12 @@ def test_flow_builder_accepts_complete_isolated_configuration(
     monkeypatch.setenv("ORCH_FLOW_BUILDER_CLIENT_SECRET", "secret")
     monkeypatch.setenv("TARGET_CORE_API_BASE_URL", "https://target.example.test")
     monkeypatch.setenv("TARGET_CORE_API_BEARER_TOKEN", "target-secret")
+    monkeypatch.setenv("OTIMA_LLM_API_BASE_URL", "https://llm.example.test")
+    monkeypatch.setenv("OTIMA_LLM_API_KEY", "llm-secret")
 
     settings = config.get_settings()
     assert settings.orch_flow_builder_enabled is True
     assert settings.orch_flow_builder_workspace_allowlist == (WORKSPACE_UUID,)
+    assert settings.orch_flow_builder_llm_model == "gpt-5"
+    assert settings.orch_flow_builder_llm_timeout_seconds == 60.0
     config.get_settings.cache_clear()

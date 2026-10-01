@@ -156,6 +156,8 @@ class Settings:
     orch_flow_builder_client_secret: str | None
     orch_flow_builder_workspace_allowlist: tuple[str, ...]
     orch_flow_builder_target_timeout_seconds: float
+    orch_flow_builder_llm_model: str
+    orch_flow_builder_llm_timeout_seconds: float
     runner_orch_bridge_client_id: str | None
     runner_orch_bridge_client_secret: str | None
     celery_billing_queue: str
@@ -797,6 +799,15 @@ def get_settings() -> Settings:
             minimum=1.0,
             maximum=60.0,
         ),
+        orch_flow_builder_llm_model=(
+            _read_env_optional("ORCH_FLOW_BUILDER_LLM_MODEL", "gpt-5") or "gpt-5"
+        ),
+        orch_flow_builder_llm_timeout_seconds=_read_env_float_range(
+            "ORCH_FLOW_BUILDER_LLM_TIMEOUT_SECONDS",
+            60.0,
+            minimum=5.0,
+            maximum=120.0,
+        ),
         runner_orch_bridge_client_id=_read_env_optional(
             "RUNNER_ORCH_BRIDGE_CLIENT_ID"
         ),
@@ -1071,6 +1082,18 @@ def get_settings() -> Settings:
             raise ValueError(
                 "TARGET_CORE_API_BASE_URL e TARGET_CORE_API_BEARER_TOKEN são "
                 "obrigatórias quando ORCH_FLOW_BUILDER_ENABLED=true."
+            )
+        if not str(settings.orch_flow_builder_llm_model or "").strip():
+            raise ValueError(
+                "ORCH_FLOW_BUILDER_LLM_MODEL é obrigatório quando "
+                "ORCH_FLOW_BUILDER_ENABLED=true."
+            )
+        if not str(
+            settings.otima_llm_api_gateway or settings.otima_llm_api_base_url or ""
+        ).strip() or not str(settings.otima_llm_api_key or "").strip():
+            raise ValueError(
+                "OTIMA_LLM_API_BASE_URL/OTIMA_LLM_API_GATEWAY e OTIMA_LLM_API_KEY "
+                "são obrigatórias quando ORCH_FLOW_BUILDER_ENABLED=true."
             )
     if settings.orch_billing_enabled and not settings.billing_rabbitmq_url:
         raise ValueError("BILLING_RABBITMQ_URL é obrigatória quando ORCH_BILLING_ENABLED=true.")

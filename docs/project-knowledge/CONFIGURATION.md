@@ -112,12 +112,20 @@ Defaults importantes:
 - `ORCH_FLOW_BUILDER_CLIENT_ID` e `ORCH_FLOW_BUILDER_CLIENT_SECRET`:
   credencial dedicada ao BFF; não reutilizar bearer do usuário ou do Target.
 - `ORCH_FLOW_BUILDER_TARGET_TIMEOUT_SECONDS=10`: timeout da leitura do catálogo
-  e, em gates posteriores, da persistência de draft pelo Target Core.
+  e da persistência de draft pelo Target Core.
+- `ORCH_FLOW_BUILDER_LLM_MODEL=gpt-5`: modelo usado pelo planejador
+  estruturado.
+- `ORCH_FLOW_BUILDER_LLM_TIMEOUT_SECONDS=60`: timeout exclusivo do planejador;
+  não altera o limite compartilhado pelos cards de IA existentes. Com o gate
+  ativo, também são obrigatórios
+  `OTIMA_LLM_API_KEY` e um entre `OTIMA_LLM_API_GATEWAY`/
+  `OTIMA_LLM_API_BASE_URL`.
 - `TARGET_CORE_API_BASE_URL` e `TARGET_CORE_API_BEARER_TOKEN`: integração
   server-to-server já existente, obrigatória quando o builder estiver ativo.
 
-O gate inicial expõe somente sessão, mensagens e compilação de
-`mode=orchestration`; não publica flows. Contrato e rollout:
+O Builder expõe sessão, assistência estruturada, compilação e criação explícita
+de rascunho de `mode=orchestration`; não possui endpoint de publicação. Contrato
+e rollout:
 `docs/project-knowledge/ORCH_AI_FLOW_BUILDER_PLAN.md`.
 
 ### Eventos de orquestracao para a Metrics API

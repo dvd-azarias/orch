@@ -3,7 +3,10 @@ from __future__ import annotations
 from uuid import UUID
 
 from app.schemas.orch_flow_builder import FlowBuilderPlan
-from app.services.flow_builder_compiler import compile_orchestration_flow
+from app.services.flow_builder_compiler import (
+    build_flow_builder_preview,
+    compile_orchestration_flow,
+)
 
 
 CATALOG = [
@@ -120,3 +123,107 @@ def test_compiler_accepts_condition_dynamic_branch_and_rejects_unknown_one() -> 
 
     assert rejected.valid is False
     assert any(issue.code == "branch_not_declared" for issue in rejected.issues)
+
+
+def test_compiler_applies_catalog_defaults_and_rejects_missing_dynamic_id() -> None:
+    catalog = [
+        {
+            "id": "set_variables",
+            "next_task_allowed": ["finish_flow"],
+            "parameters": [
+                {
+                    "id": "mode",
+                    "required": True,
+                    "value": "safe",
+                    "options": [{"id": "safe", "name": "Seguro"}],
+                },
+                {
+                    "id": "queue_id",
+                    "required": True,
+                    "value": None,
+                    "external_request_url": "/queues",
+                },
+            ],
+            "branches": [{"key_value": "proximo", "required": False}],
+        },
+        CATALOG[2],
+    ]
+    original = _plan()
+    plan = FlowBuilderPlan.model_validate(
+        {
+            **original.model_dump(mode="python"),
+            "nodes": [original.nodes[0].model_dump(), original.nodes[2].model_dump()],
+            "edges": [{"source": "entrada", "target": "fim", "branch": "proximo"}],
+        }
+    )
+
+    missing = compile_orchestration_flow(plan, component_catalog=catalog)
+    assert missing.valid is False
+    assert any(issue.code == "required_parameter_missing" for issue in missing.issues)
+
+    plan.nodes[0].parameters["queue_id"] = "queue-real"
+    compiled = compile_orchestration_flow(plan, component_catalog=catalog)
+    assert compiled.valid is True
+    definition = compiled.definition or {}
+    assert definition["components"][0]["parameters"]["mode"] == "safe"
+
+
+def test_compiler_rejects_static_option_outside_catalog() -> None:
+    plan = _plan().model_copy(deep=True)
+    plan.nodes[2].parameters["result"] = "invented"
+    catalog = [
+        CATALOG[0],
+        CATALOG[1],
+        {
+            **CATALOG[2],
+            "parameters": [
+                {
+                    "id": "result",
+                    "required": True,
+                    "options": [{"id": "success", "name": "Success"}],
+                }
+            ],
+        },
+    ]
+
+    compiled = compile_orchestration_flow(plan, component_catalog=catalog)
+
+    assert compiled.valid is False
+    assert any(issue.code == "parameter_option_not_allowed" for issue in compiled.issues)
+
+
+def test_compiler_compares_structured_options_without_unhashable_values() -> None:
+    plan = _plan().model_copy(deep=True)
+    plan.nodes[0].parameters["display"] = {"label": "Seguro", "nested": ["a", "b"]}
+    catalog = [
+        {
+            **CATALOG[0],
+            "parameters": [
+                {
+                    "id": "display",
+                    "required": True,
+                    "options": [{"label": "Seguro", "nested": ["a", "b"]}],
+                }
+            ],
+        },
+        CATALOG[1],
+        CATALOG[2],
+    ]
+
+    compiled = compile_orchestration_flow(plan, component_catalog=catalog)
+
+    assert compiled.valid is True
+
+
+def test_preview_summarizes_stages_and_pending_issues() -> None:
+    plan = _plan().model_copy(deep=True)
+    plan.name = "N" * 41
+    compilation = compile_orchestration_flow(plan, component_catalog=CATALOG)
+
+    preview = build_flow_builder_preview(plan, compilation=compilation)
+
+    assert preview.valid is False
+    assert preview.node_count == 3
+    assert preview.edge_count == 2
+    assert preview.stages == {"entrada": 1, "decisao": 1, "desfecho": 1}
+    assert any(issue.code == "flow_name_too_long" for issue in preview.issues)

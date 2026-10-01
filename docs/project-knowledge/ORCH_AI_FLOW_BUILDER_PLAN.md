@@ -63,7 +63,7 @@ Target Extensions UI
 - [x] inspeção da UI atual e do catálogo real do HighComm;
 - [x] `FlowPlan` separado da `definition` legada.
 
-### Gate 2 — Fundação segura no ORCH — CONCLUÍDO NO BRANCH, PR/DEPLOY PENDENTES
+### Gate 2 — Fundação segura no ORCH — MERGE CONCLUÍDO, DEPLOY PENDENTE
 
 - [x] migration workspace-local para sessões e mensagens;
 - [x] autenticação dedicada, feature flag e allowlist fail-closed;
@@ -74,20 +74,29 @@ Target Extensions UI
 - [x] cliente read-only do catálogo Target Core;
 - [x] testes unitários e PostgreSQL real com rollback;
 - [x] catálogo real HighComm (27 cards) e compilação em memória sem escrita;
-- [ ] revisão/merge;
+- [x] revisão/merge (`PR #226`, merge `5fdf592`);
 - [ ] migration e smoke controlados no HighComm.
 
-### Gate 3 — MVP de criação por texto — PENDENTE
+### Gate 3 — MVP de criação por texto — IMPLEMENTADO, E2E/DEPLOY PENDENTES
 
-- [ ] planejador LLM com saída estritamente validada como `FlowPlan`;
-- [ ] conversa guiada para lacunas de configuração, sem adivinhar IDs;
-- [ ] preview estrutural e lista de pendências;
-- [ ] botão explícito **Criar rascunho**;
-- [ ] criação idempotente via Target Core e armazenamento de `flow_uuid`/
+- [x] planejador LLM com saída estritamente validada como `FlowPlan`;
+- [x] conversa guiada para lacunas de configuração, sem adivinhar IDs;
+- [x] preview estrutural e lista de pendências;
+- [x] botão explícito **Criar rascunho**;
+- [x] criação idempotente via Target Core e armazenamento de `flow_uuid`/
   checksum;
-- [ ] entrada **Criar fluxo com IA** na seção Orquestração da UI;
-- [ ] abrir o draft criado no canvas legado;
+- [x] entrada **Criar fluxo com IA** na seção Orquestração da UI;
+- [x] encaminhamento para o editor legado após a criação do draft;
+- [x] BFF restrito, same-origin, com credencial dedicada e nenhuma rota de
+  publicação;
+- [x] defaults sensíveis do catálogo removidos antes do prompt do planejador;
+- [x] smoke real sem escrita com catálogo HighComm + GPT-5 + compilação válida;
 - [ ] E2E texto -> conversa -> preview -> draft -> canvas.
+
+O código deste gate permanece desligado por padrão. Testes locais confirmam o
+contrato, o compilador, persistência PostgreSQL, build da UI, isolamento do BFF
+e o caminho real catálogo/LLM/compilador sem escrita; isso não substitui o E2E
+com persistência explícita de draft no Target Core do HighComm.
 
 ### Gate 4 — Entrada por imagem — PENDENTE
 

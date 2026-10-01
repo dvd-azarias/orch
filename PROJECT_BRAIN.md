@@ -150,6 +150,18 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     um não configura o outro. WhatsApp permanece um caminho independente.
     Consultar `SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` antes de ativar flow ou
     workspace novo.
+38. O AI Flow Builder pertence ao ORCH e cria somente rascunhos
+    `mode=orchestration`. A UI oficial usa um BFF same-origin com credencial
+    dedicada; conversa e `FlowPlan` ficam no schema do workspace; o compilador
+    determinístico é o único produtor da definition; catálogo, validação final
+    e persistência continuam no Target Core. Slug e metadata correlacionam o
+    draft idempotentemente à sessão do Builder. Não existe endpoint de publish,
+    o gate é desligado por padrão e restrito por allowlist. Defaults sensíveis
+    do catálogo não entram no prompt. O planejador tem timeout próprio de 60
+    segundos, sem alongar os cards de IA existentes; entrada inválida só é
+    inferida quando o grafo possui uma única raiz inequívoca. O smoke real sem
+    escrita confirmou 27 cards HighComm, GPT-5 e compilação válida. Consulte
+    `ORCH_AI_FLOW_BUILDER_CONTRACT.md` e `ORCH_AI_FLOW_BUILDER_PLAN.md`.
 
 ## O que e o ORCH
 

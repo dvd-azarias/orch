@@ -112,11 +112,16 @@ def execute_otima_llm_prompt(
     user_prompt: str,
     workspace_uuid: str | None,
     workspace_api_key: str | None,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     base_url = (settings.otima_llm_api_gateway or settings.otima_llm_api_base_url or "").strip().rstrip("/")
     global_api_key = (settings.otima_llm_api_key or "").strip()
-    timeout_seconds = float(settings.otima_llm_api_timeout_seconds or 10.0)
+    resolved_timeout_seconds = float(
+        timeout_seconds
+        if timeout_seconds is not None
+        else settings.otima_llm_api_timeout_seconds or 10.0
+    )
     if not base_url:
         raise RuntimeError("OTIMA_LLM_API_BASE_URL/OTIMA_LLM_API_GATEWAY não configurado.")
     if not global_api_key:
@@ -137,29 +142,32 @@ def execute_otima_llm_prompt(
     last_error: str | None = None
     for url in urls:
         is_responses = url.endswith("/responses")
-        payload = (
-            {
+        if is_responses:
+            payload = {
                 "model": model,
                 "input": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             }
-            if is_responses
-            else {
+        else:
+            payload = {
                 "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                "temperature": 0.2,
             }
-        )
+            # LiteLLM/OpenAI reject custom temperature for GPT-5. Omitting the
+            # field preserves the provider default and keeps older models on
+            # the established deterministic setting.
+            if not model.strip().lower().startswith("gpt-5"):
+                payload["temperature"] = 0.2
         status_code, response_json = _http_json_request(
             url=url,
             payload=payload,
             headers=headers,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=resolved_timeout_seconds,
         )
         if 200 <= status_code < 300:
             raw_text = _extract_content_from_response(response_json)
@@ -177,4 +185,3 @@ def execute_otima_llm_prompt(
         break
 
     raise RuntimeError(f"Falha na Otima LLM: {last_error or 'sem resposta válida'}")
-

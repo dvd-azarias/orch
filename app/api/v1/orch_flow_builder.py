@@ -8,30 +8,50 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_db_session
+from app.core.logging import get_logger
 from app.repositories.orch_flow_builder_repository import (
     FlowBuilderSessionNotFoundError,
     FlowBuilderVersionConflictError,
+    apply_flow_builder_assistant_turn,
     append_flow_builder_message,
     create_flow_builder_session,
     fetch_flow_builder_session,
+    lock_flow_builder_session_for_draft,
+    store_flow_builder_draft_result,
     store_flow_builder_compilation,
 )
+from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.schemas.orch_flow_builder import (
+    FlowBuilderAssistRequest,
+    FlowBuilderAssistResponse,
     FlowBuilderCompileRequest,
     FlowBuilderCompileResponse,
+    FlowBuilderDraftCreateRequest,
+    FlowBuilderDraftCreateResponse,
     FlowBuilderMessageCreateRequest,
+    FlowBuilderPlannerOutcome,
+    FlowBuilderPlannerQuestion,
     FlowBuilderSession,
     FlowBuilderSessionCreateRequest,
 )
-from app.services.flow_builder_compiler import compile_orchestration_flow
+from app.services.flow_builder_compiler import (
+    build_flow_builder_preview,
+    compile_orchestration_flow,
+)
+from app.services.flow_builder_planner import (
+    FlowBuilderPlannerError,
+    plan_flow_builder_turn,
+)
 from app.services.flow_builder_target_client import (
     FlowBuilderTargetError,
+    create_orchestration_draft,
     fetch_orchestration_catalog,
 )
 from app.services.workspace_service import bind_workspace_context, ensure_active_workspace
 
 
 router = APIRouter(prefix="/v1/orch", tags=["orch-flow-builder"])
+logger = get_logger(__name__)
 
 
 def require_flow_builder_client(
@@ -116,6 +136,16 @@ def _raise_repository_error(error: Exception) -> None:
 def _raise_target_error(error: FlowBuilderTargetError) -> None:
     if error.code in {"target_core_not_configured", "target_core_unreachable"}:
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif error.status_code in {400, 409, 422}:
+        http_status = error.status_code
+    else:
+        http_status = status.HTTP_502_BAD_GATEWAY
+    raise HTTPException(status_code=http_status, detail=error.message) from error
+
+
+def _raise_planner_error(error: FlowBuilderPlannerError) -> None:
+    if error.code == "planner_unavailable":
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
     else:
         http_status = status.HTTP_502_BAD_GATEWAY
     raise HTTPException(status_code=http_status, detail=error.message) from error
@@ -169,11 +199,6 @@ async def get_builder_session(
     session_id: UUID,
     db_session: AsyncSession = Depends(get_db_session),
 ) -> FlowBuilderSession:
-    if payload.attachment_metadata:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Anexos serão habilitados no gate específico de entrada por imagem.",
-        )
     safe_workspace_uuid = await _bind_builder_workspace(
         db_session,
         workspace_uuid=workspace_uuid,
@@ -201,6 +226,11 @@ async def append_builder_message(
     payload: FlowBuilderMessageCreateRequest,
     db_session: AsyncSession = Depends(get_db_session),
 ) -> FlowBuilderSession:
+    if payload.attachment_metadata:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Anexos serão habilitados no gate específico de entrada por imagem.",
+        )
     safe_workspace_uuid = await _bind_builder_workspace(
         db_session,
         workspace_uuid=workspace_uuid,
@@ -223,6 +253,157 @@ async def append_builder_message(
         _raise_repository_error(error)
         raise AssertionError("unreachable")
     return FlowBuilderSession.model_validate(record)
+
+
+@router.post(
+    "/{workspace_uuid}/flow-builder/sessions/{session_id}/assist",
+    response_model=FlowBuilderAssistResponse,
+    dependencies=[Depends(require_flow_builder_client)],
+)
+async def assist_builder_session(
+    workspace_uuid: UUID,
+    session_id: UUID,
+    payload: FlowBuilderAssistRequest,
+    actor: str = Header(..., alias="X-Orch-Flow-Builder-Actor", min_length=1, max_length=255),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> FlowBuilderAssistResponse:
+    safe_actor = _normalize_actor(actor)
+    safe_workspace_uuid = await _bind_builder_workspace(
+        db_session,
+        workspace_uuid=workspace_uuid,
+    )
+    try:
+        current = await fetch_flow_builder_session(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+        )
+    except Exception as error:
+        _raise_repository_error(error)
+        raise AssertionError("unreachable")
+    if int(current["version"]) != payload.expected_version:
+        _raise_repository_error(FlowBuilderVersionConflictError(str(session_id)))
+    if current.get("status") == "saved":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="O rascunho desta sessão já foi criado e não pode ser replanejado.",
+        )
+
+    workspace_api_key = await fetch_workspace_otima_billing_api_key(
+        db_session,
+        workspace_uuid=safe_workspace_uuid,
+    )
+    await db_session.commit()
+    settings = get_settings()
+    try:
+        catalog = await fetch_orchestration_catalog(
+            workspace_uuid=safe_workspace_uuid,
+            actor=safe_actor,
+        )
+        outcome = await plan_flow_builder_turn(
+            session_id=session_id,
+            messages=current.get("messages") or [],
+            new_content=payload.content,
+            current_plan=current.get("plan") or {},
+            component_catalog=catalog,
+            model=settings.orch_flow_builder_llm_model,
+            workspace_uuid=safe_workspace_uuid,
+            workspace_api_key=workspace_api_key,
+            timeout_seconds=settings.orch_flow_builder_llm_timeout_seconds,
+        )
+    except FlowBuilderTargetError as error:
+        logger.warning(
+            "Flow Builder não conseguiu carregar o catálogo do Target Core",
+            extra={
+                "event": "flow_builder_catalog_failed",
+                "session_id": str(session_id),
+                "status_code": error.status_code,
+            },
+        )
+        _raise_target_error(error)
+        raise AssertionError("unreachable")
+    except FlowBuilderPlannerError as error:
+        logger.warning(
+            "Flow Builder recebeu falha segura do planejador: %s",
+            error.code,
+            extra={
+                "event": "flow_builder_planner_failed",
+                "session_id": str(session_id),
+            },
+        )
+        _raise_planner_error(error)
+        raise AssertionError("unreachable")
+
+    compilation = None
+    preview = None
+    plan_payload = current.get("plan") or {}
+    issues: list[dict] = []
+    if outcome.plan is not None:
+        compilation = compile_orchestration_flow(outcome.plan, component_catalog=catalog)
+        preview = build_flow_builder_preview(outcome.plan, compilation=compilation)
+        plan_payload = outcome.plan.model_dump(mode="json")
+        issues = [issue.model_dump(mode="json") for issue in compilation.issues]
+        if not compilation.valid:
+            error_issues = [issue for issue in compilation.issues if issue.severity == "error"]
+            outcome = FlowBuilderPlannerOutcome(
+                status="needs_input",
+                assistant_message=(
+                    "Encontrei pendências de configuração antes de liberar a prévia. "
+                    "Revise os pontos indicados."
+                ),
+                questions=[
+                    FlowBuilderPlannerQuestion(
+                        key=f"validation_{index + 1}",
+                        question=issue.message,
+                        parameter_path=issue.path,
+                    )
+                    for index, issue in enumerate(error_issues[:10])
+                ],
+                assumptions=outcome.assumptions,
+                plan=outcome.plan,
+            )
+
+    compiled_definition = (
+        compilation.definition
+        if outcome.status == "preview_ready" and compilation is not None and compilation.valid
+        else None
+    )
+    assistant_payload = outcome.model_dump(mode="json", exclude={"plan"})
+    try:
+        await apply_flow_builder_assistant_turn(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+            expected_version=payload.expected_version,
+            user_content=payload.content,
+            assistant_content=outcome.assistant_message,
+            assistant_payload={"planner_outcome": assistant_payload},
+            plan=plan_payload,
+            compiled_definition=compiled_definition,
+            issues=issues,
+        )
+        record = await fetch_flow_builder_session(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+        )
+    except Exception as error:
+        _raise_repository_error(error)
+        raise AssertionError("unreachable")
+    logger.info(
+        "Turno do Flow Builder persistido com status %s",
+        outcome.status,
+        extra={
+            "event": "flow_builder_assist_completed",
+            "session_id": str(session_id),
+        },
+    )
+    return FlowBuilderAssistResponse(
+        session=FlowBuilderSession.model_validate(record),
+        outcome=outcome,
+        compilation=compilation,
+        preview=preview,
+    )
 
 
 @router.post(
@@ -289,3 +470,114 @@ async def compile_builder_session(
         session=FlowBuilderSession.model_validate(record),
         compilation=compilation,
     )
+
+
+@router.post(
+    "/{workspace_uuid}/flow-builder/sessions/{session_id}/draft",
+    status_code=status.HTTP_201_CREATED,
+    response_model=FlowBuilderDraftCreateResponse,
+    dependencies=[Depends(require_flow_builder_client)],
+)
+async def create_builder_draft(
+    workspace_uuid: UUID,
+    session_id: UUID,
+    payload: FlowBuilderDraftCreateRequest,
+    actor: str = Header(..., alias="X-Orch-Flow-Builder-Actor", min_length=1, max_length=255),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> FlowBuilderDraftCreateResponse:
+    safe_actor = _normalize_actor(actor)
+    safe_workspace_uuid = await _bind_builder_workspace(
+        db_session,
+        workspace_uuid=workspace_uuid,
+    )
+    try:
+        locked = await lock_flow_builder_session_for_draft(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+        )
+    except Exception as error:
+        _raise_repository_error(error)
+        raise AssertionError("unreachable")
+
+    existing_flow_uuid = locked.get("flow_uuid")
+    existing_checksum = str(locked.get("draft_checksum") or "").strip()
+    if existing_flow_uuid is not None and existing_checksum:
+        record = await fetch_flow_builder_session(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+        )
+        response = FlowBuilderDraftCreateResponse(
+            session=FlowBuilderSession.model_validate(record),
+            flow_uuid=existing_flow_uuid,
+            draft_checksum=existing_checksum,
+            already_created=True,
+        )
+        logger.info(
+            "Rascunho idempotente do Flow Builder já existia",
+            extra={
+                "event": "flow_builder_draft_reused",
+                "session_id": str(session_id),
+                "flow_uuid": str(existing_flow_uuid),
+            },
+        )
+        return response
+    if int(locked["version"]) != payload.expected_version:
+        _raise_repository_error(FlowBuilderVersionConflictError(str(session_id)))
+    definition = locked.get("compiled_definition")
+    if locked.get("status") != "ready" or not isinstance(definition, dict):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A conversa ainda possui pendências; gere uma prévia válida antes do rascunho.",
+        )
+
+    try:
+        target_draft = await create_orchestration_draft(
+            workspace_uuid=safe_workspace_uuid,
+            actor=safe_actor,
+            builder_session_id=str(session_id),
+            definition=definition,
+        )
+        await store_flow_builder_draft_result(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+            expected_version=payload.expected_version,
+            flow_uuid=str(target_draft.flow_uuid),
+            draft_checksum=target_draft.draft_checksum,
+        )
+        record = await fetch_flow_builder_session(
+            db_session,
+            workspace_uuid=safe_workspace_uuid,
+            session_id=str(session_id),
+        )
+    except FlowBuilderTargetError as error:
+        logger.warning(
+            "Flow Builder não conseguiu criar rascunho no Target Core",
+            extra={
+                "event": "flow_builder_draft_failed",
+                "session_id": str(session_id),
+                "status_code": error.status_code,
+            },
+        )
+        _raise_target_error(error)
+        raise AssertionError("unreachable")
+    except Exception as error:
+        _raise_repository_error(error)
+        raise AssertionError("unreachable")
+    response = FlowBuilderDraftCreateResponse(
+        session=FlowBuilderSession.model_validate(record),
+        flow_uuid=target_draft.flow_uuid,
+        draft_checksum=target_draft.draft_checksum,
+        already_created=False,
+    )
+    logger.info(
+        "Rascunho do Flow Builder criado no Target Core",
+        extra={
+            "event": "flow_builder_draft_created",
+            "session_id": str(session_id),
+            "flow_uuid": str(target_draft.flow_uuid),
+        },
+    )
+    return response
