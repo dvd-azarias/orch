@@ -267,6 +267,13 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 
 - O envelope real de `identidade_person` usa formatos mistos da UI (string, objeto `{id, name}` e lista de checkbox); a engine os normaliza. As queries de pessoa/draft/lista foram executadas no PostgreSQL do workspace de teste dentro de transação revertida, com zero resíduos após rollback. O canário real `2dd62260-3519-45dd-9275-ad0c56359b84`, em `lookup_only`, consultou a Identidade.io uma vez, terminou em `state=3` e não criou pessoa, draft, canal ou vínculo.
 
+- O AI Flow Builder de orquestração é uma superfície de control-plane isolada
+  do runtime: a UI conversa com o ORCH, o ORCH mantém sessão/`FlowPlan` e compila
+  deterministicamente, e o Target Core permanece autoridade do catálogo,
+  validação e persistência `v2/flow`. O Gate 2 é fail-closed, workspace-local e
+  não possui publish. Consultar `ORCH_AI_FLOW_BUILDER_PLAN.md` antes de evoluir
+  a criação por texto, imagem ou edição.
+
 - Estrutura, entrypoints, rotas, tasks, filas, profiles, migrations e componentes foram rastreados no codigo.
 - A suite foi executada fora da sandbox: 295 coletados, 270 passaram, 25 falharam primeiro pela assinatura stale da rota legada; sucesso posterior desses casos nao foi comprovado.
 - A unit systemd FileApp versionada nao consome a fila de associacao.
@@ -335,3 +342,6 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
 - `docs/project-knowledge/ORCHESTRATION_REPORTING_PLAN.md` — fonte unica da verdade para a dashboard propria de jornadas. O ORCH persiste fatos estruturados por retencao configuravel de 1 a 30 dias, sem backfill, agrega um snapshot logico por workspace e o entrega por WebSocket proprio a UI de Gestao de Extensoes. Nao existe emissao por sessao/flow nem dependencia de SYNC/Metrics; Redis e apenas fan-out e PostgreSQL permanece fonte duravel. O PDIAL continua independente e o retorno ao canario/fluxo completo e obrigatorio.
 - `docs/project-knowledge/ORCHESTRATION_JOURNEY_METRICS_WS_CONTRACT.md` — contrato historico `0.2.0` com Metrics/SYNC, superseded antes de receber writer ou publisher. Serve apenas como evidencia das decisoes anteriores e nao deve orientar runtime novo.
 - `docs/project-knowledge/ORCHESTRATION_WORKSPACE_WS_CONTRACT.md` — contrato vigente `1.0` do snapshot unico por workspace, ticket curto, BFF same-origin, sala propria, sequencia, reconexao, fan-out entre replicas e consumo pela nossa UI. O broadcast automatico e compacto; filtros detalhados usam request/response no mesmo socket.
+- `docs/project-knowledge/ORCH_AI_FLOW_BUILDER_PLAN.md` — arquitetura, invariantes,
+  checklist dos gates e retorno obrigatório aos canários para o gerador de
+  flows `mode=orchestration` pertencente ao ORCH.

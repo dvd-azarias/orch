@@ -104,6 +104,22 @@ Defaults importantes:
 
 ## Integracoes
 
+### ORCH AI Flow Builder
+
+- `ORCH_FLOW_BUILDER_ENABLED=false`: gate global, desligado por padrão.
+- `ORCH_FLOW_BUILDER_WORKSPACE_ALLOWLIST`: UUIDs explicitamente autorizados;
+  vazio falha fechado quando o gate está ativo.
+- `ORCH_FLOW_BUILDER_CLIENT_ID` e `ORCH_FLOW_BUILDER_CLIENT_SECRET`:
+  credencial dedicada ao BFF; não reutilizar bearer do usuário ou do Target.
+- `ORCH_FLOW_BUILDER_TARGET_TIMEOUT_SECONDS=10`: timeout da leitura do catálogo
+  e, em gates posteriores, da persistência de draft pelo Target Core.
+- `TARGET_CORE_API_BASE_URL` e `TARGET_CORE_API_BEARER_TOKEN`: integração
+  server-to-server já existente, obrigatória quando o builder estiver ativo.
+
+O gate inicial expõe somente sessão, mensagens e compilação de
+`mode=orchestration`; não publica flows. Contrato e rollout:
+`docs/project-knowledge/ORCH_AI_FLOW_BUILDER_PLAN.md`.
+
 ### Eventos de orquestracao para a Metrics API
 
 - `ORCH_METRICS_EVENTS_ENABLED=false`: gate global, desligado por padrao.
