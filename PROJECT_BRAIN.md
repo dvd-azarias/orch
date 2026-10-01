@@ -10,6 +10,12 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
 
 ## READ THIS BEFORE CHANGING ANYTHING
 
+- Tabulações Live recebidas pelo Runner v5 usam uma ponte interna dedicada para
+  a sessão ORCH exata, correlacionada pelo provider message id. Nunca adicionar
+  fallback apenas por telefone nem uma segunda allowlist no ORCH. A migration
+  `0027`, os endpoints e o rollout estão documentados em
+  `docs/project-knowledge/RUNNER_ORCH_TABULATION_BRIDGE.md`.
+
 1. Este repositorio e um Alpha em producao. A regra e `STABILITY OVER ELEGANCE` e a mudanca padrao e `MINIMUM SAFE CHANGE`.
 2. A rota canonica e `POST /v1/orch/{workspace_uuid}/{flow_uuid}`. O `workspace_uuid` seleciona o schema `ws_<uuid>` e deve estar ativo/completo.
 3. Nao misture stack manual e `launchd`. Em DEV, use `scripts/dev_phase_stack.sh`. Em producao, o host canonico e `10.1.20.237`, com runtime em `/etc/gohp/orch` e 21 units systemd escaladas; acesso, credencial e inventario ficam em `PROJECT_STEWARD.md`. Os templates genericos de `systemctl/` nao representam literalmente essa instalacao.

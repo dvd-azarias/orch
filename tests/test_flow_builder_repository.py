@@ -32,7 +32,7 @@ async def test_flow_builder_repository_persists_order_and_rejects_stale_version(
             await _run_migration_file(
                 db_session,
                 schema=schema,
-                migration_path="sql/027_create_orch_flow_builder_tables.sql",
+                migration_path="sql/028_create_orch_flow_builder_tables.sql",
             )
             created = await create_flow_builder_session(
                 db_session,

@@ -2835,7 +2835,7 @@ superfície de control-plane isolada, sem alterar a execução das sessões.
 - ORCH mantém conversa, plano e compilação; a UI é cliente e o Target Core
   continua sendo catálogo, validator e persistence boundary;
 - Gate global desligado, credencial própria e allowlist explícita de workspace;
-- migration `0027` cria somente tabelas aditivas no schema do workspace;
+- migration `0028` cria somente tabelas aditivas no schema do workspace;
 - a IA nunca produz diretamente a definition: o contrato intermediário é
   `FlowPlan`, e refs/definition são gerados de forma determinística;
 - componentes inventados, branches desconhecidos, transições fora de
@@ -2855,3 +2855,15 @@ superfície de control-plane isolada, sem alterar a execução das sessões.
   explícita e idempotente de draft; imagem e edição permanecem gates separados;
 - ao final, a homologação deve retornar obrigatoriamente aos canários definidos
   em `ORCH_AI_FLOW_BUILDER_PLAN.md`.
+
+# 2026-10-01 — Receipt e correlação exata de tabulação Runner v5
+
+- Classificação: `ALPHA_FIX_REQUIRED`.
+- Adicionados endpoints internos autenticados, vínculo durável pela mensagem
+  do provider e receipt idempotente por sessão Runner/evento.
+- Evento antes do vínculo permanece pendente; sessão encerrada é ignorada; o
+  `wait_for_event(callback/tabulation)` só acorda na sessão exata.
+- Advisory lock comum remove a corrida entre bind e tabulação. Não há busca por
+  telefone nem mudança no callback genérico.
+- Migration, deploy e canário real ainda pendentes neste checkpoint. Consulte
+  `RUNNER_ORCH_TABULATION_BRIDGE.md`.

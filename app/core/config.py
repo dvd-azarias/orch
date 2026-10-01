@@ -156,6 +156,8 @@ class Settings:
     orch_flow_builder_client_secret: str | None
     orch_flow_builder_workspace_allowlist: tuple[str, ...]
     orch_flow_builder_target_timeout_seconds: float
+    runner_orch_bridge_client_id: str | None
+    runner_orch_bridge_client_secret: str | None
     celery_billing_queue: str
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
@@ -794,6 +796,12 @@ def get_settings() -> Settings:
             10.0,
             minimum=1.0,
             maximum=60.0,
+        ),
+        runner_orch_bridge_client_id=_read_env_optional(
+            "RUNNER_ORCH_BRIDGE_CLIENT_ID"
+        ),
+        runner_orch_bridge_client_secret=_read_env_optional(
+            "RUNNER_ORCH_BRIDGE_CLIENT_SECRET"
         ),
         celery_billing_queue=(
             _read_env_optional("CELERY_BILLING_QUEUE", _default_queue_by_profile(queue_profile, "billing"))

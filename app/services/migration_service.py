@@ -54,8 +54,12 @@ MIGRATIONS: list[tuple[str, str]] = [
         "sql/026_create_orch_metrics_dispatch_snapshots.sql",
     ),
     (
-        "0027_create_orch_flow_builder_tables",
-        "sql/027_create_orch_flow_builder_tables.sql",
+        "0027_create_runner_orch_tabulation_bridge",
+        "sql/027_create_runner_orch_tabulation_bridge.sql",
+    ),
+    (
+        "0028_create_orch_flow_builder_tables",
+        "sql/028_create_orch_flow_builder_tables.sql",
     ),
 ]
 

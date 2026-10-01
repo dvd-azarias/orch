@@ -29,6 +29,15 @@ class PersistResult:
 
 
 @dataclass(frozen=True)
+class ExactCallbackPersistResult:
+    id: int
+    uuid: str
+    flow_uuid: str
+    state: int
+    resume_required: bool
+
+
+@dataclass(frozen=True)
 class WhatsappStatusTimestamps:
     whatsapp_sent_at: datetime | None
     whatsapp_delivered_at: datetime | None
@@ -1067,6 +1076,153 @@ async def persist_callback_event_for_active_entity(
         uuid=str(row["uuid"]),
         state=int(row["state"]),
         created=False,
+    )
+
+
+async def persist_callback_event_for_exact_session(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+    app_name: str,
+    event_name: str,
+    event_result: str,
+    event_data: dict[str, Any],
+) -> ExactCallbackPersistResult | None:
+    """Append a callback to one exact active session without reviving it."""
+
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+    await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(:class_id, :object_id)"),
+        {"class_id": 92021, "object_id": int(session_id)},
+    )
+    current = (
+        await db_session.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    uuid::text AS uuid,
+                    flow_uuid::text AS flow_uuid,
+                    state,
+                    entity,
+                    entity_type,
+                    entity_address,
+                    entity_session_id,
+                    runtime_variables
+                FROM orch_sessions
+                WHERE id = :session_id
+                  AND unassigned_at IS NULL
+                  AND ended_at IS NULL
+                LIMIT 1
+                """
+            ),
+            {"session_id": int(session_id)},
+        )
+    ).mappings().first()
+    if current is None:
+        return None
+
+    runtime_variables = (
+        current.get("runtime_variables")
+        if isinstance(current.get("runtime_variables"), dict)
+        else {}
+    )
+    workflow = (
+        runtime_variables.get("workflow_v2")
+        if isinstance(runtime_variables.get("workflow_v2"), dict)
+        else {}
+    )
+    wait_state = (
+        workflow.get("wait_for_event")
+        if isinstance(workflow.get("wait_for_event"), dict)
+        else {}
+    )
+    normalized_event_name = str(event_name or "").strip().lower()
+    normalized_event_result = str(event_result or "").strip().lower()
+    resume_required = bool(
+        str(workflow.get("blocking_stop_reason") or "")
+        == "blocked_wait_for_event"
+        and str(wait_state.get("event_source") or "").strip().lower()
+        == normalized_event_name
+        and str(wait_state.get("event_result") or "").strip().lower()
+        == normalized_event_result
+    )
+    extracted = {
+        "entity": str(current.get("entity") or ""),
+        "entity_type": str(current.get("entity_type") or ""),
+        "entity_address": str(current.get("entity_address") or ""),
+        "entity_session_id": str(current.get("entity_session_id") or ""),
+    }
+    payload = {
+        "event_name": normalized_event_name,
+        "result": normalized_event_result,
+        "data": event_data,
+    }
+    callback_payload = _build_callback_payload(
+        extracted=extracted,
+        event_name=normalized_event_name,
+        event_result=normalized_event_result,
+        event_data=event_data,
+    )
+    runtime_patch = _build_callback_runtime_patch(
+        app_name=app_name,
+        payload=payload,
+        extracted=extracted,
+    )
+    updated = (
+        await db_session.execute(
+            text(
+                """
+                UPDATE orch_sessions
+                SET
+                    runtime_variables = jsonb_set(
+                        COALESCE(runtime_variables, '{}'::jsonb)
+                            || CAST(:runtime_patch AS jsonb),
+                        '{callbacks_pending}',
+                        COALESCE(
+                            COALESCE(runtime_variables, '{}'::jsonb)
+                                ->'callbacks_pending',
+                            '[]'::jsonb
+                        ) || CAST(:callback_payload AS jsonb),
+                        true
+                    ),
+                    state = CASE WHEN :resume_required THEN 0 ELSE state END,
+                    frozen_until = CASE
+                        WHEN :resume_required THEN NULL
+                        ELSE frozen_until
+                    END,
+                    callback_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :session_id
+                  AND unassigned_at IS NULL
+                  AND ended_at IS NULL
+                RETURNING
+                    id,
+                    uuid::text AS uuid,
+                    flow_uuid::text AS flow_uuid,
+                    state
+                """
+            ),
+            {
+                "session_id": int(session_id),
+                "resume_required": resume_required,
+                "runtime_patch": runtime_patch,
+                "callback_payload": json.dumps(
+                    callback_payload,
+                    ensure_ascii=False,
+                ),
+            },
+        )
+    ).mappings().first()
+    if updated is None:
+        return None
+    return ExactCallbackPersistResult(
+        id=int(updated["id"]),
+        uuid=str(updated["uuid"]),
+        flow_uuid=str(updated["flow_uuid"]),
+        state=int(updated["state"]),
+        resume_required=resume_required,
     )
 
 

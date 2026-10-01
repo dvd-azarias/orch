@@ -10,14 +10,14 @@ from app.core.database import get_session_factory
 from app.services.migration_service import MIGRATIONS, _run_migration_file
 
 
-MIGRATION = "0027_create_orch_flow_builder_tables"
-MIGRATION_PATH = "sql/027_create_orch_flow_builder_tables.sql"
+MIGRATION = "0028_create_orch_flow_builder_tables"
+MIGRATION_PATH = "sql/028_create_orch_flow_builder_tables.sql"
 
 
 def test_flow_builder_migration_is_registered_after_metrics_snapshots() -> None:
     versions = [version for version, _path in MIGRATIONS]
     assert versions.index(MIGRATION) > versions.index(
-        "0026_create_orch_metrics_dispatch_snapshots"
+        "0027_create_runner_orch_tabulation_bridge"
     )
     assert (MIGRATION, MIGRATION_PATH) in MIGRATIONS
 

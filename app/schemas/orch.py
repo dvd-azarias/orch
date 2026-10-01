@@ -400,3 +400,75 @@ class OrchBillingStatusResponse(BaseModel):
     quantity_sent: int
     oldest_pending_at: datetime | None
     max_attempt_count: int
+
+
+class OrchRunnerBridgeBindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner_session_id: UUID
+    runner_flow_uuid: UUID
+    provider_context_message_id: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_provider_context_message_id(
+        self,
+    ) -> "OrchRunnerBridgeBindRequest":
+        normalized = self.provider_context_message_id.strip()
+        if not normalized:
+            raise ValueError("provider_context_message_id é obrigatório.")
+        self.provider_context_message_id = normalized
+        return self
+
+
+class OrchRunnerBridgeBindResponse(BaseModel):
+    api_version: str = "v1"
+    status: Literal["bound", "not_found", "conflict"]
+    accepted: bool
+    idempotent: bool
+    runner_session_id: str
+    orch_session_id: int | None = None
+    orch_session_uuid: str | None = None
+    orch_flow_uuid: str | None = None
+
+
+class OrchRunnerBridgeTabulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner_session_id: UUID
+    runner_flow_uuid: UUID
+    event_key: str = Field(min_length=1, max_length=512)
+    outcome: str = Field(min_length=1, max_length=128)
+    disposition_code: str | None = Field(default=None, max_length=128)
+    disposition_category: str | None = Field(default=None, max_length=128)
+    disposition_description: str | None = Field(default=None, max_length=1024)
+    reason: str | None = Field(default=None, max_length=1024)
+    conversation_id: str | None = Field(default=None, max_length=512)
+    occurred_at: datetime | None = None
+    additional_data: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_event_identity_and_outcome(
+        self,
+    ) -> "OrchRunnerBridgeTabulationRequest":
+        event_key = self.event_key.strip()
+        outcome = self.outcome.strip()
+        if not event_key:
+            raise ValueError("event_key é obrigatório.")
+        if not outcome:
+            raise ValueError("outcome é obrigatório.")
+        self.event_key = event_key
+        self.outcome = outcome
+        return self
+
+
+class OrchRunnerBridgeTabulationResponse(BaseModel):
+    api_version: str = "v1"
+    status: Literal["pending_link", "applied", "ignored", "conflict"]
+    accepted: bool
+    idempotent: bool
+    runner_session_id: str
+    event_key: str
+    orch_session_id: int | None = None
+    orch_session_uuid: str | None = None
+    orch_flow_uuid: str | None = None
+    resume_required: bool = False
