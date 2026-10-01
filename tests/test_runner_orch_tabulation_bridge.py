@@ -61,9 +61,13 @@ class _ScriptedSession:
 
 def test_migration_is_additive_registered_and_uses_session_scoped_idempotency() -> None:
     migration_path = "sql/027_create_runner_orch_tabulation_bridge.sql"
-    assert MIGRATIONS[-1] == (
+    assert (
         "0027_create_runner_orch_tabulation_bridge",
         migration_path,
+    ) in MIGRATIONS
+    versions = [version for version, _path in MIGRATIONS]
+    assert versions.index("0027_create_runner_orch_tabulation_bridge") < versions.index(
+        "0028_create_orch_flow_builder_tables"
     )
     sql = Path(migration_path).read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS orch_runner_session_links" in sql

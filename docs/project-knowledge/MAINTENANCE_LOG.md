@@ -2820,6 +2820,42 @@ alterados.
   `SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` para evitar redescoberta em novos
   flows/workspaces.
 
+## 2026-10-01 — AI Flow Builder do ORCH — Gates 0 a 2
+
+### REQUEST / CLASSIFICATION
+
+Criar, na UI oficial, uma experiência conversacional capaz de montar novos
+flows de orquestração e gravá-los no `v2/flow` para edição no canvas legado. A
+responsabilidade da inteligência foi explicitamente atribuída ao ORCH. A
+mudança é estrutural (`V2_ONLY` por natureza), mas foi autorizada no Alpha como
+superfície de control-plane isolada, sem alterar a execução das sessões.
+
+### ARCHITECTURE / SAFETY
+
+- ORCH mantém conversa, plano e compilação; a UI é cliente e o Target Core
+  continua sendo catálogo, validator e persistence boundary;
+- Gate global desligado, credencial própria e allowlist explícita de workspace;
+- migration `0028` cria somente tabelas aditivas no schema do workspace;
+- a IA nunca produz diretamente a definition: o contrato intermediário é
+  `FlowPlan`, e refs/definition são gerados de forma determinística;
+- componentes inventados, branches desconhecidos, transições fora de
+  `next_task_allowed` e versões obsoletas são rejeitados;
+- o Gate 2 não expõe publish e ainda não grava draft no Target Core.
+
+### EVIDENCE / NEXT GATE
+
+- 13 testes unitários iniciais passaram;
+- migration idempotente passou em PostgreSQL real dentro de schema temporário
+  revertido;
+- repositório real comprovou mensagens 1/2, versões 1/2/3, estado `ready` e
+  rejeição de escrita stale; nenhum dado residual permaneceu;
+- o cliente novo leu 27 componentes do catálogo real do HighComm e um plano
+  mínimo compilou `valid=true`, sem salvar ou publicar flow;
+- Gate 3 adicionará planejador por texto, UI, preview/pendências e criação
+  explícita e idempotente de draft; imagem e edição permanecem gates separados;
+- ao final, a homologação deve retornar obrigatoriamente aos canários definidos
+  em `ORCH_AI_FLOW_BUILDER_PLAN.md`.
+
 # 2026-10-01 — Receipt e correlação exata de tabulação Runner v5
 
 - Classificação: `ALPHA_FIX_REQUIRED`.

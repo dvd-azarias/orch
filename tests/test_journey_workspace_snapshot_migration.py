@@ -18,10 +18,15 @@ MIGRATION_PATH = "sql/024_create_orch_journey_workspace_snapshot_state.sql"
 def test_workspace_snapshot_state_migration_precedes_metrics_outbox() -> None:
     versions = [version for version, _path in MIGRATIONS]
 
-    assert versions[-4] == "0023_create_orch_journey_metrics_tables"
-    assert versions[-3] == "0024_create_orch_journey_workspace_snapshot_state"
-    assert versions[-2] == "0025_create_orch_metrics_event_outbox"
-    assert versions[-1] == "0026_create_orch_metrics_dispatch_snapshots"
+    assert versions.index("0023_create_orch_journey_metrics_tables") < versions.index(
+        "0024_create_orch_journey_workspace_snapshot_state"
+    )
+    assert versions.index("0024_create_orch_journey_workspace_snapshot_state") < versions.index(
+        "0025_create_orch_metrics_event_outbox"
+    )
+    assert versions.index("0025_create_orch_metrics_event_outbox") < versions.index(
+        "0026_create_orch_metrics_dispatch_snapshots"
+    )
 
 
 def test_workspace_snapshot_state_migration_is_additive_and_bounded() -> None:

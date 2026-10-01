@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.orch import router as orch_router
+from app.api.v1.orch_flow_builder import router as orch_flow_builder_router
 from app.api.v1.orch_observability import router as orch_observability_router
 from app.core.config import get_settings
 from app.core.database import get_db_session
@@ -23,6 +24,7 @@ configure_logging()
 logger = get_logger(__name__)
 app = FastAPI(title="orch", version="0.1.0")
 app.include_router(orch_router)
+app.include_router(orch_flow_builder_router)
 app.include_router(orch_observability_router)
 
 _DOCS_PROTECTED_PREFIXES = ("/docs", "/redoc")

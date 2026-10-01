@@ -13,11 +13,11 @@ from app.services.migration_service import MIGRATIONS, _run_migration_file
 MIGRATION_PATH = "sql/026_create_orch_metrics_dispatch_snapshots.sql"
 
 
-def test_metrics_dispatch_snapshot_migration_is_registered_last_and_additive() -> None:
-    assert MIGRATIONS[-1] == (
+def test_metrics_dispatch_snapshot_migration_is_registered_and_additive() -> None:
+    assert (
         "0026_create_orch_metrics_dispatch_snapshots",
         MIGRATION_PATH,
-    )
+    ) in MIGRATIONS
     sql = Path(MIGRATION_PATH).read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS orch_metrics_dispatch_snapshots" in sql
     assert "REFERENCES orch_journey_channel_actions" in sql

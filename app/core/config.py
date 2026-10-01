@@ -151,6 +151,11 @@ class Settings:
     orch_observability_max_window_hours: int
     orch_observability_statement_timeout_ms: int
     orch_observability_max_trace_steps: int
+    orch_flow_builder_enabled: bool
+    orch_flow_builder_client_id: str | None
+    orch_flow_builder_client_secret: str | None
+    orch_flow_builder_workspace_allowlist: tuple[str, ...]
+    orch_flow_builder_target_timeout_seconds: float
     runner_orch_bridge_client_id: str | None
     runner_orch_bridge_client_secret: str | None
     celery_billing_queue: str
@@ -779,6 +784,19 @@ def get_settings() -> Settings:
         orch_observability_max_trace_steps=_read_env_int_range(
             "ORCH_OBSERVABILITY_MAX_TRACE_STEPS", 2000, minimum=100, maximum=10000
         ),
+        orch_flow_builder_enabled=_read_env_bool("ORCH_FLOW_BUILDER_ENABLED", False),
+        orch_flow_builder_client_id=_read_env_optional("ORCH_FLOW_BUILDER_CLIENT_ID"),
+        orch_flow_builder_client_secret=_read_env_optional("ORCH_FLOW_BUILDER_CLIENT_SECRET"),
+        orch_flow_builder_workspace_allowlist=_read_env_csv(
+            "ORCH_FLOW_BUILDER_WORKSPACE_ALLOWLIST",
+            (),
+        ),
+        orch_flow_builder_target_timeout_seconds=_read_env_float_range(
+            "ORCH_FLOW_BUILDER_TARGET_TIMEOUT_SECONDS",
+            10.0,
+            minimum=1.0,
+            maximum=60.0,
+        ),
         runner_orch_bridge_client_id=_read_env_optional(
             "RUNNER_ORCH_BRIDGE_CLIENT_ID"
         ),
@@ -1025,6 +1043,34 @@ def get_settings() -> Settings:
             raise ValueError(
                 "METRICS_API_KEY é obrigatória quando "
                 "ORCH_METRICS_EVENTS_ENABLED=true."
+            )
+    if settings.orch_flow_builder_enabled:
+        if not settings.orch_flow_builder_workspace_allowlist:
+            raise ValueError(
+                "ORCH_FLOW_BUILDER_WORKSPACE_ALLOWLIST é obrigatória quando "
+                "ORCH_FLOW_BUILDER_ENABLED=true."
+            )
+        try:
+            for workspace_uuid in settings.orch_flow_builder_workspace_allowlist:
+                if UUID(workspace_uuid).int == 0:
+                    raise ValueError
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                "ORCH_FLOW_BUILDER_WORKSPACE_ALLOWLIST contém UUID inválido."
+            ) from exc
+        if not str(settings.orch_flow_builder_client_id or "").strip() or not str(
+            settings.orch_flow_builder_client_secret or ""
+        ).strip():
+            raise ValueError(
+                "ORCH_FLOW_BUILDER_CLIENT_ID e ORCH_FLOW_BUILDER_CLIENT_SECRET "
+                "são obrigatórias quando ORCH_FLOW_BUILDER_ENABLED=true."
+            )
+        if not str(settings.target_core_api_base_url or "").strip() or not str(
+            settings.target_core_api_bearer_token or ""
+        ).strip():
+            raise ValueError(
+                "TARGET_CORE_API_BASE_URL e TARGET_CORE_API_BEARER_TOKEN são "
+                "obrigatórias quando ORCH_FLOW_BUILDER_ENABLED=true."
             )
     if settings.orch_billing_enabled and not settings.billing_rabbitmq_url:
         raise ValueError("BILLING_RABBITMQ_URL é obrigatória quando ORCH_BILLING_ENABLED=true.")
