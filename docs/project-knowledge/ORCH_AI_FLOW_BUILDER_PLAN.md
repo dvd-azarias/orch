@@ -63,7 +63,7 @@ Target Extensions UI
 - [x] inspeção da UI atual e do catálogo real do HighComm;
 - [x] `FlowPlan` separado da `definition` legada.
 
-### Gate 2 — Fundação segura no ORCH — MERGE CONCLUÍDO, DEPLOY PENDENTE
+### Gate 2 — Fundação segura no ORCH — CONCLUÍDO
 
 - [x] migration workspace-local para sessões e mensagens;
 - [x] autenticação dedicada, feature flag e allowlist fail-closed;
@@ -75,9 +75,9 @@ Target Extensions UI
 - [x] testes unitários e PostgreSQL real com rollback;
 - [x] catálogo real HighComm (27 cards) e compilação em memória sem escrita;
 - [x] revisão/merge (`PR #226`, merge `5fdf592`);
-- [ ] migration e smoke controlados no HighComm.
+- [x] migration e smoke controlados no HighComm.
 
-### Gate 3 — MVP de criação por texto — IMPLEMENTADO, E2E/DEPLOY PENDENTES
+### Gate 3 — MVP de criação por texto — CONCLUÍDO
 
 - [x] planejador LLM com saída estritamente validada como `FlowPlan`;
 - [x] conversa guiada para lacunas de configuração, sem adivinhar IDs;
@@ -91,18 +91,20 @@ Target Extensions UI
   publicação;
 - [x] defaults sensíveis do catálogo removidos antes do prompt do planejador;
 - [x] smoke real sem escrita com catálogo HighComm + GPT-5 + compilação válida;
-- [ ] E2E texto -> conversa -> preview -> draft -> canvas.
+- [x] E2E texto -> conversa -> preview -> draft -> canvas.
 
-O código deste gate permanece desligado por padrão. Testes locais confirmam o
-contrato, o compilador, persistência PostgreSQL, build da UI, isolamento do BFF
-e o caminho real catálogo/LLM/compilador sem escrita; isso não substitui o E2E
-com persistência explícita de draft no Target Core do HighComm.
+O E2E real no HighComm criou somente o draft
+`7c349597-29bd-41fa-aa34-c2d6b69b192b`, abriu o canvas legado com três cards e
+quatro branches e preservou o status não publicado. Um segundo cenário
+adversarial de discagem humana sem perfil, rota, equipe e canal permaneceu em
+`needs_input`, sem chamada ao endpoint de draft. O gate continua fail-closed e
+restrito pela allowlist.
 
-### Gate 4 — Entrada por imagem — PENDENTE
+### Gate 4 — Entrada por imagem — IMPLEMENTADO NO BRANCH, E2E/DEPLOY PENDENTES
 
-- [ ] upload com tipo/tamanho permitidos e descarte do binário após extração;
-- [ ] extração para intenção/FlowPlan, nunca diretamente para `definition`;
-- [ ] confirmação explícita de trechos ambíguos;
+- [x] upload com tipo/tamanho permitidos e descarte do binário após extração;
+- [x] extração para intenção/FlowPlan, nunca diretamente para `definition`;
+- [x] confirmação explícita de trechos ambíguos;
 - [ ] E2E com diagrama conhecido e comparação estrutural.
 
 ### Gate 5 — Editar com IA e robustez — PENDENTE

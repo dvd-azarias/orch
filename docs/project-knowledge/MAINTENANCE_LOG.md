@@ -2902,3 +2902,46 @@ superfície de control-plane isolada, sem alterar a execução das sessões.
 - Imagem, edição de flow existente, bot e rollout geral permanecem fora deste
   gate. Depois dos gates previstos, retomar os canários de cards registrados no
   plano.
+
+## 2026-10-02 — AI Flow Builder — Gate 3 homologado e Gate 4 visual
+
+### CLASSIFICATION / SCOPE
+
+- `ALPHA_FIX_OPTIONAL`, por decisão explícita de produto e com isolamento do
+  runtime de sessões preservado.
+- Gate 3 homologado no HighComm; Gate 4 implementado em branches isolados de
+  ORCH e Target Extensions UI, ainda sem deploy neste checkpoint.
+
+### GATE 3 — EVIDENCE
+
+- O E2E textual criou o draft não publicado
+  `7c349597-29bd-41fa-aa34-c2d6b69b192b`, com três cards e quatro conexões, e
+  abriu corretamente o canvas legado.
+- O cenário adversarial de entrega humana sem Perfil de Discagem, rota de
+  Telecom, equipe e canal Live retornou cinco perguntas objetivas e não chamou
+  `/draft`. O Builder também recusou o nome acima de 40 caracteres.
+
+### GATE 4 — CHANGE / SAFETY
+
+- A mesma rota `/assist` aceita opcionalmente uma imagem PNG, JPEG ou WebP de
+  até 5 MiB; Base64, assinatura real e MIME são validados antes do uso.
+- A análise visual devolve somente uma extração Pydantic de passos, decisões,
+  desfechos, premissas e ambiguidades. Ela nunca produz `definition` nem grava
+  diretamente no Target Core.
+- Qualquer ambiguidade interrompe o caminho antes do catálogo/compilador e
+  exige confirmação textual. Sem ambiguidade, a extração segue pelo mesmo
+  planejador, catálogo e compilador determinístico do Gate 3.
+- O binário é removido do payload em memória após a validação e não é
+  persistido. O banco recebe somente nome, MIME, tamanho, SHA-256 e a extração
+  textual estruturada.
+- O BFF mantém allowlist exata e ausência de `/publish`; apenas o limite do
+  corpo de `/assist` foi elevado para 8 MiB, suficiente para a imagem Base64.
+
+### VALIDATION / PENDING
+
+- ORCH: `46 passed` em todos os testes dirigidos do Flow Builder e do cliente
+  LLM.
+- UI: ESLint, build Vinext e smoke completo do BFF passaram, incluindo proxy
+  do envelope de imagem.
+- Pendente: revisão, commits/PRs, deploy controlado e E2E com um diagrama real,
+  seguido de comparação estrutural no canvas legado.

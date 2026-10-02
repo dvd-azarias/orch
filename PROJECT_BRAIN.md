@@ -160,7 +160,13 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     do catálogo não entram no prompt. O planejador tem timeout próprio de 60
     segundos, sem alongar os cards de IA existentes; entrada inválida só é
     inferida quando o grafo possui uma única raiz inequívoca. O smoke real sem
-    escrita confirmou 27 cards HighComm, GPT-5 e compilação válida. Consulte
+    escrita confirmou 27 cards HighComm, GPT-5 e compilação válida. O Gate 3
+    criou um draft real e abriu o canvas legado; o cenário adversarial sem
+    referências dinâmicas parou em perguntas sem persistir draft. No Gate 4, a
+    imagem é limitada a PNG/JPEG/WebP de 5 MiB, validada por assinatura,
+    analisada somente em memória e convertida em extração textual estruturada;
+    o binário não entra no banco e ambiguidades impedem compilação até
+    confirmação humana. Consulte
     `ORCH_AI_FLOW_BUILDER_CONTRACT.md` e `ORCH_AI_FLOW_BUILDER_PLAN.md`.
 
 ## O que e o ORCH

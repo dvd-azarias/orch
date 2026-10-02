@@ -78,3 +78,58 @@ def test_explicit_timeout_overrides_shared_setting(monkeypatch) -> None:
     )
 
     assert captured["timeout_seconds"] == 60.0
+
+
+def test_multimodal_chat_payload_uses_image_url_content(monkeypatch) -> None:
+    captured = {}
+
+    def fake_request(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return 200, {"choices": [{"message": {"content": '{"ok":true}'}}]}
+
+    monkeypatch.setattr(llm_service, "get_settings", _settings)
+    monkeypatch.setattr(llm_service, "_http_json_request", fake_request)
+
+    llm_service.execute_otima_llm_prompt(
+        model="gpt-5",
+        system_prompt="system",
+        user_prompt="analyze",
+        user_image_data_url="data:image/png;base64,AAAA",
+        workspace_uuid=None,
+        workspace_api_key=None,
+    )
+
+    user_content = captured["payload"]["messages"][1]["content"]
+    assert user_content[0] == {"type": "text", "text": "analyze"}
+    assert user_content[1]["type"] == "image_url"
+    assert user_content[1]["image_url"]["detail"] == "high"
+
+
+def test_multimodal_responses_payload_uses_input_image(monkeypatch) -> None:
+    requests = []
+
+    def fake_request(**kwargs):  # type: ignore[no-untyped-def]
+        requests.append(kwargs)
+        if kwargs["url"].endswith("/chat/completions"):
+            return 404, {}
+        if kwargs["url"].endswith("/responses"):
+            return 200, {"output_text": '{"ok":true}'}
+        return 404, {}
+
+    monkeypatch.setattr(llm_service, "get_settings", _settings)
+    monkeypatch.setattr(llm_service, "_http_json_request", fake_request)
+
+    llm_service.execute_otima_llm_prompt(
+        model="gpt-5",
+        system_prompt="system",
+        user_prompt="analyze",
+        user_image_data_url="data:image/png;base64,AAAA",
+        workspace_uuid=None,
+        workspace_api_key=None,
+    )
+
+    responses_request = next(item for item in requests if item["url"].endswith("/responses"))
+    user_content = responses_request["payload"]["input"][1]["content"]
+    assert user_content[0] == {"type": "input_text", "text": "analyze"}
+    assert user_content[1]["type"] == "input_image"
+    assert user_content[1]["detail"] == "high"

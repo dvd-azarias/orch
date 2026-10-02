@@ -130,9 +130,31 @@ class FlowBuilderPlannerOutcome(BaseModel):
         return self
 
 
+class FlowBuilderImageInput(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: Literal["image/png", "image/jpeg", "image/webp"]
+    data_base64: str = Field(min_length=4, max_length=7_100_000)
+
+
+class FlowBuilderImageExtraction(BaseModel):
+    summary: str = Field(min_length=1, max_length=4000)
+    steps: list[str] = Field(default_factory=list, max_length=100)
+    decisions: list[str] = Field(default_factory=list, max_length=100)
+    outcomes: list[str] = Field(default_factory=list, max_length=100)
+    assumptions: list[str] = Field(default_factory=list, max_length=20)
+    ambiguities: list[str] = Field(default_factory=list, max_length=10)
+
+
 class FlowBuilderAssistRequest(BaseModel):
     expected_version: int = Field(ge=1)
-    content: str = Field(min_length=1, max_length=20_000)
+    content: str = Field(default="", max_length=20_000)
+    image: FlowBuilderImageInput | None = None
+
+    @model_validator(mode="after")
+    def validate_turn_content(self) -> "FlowBuilderAssistRequest":
+        if not self.content.strip() and self.image is None:
+            raise ValueError("Informe uma descrição ou anexe uma imagem do fluxo")
+        return self
 
 
 class FlowBuilderPreviewNode(BaseModel):
@@ -157,6 +179,7 @@ class FlowBuilderAssistResponse(BaseModel):
     outcome: FlowBuilderPlannerOutcome
     compilation: FlowBuilderCompilation | None = None
     preview: FlowBuilderPreview | None = None
+    image_extraction: FlowBuilderImageExtraction | None = None
 
 
 class FlowBuilderDraftCreateRequest(BaseModel):

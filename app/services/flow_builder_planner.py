@@ -197,6 +197,17 @@ def _compact_transcript(messages: list[dict[str, Any]], new_content: str) -> lis
         content = str(message.get("content") or "").strip()
         if role not in {"user", "assistant"} or not content:
             continue
+        structured_payload = message.get("structured_payload")
+        image_extraction = (
+            structured_payload.get("image_extraction")
+            if role == "user" and isinstance(structured_payload, dict)
+            else None
+        )
+        if isinstance(image_extraction, dict):
+            content = (
+                f"{content}\nExtração visual estruturada deste anexo:\n"
+                f"{json.dumps(_redact_sensitive_values(image_extraction), ensure_ascii=False)}"
+            )
         candidates.append({"role": role, "content": content})
     candidates.append({"role": "user", "content": new_content.strip()})
 
