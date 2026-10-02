@@ -2945,3 +2945,32 @@ superfície de control-plane isolada, sem alterar a execução das sessões.
   do envelope de imagem.
 - Pendente: revisão, commits/PRs, deploy controlado e E2E com um diagrama real,
   seguido de comparação estrutural no canvas legado.
+
+## 2026-10-02 — AI Flow Builder — limite de transporte da entrada visual
+
+- Classificação: `ALPHA_FIX_REQUIRED` — o upload era aceito, mas diagramas reais
+  não chegavam ao modelo e interrompiam a funcionalidade em produção.
+
+### INCIDENT / ROOT CAUSE
+
+- O primeiro E2E do Gate 4 aceitou e exibiu o diagrama de 1,49 MiB, porém o
+  gateway LLM devolveu HTTP `413` nos quatro endpoints suportados. O arquivo em
+  Base64 produzia um corpo próximo de 2 MiB.
+- A mesma imagem, derivada temporariamente como JPEG de 319 KiB, respondeu HTTP
+  `200` nos quatro endpoints. Modelo, credenciais e suporte multimodal foram
+  assim excluídos como causa.
+
+### MINIMUM SAFE CHANGE
+
+- O contrato externo continua aceitando PNG/JPEG/WebP de até 5 MiB. O ORCH
+  passa a validar integridade e limite de pixels com Pillow e, quando o original
+  exceder o orçamento seguro do gateway ou a dimensão adequada ao modelo, cria
+  em memória uma derivação JPEG progressiva de até 600 KiB.
+- SHA-256, MIME e tamanho persistidos continuam descrevendo o original. A
+  derivação não entra em mensagens, banco ou logs e é descartada depois da
+  chamada de visão.
+- O Builder textual, compilador, catálogo, criação de draft e ausência de rota
+  de publicação permanecem inalterados.
+- Blast radius: somente requisições do Flow Builder que contenham imagem.
+  Rollback: restaurar a release anterior do ORCH; sessões e metadados já
+  persistidos permanecem compatíveis porque o contrato externo não mudou.
