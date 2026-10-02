@@ -4,10 +4,13 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import io
 import json
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import ValidationError
 
 from app.core.logging import get_logger
@@ -17,6 +20,11 @@ from app.services.otima_llm_service import execute_otima_llm_prompt
 
 logger = get_logger(__name__)
 MAX_FLOW_BUILDER_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_FLOW_BUILDER_IMAGE_PIXELS = 25_000_000
+MAX_FLOW_BUILDER_LLM_IMAGE_BYTES = 600 * 1024
+MAX_FLOW_BUILDER_LLM_EDGE_PIXELS = 2200
+MIN_FLOW_BUILDER_LLM_EDGE_PIXELS = 640
+FLOW_BUILDER_JPEG_QUALITIES = (88, 82, 74, 66, 58)
 
 
 class FlowBuilderImageError(ValueError):
@@ -32,6 +40,8 @@ class ValidatedFlowBuilderImage:
     filename: str
     mime_type: str
     sha256: str
+    transport_data: bytes
+    transport_mime_type: str
 
     @property
     def size_bytes(self) -> int:
@@ -39,8 +49,8 @@ class ValidatedFlowBuilderImage:
 
     @property
     def data_url(self) -> str:
-        encoded = base64.b64encode(self.data).decode("ascii")
-        return f"data:{self.mime_type};base64,{encoded}"
+        encoded = base64.b64encode(self.transport_data).decode("ascii")
+        return f"data:{self.transport_mime_type};base64,{encoded}"
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -62,6 +72,125 @@ def _detected_mime_type(data: bytes) -> str | None:
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def _expected_pillow_format(mime_type: str) -> str:
+    return {
+        "image/png": "PNG",
+        "image/jpeg": "JPEG",
+        "image/webp": "WEBP",
+    }[mime_type]
+
+
+def _validated_pillow_image(data: bytes, *, mime_type: str) -> Image.Image:
+    expected_format = _expected_pillow_format(mime_type)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as probe:
+                if probe.format != expected_format:
+                    raise FlowBuilderImageError(
+                        "image_mime_mismatch",
+                        "O conteúdo da imagem não corresponde ao tipo de arquivo declarado.",
+                    )
+                width, height = probe.size
+                if width <= 0 or height <= 0 or width * height > MAX_FLOW_BUILDER_IMAGE_PIXELS:
+                    raise FlowBuilderImageError(
+                        "image_dimensions_too_large",
+                        "A imagem possui dimensões grandes demais para análise segura.",
+                    )
+                probe.verify()
+            with Image.open(io.BytesIO(data)) as decoded:
+                if decoded.format != expected_format:
+                    raise FlowBuilderImageError(
+                        "image_mime_mismatch",
+                        "O conteúdo da imagem não corresponde ao tipo de arquivo declarado.",
+                    )
+                decoded.load()
+                return decoded.copy()
+    except FlowBuilderImageError:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        raise FlowBuilderImageError(
+            "image_dimensions_too_large",
+            "A imagem possui dimensões grandes demais para análise segura.",
+        ) from error
+    except (OSError, SyntaxError, UnidentifiedImageError, ValueError) as error:
+        raise FlowBuilderImageError(
+            "image_invalid_content",
+            "O arquivo enviado não contém uma imagem íntegra e legível.",
+        ) from error
+
+
+def _rgb_on_white(image: Image.Image) -> Image.Image:
+    if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, "white")
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
+def _resize_to_max_edge(image: Image.Image, max_edge: int) -> Image.Image:
+    width, height = image.size
+    longest = max(width, height)
+    if longest <= max_edge:
+        return image
+    scale = max_edge / longest
+    target = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return image.resize(target, Image.Resampling.LANCZOS, reducing_gap=3.0)
+
+
+def _encode_jpeg(image: Image.Image, *, quality: int) -> bytes:
+    output = io.BytesIO()
+    try:
+        image.save(
+            output,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            progressive=True,
+            exif=b"",
+        )
+    except (OSError, ValueError) as error:
+        raise FlowBuilderImageError(
+            "image_transport_unavailable",
+            "A imagem não pôde ser preparada para análise.",
+        ) from error
+    return output.getvalue()
+
+
+def _build_transport_image(
+    data: bytes,
+    *,
+    mime_type: str,
+) -> tuple[bytes, str]:
+    decoded = _validated_pillow_image(data, mime_type=mime_type)
+    if (
+        len(data) <= MAX_FLOW_BUILDER_LLM_IMAGE_BYTES
+        and max(decoded.size) <= MAX_FLOW_BUILDER_LLM_EDGE_PIXELS
+    ):
+        return data, mime_type
+
+    candidate = _resize_to_max_edge(
+        _rgb_on_white(ImageOps.exif_transpose(decoded)),
+        MAX_FLOW_BUILDER_LLM_EDGE_PIXELS,
+    )
+    while True:
+        for quality in FLOW_BUILDER_JPEG_QUALITIES:
+            encoded = _encode_jpeg(candidate, quality=quality)
+            if len(encoded) <= MAX_FLOW_BUILDER_LLM_IMAGE_BYTES:
+                return encoded, "image/jpeg"
+
+        width, height = candidate.size
+        longest = max(width, height)
+        if longest <= MIN_FLOW_BUILDER_LLM_EDGE_PIXELS:
+            raise FlowBuilderImageError(
+                "image_transport_too_large",
+                "A imagem não pôde ser preparada para análise sem perder legibilidade.",
+            )
+        next_longest = max(MIN_FLOW_BUILDER_LLM_EDGE_PIXELS, round(longest * 0.82))
+        candidate = _resize_to_max_edge(candidate, next_longest)
 
 
 def validate_flow_builder_image(image: FlowBuilderImageInput) -> ValidatedFlowBuilderImage:
@@ -90,11 +219,17 @@ def validate_flow_builder_image(image: FlowBuilderImageInput) -> ValidatedFlowBu
             "image_mime_mismatch",
             "O conteúdo da imagem não corresponde ao tipo de arquivo declarado.",
         )
+    transport_data, transport_mime_type = _build_transport_image(
+        decoded,
+        mime_type=detected_mime_type,
+    )
     return ValidatedFlowBuilderImage(
         data=decoded,
         filename=image.filename.strip(),
         mime_type=detected_mime_type,
         sha256=hashlib.sha256(decoded).hexdigest(),
+        transport_data=transport_data,
+        transport_mime_type=transport_mime_type,
     )
 
 

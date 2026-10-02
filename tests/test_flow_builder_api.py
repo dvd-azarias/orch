@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,7 @@ from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from PIL import Image
 
 import app.api.v1.orch_flow_builder as flow_builder_api
 from app.main import app
@@ -81,6 +83,18 @@ def test_flow_builder_rejects_blank_actor() -> None:
     with pytest.raises(HTTPException) as exc_info:
         flow_builder_api._normalize_actor("   ")
     assert exc_info.value.status_code == 422
+
+
+def test_flow_builder_maps_image_transport_failure_to_service_unavailable() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        flow_builder_api._raise_image_error(
+            flow_builder_api.FlowBuilderImageError(
+                "image_transport_unavailable",
+                "A imagem não pôde ser preparada para análise.",
+            )
+        )
+
+    assert exc_info.value.status_code == 503
 
 
 def test_flow_builder_routes_are_registered_without_publish_endpoint() -> None:
@@ -242,7 +256,9 @@ async def test_image_ambiguity_stops_before_catalog_and_persists_no_binary(monke
         ),
     )
     db_session = SimpleNamespace(commit=AsyncMock())
-    png = b"\x89PNG\r\n\x1a\nflow-builder-test"
+    png_buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(png_buffer, format="PNG")
+    png = png_buffer.getvalue()
     request = FlowBuilderAssistRequest(
         expected_version=1,
         content="Use este desenho.",

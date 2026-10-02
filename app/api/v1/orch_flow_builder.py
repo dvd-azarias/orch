@@ -159,7 +159,7 @@ def _raise_planner_error(error: FlowBuilderPlannerError) -> None:
 
 
 def _raise_image_error(error: FlowBuilderImageError) -> None:
-    if error.code == "image_extraction_unavailable":
+    if error.code in {"image_extraction_unavailable", "image_transport_unavailable"}:
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
     elif error.code.startswith("image_extraction_"):
         http_status = status.HTTP_502_BAD_GATEWAY

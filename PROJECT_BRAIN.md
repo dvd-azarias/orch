@@ -164,8 +164,10 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     criou um draft real e abriu o canvas legado; o cenário adversarial sem
     referências dinâmicas parou em perguntas sem persistir draft. No Gate 4, a
     imagem é limitada a PNG/JPEG/WebP de 5 MiB, validada por assinatura,
-    analisada somente em memória e convertida em extração textual estruturada;
-    o binário não entra no banco e ambiguidades impedem compilação até
+    integridade e limite de pixels. Quando necessário, o ORCH cria em memória
+    uma derivação JPEG limitada exclusivamente para atravessar o gateway LLM;
+    SHA, MIME e tamanho persistidos continuam descrevendo o original. O binário
+    e sua derivação não entram no banco, e ambiguidades impedem compilação até
     confirmação humana. Consulte
     `ORCH_AI_FLOW_BUILDER_CONTRACT.md` e `ORCH_AI_FLOW_BUILDER_PLAN.md`.
 
