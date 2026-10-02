@@ -23,8 +23,8 @@ from app.services.celery_health_service import check_celery_health
 configure_logging()
 logger = get_logger(__name__)
 app = FastAPI(title="orch", version="0.1.0")
-app.include_router(orch_router)
 app.include_router(orch_flow_builder_router)
+app.include_router(orch_router)
 app.include_router(orch_observability_router)
 
 _DOCS_PROTECTED_PREFIXES = ("/docs", "/redoc")

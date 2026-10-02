@@ -90,6 +90,14 @@ def test_flow_builder_routes_are_registered_without_publish_endpoint() -> None:
     )
 
 
+def test_flow_builder_create_route_precedes_generic_flow_sessions_route() -> None:
+    paths = [route.path for route in app.routes]
+    builder_path = "/v1/orch/{workspace_uuid}/flow-builder/sessions"
+    generic_path = "/v1/orch/{workspace_uuid}/{flow_uuid}/sessions"
+
+    assert paths.index(builder_path) < paths.index(generic_path)
+
+
 @pytest.mark.asyncio
 async def test_message_endpoint_rejects_image_attachment_before_database_access() -> None:
     with pytest.raises(HTTPException) as exc_info:
