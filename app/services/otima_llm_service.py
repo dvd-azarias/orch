@@ -113,6 +113,7 @@ def execute_otima_llm_prompt(
     workspace_uuid: str | None,
     workspace_api_key: str | None,
     timeout_seconds: float | None = None,
+    user_image_data_url: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     base_url = (settings.otima_llm_api_gateway or settings.otima_llm_api_base_url or "").strip().rstrip("/")
@@ -142,12 +143,33 @@ def execute_otima_llm_prompt(
     last_error: str | None = None
     for url in urls:
         is_responses = url.endswith("/responses")
+        if user_image_data_url:
+            user_content = (
+                [
+                    {"type": "input_text", "text": user_prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": user_image_data_url,
+                        "detail": "high",
+                    },
+                ]
+                if is_responses
+                else [
+                    {"type": "text", "text": user_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": user_image_data_url, "detail": "high"},
+                    },
+                ]
+            )
+        else:
+            user_content = user_prompt
         if is_responses:
             payload = {
                 "model": model,
                 "input": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": user_content},
                 ],
             }
         else:
@@ -155,7 +177,7 @@ def execute_otima_llm_prompt(
                 "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": user_content},
                 ],
             }
             # LiteLLM/OpenAI reject custom temperature for GPT-5. Omitting the

@@ -278,6 +278,8 @@ async def apply_flow_builder_assistant_turn(
     plan: dict[str, Any],
     compiled_definition: dict[str, Any] | None,
     issues: list[dict[str, Any]],
+    user_attachment_metadata: dict[str, Any] | None = None,
+    user_structured_payload: dict[str, Any] | None = None,
 ) -> None:
     schema = _safe_schema()
     locked = await db_session.execute(
@@ -304,8 +306,8 @@ async def apply_flow_builder_assistant_turn(
         session_id=session_id,
         role="user",
         content=user_content,
-        attachment_metadata={},
-        structured_payload={},
+        attachment_metadata=user_attachment_metadata or {},
+        structured_payload=user_structured_payload or {},
     )
     await _insert_message(
         db_session,

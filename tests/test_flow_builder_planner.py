@@ -239,3 +239,26 @@ async def test_planner_rejects_invalid_structured_contract(monkeypatch) -> None:
             workspace_api_key=None,
         )
     assert exc_info.value.code == "planner_invalid_contract"
+
+
+def test_compact_transcript_rehydrates_persisted_image_extraction() -> None:
+    transcript = planner._compact_transcript(
+        [
+            {
+                "role": "user",
+                "content": "Diagrama anexado: fluxo.png",
+                "structured_payload": {
+                    "image_extraction": {
+                        "summary": "Inicia e encerra.",
+                        "steps": ["Início", "Fim"],
+                        "ambiguities": [],
+                    }
+                },
+            }
+        ],
+        "Use encerramento com sucesso.",
+    )
+
+    assert "Extração visual estruturada" in transcript[0]["content"]
+    assert "Inicia e encerra" in transcript[0]["content"]
+    assert transcript[-1]["content"] == "Use encerramento com sucesso."

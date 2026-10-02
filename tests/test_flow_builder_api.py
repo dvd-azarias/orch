@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -8,7 +11,12 @@ from fastapi import HTTPException
 
 import app.api.v1.orch_flow_builder as flow_builder_api
 from app.main import app
-from app.schemas.orch_flow_builder import FlowBuilderMessageCreateRequest
+from app.schemas.orch_flow_builder import (
+    FlowBuilderAssistRequest,
+    FlowBuilderImageExtraction,
+    FlowBuilderImageInput,
+    FlowBuilderMessageCreateRequest,
+)
 
 
 HIGHCOMM_WORKSPACE = "ba7eb0ec-e565-447c-8c11-8f870cf72a60"
@@ -90,6 +98,11 @@ def test_flow_builder_routes_are_registered_without_publish_endpoint() -> None:
     )
 
 
+def test_assist_request_requires_text_or_image() -> None:
+    with pytest.raises(ValueError):
+        FlowBuilderAssistRequest(expected_version=1)
+
+
 def test_flow_builder_create_route_precedes_generic_flow_sessions_route() -> None:
     paths = [route.path for route in app.routes]
     builder_path = "/v1/orch/{workspace_uuid}/flow-builder/sessions"
@@ -145,3 +158,113 @@ async def test_get_session_no_longer_references_message_payload(monkeypatch) -> 
         db_session=None,  # type: ignore[arg-type]
     )
     assert result.version == 1
+
+
+@pytest.mark.asyncio
+async def test_image_ambiguity_stops_before_catalog_and_persists_no_binary(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    records = [
+        {
+            "id": "62aebf8a-abca-43a4-9815-e1f047d32e76",
+            "workspace_uuid": HIGHCOMM_WORKSPACE,
+            "mode": "orchestration",
+            "intent": "create",
+            "status": "planning",
+            "flow_uuid": None,
+            "draft_checksum": None,
+            "version": 1,
+            "plan": {},
+            "compiled_definition": None,
+            "issues": [],
+            "created_by": "user-123",
+            "created_at": now,
+            "updated_at": now,
+            "messages": [],
+        },
+        {
+            "id": "62aebf8a-abca-43a4-9815-e1f047d32e76",
+            "workspace_uuid": HIGHCOMM_WORKSPACE,
+            "mode": "orchestration",
+            "intent": "create",
+            "status": "planning",
+            "flow_uuid": None,
+            "draft_checksum": None,
+            "version": 2,
+            "plan": {},
+            "compiled_definition": None,
+            "issues": [],
+            "created_by": "user-123",
+            "created_at": now,
+            "updated_at": now,
+            "messages": [],
+        },
+    ]
+    applied = {}
+
+    async def fake_bind(_db_session, *, workspace_uuid):  # type: ignore[no-untyped-def]
+        return str(workspace_uuid)
+
+    async def fake_fetch(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return records.pop(0)
+
+    async def fake_apply(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        applied.update(kwargs)
+
+    async def fail_catalog(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("catálogo não deve ser consultado antes de resolver ambiguidade")
+
+    async def fake_extract(**_kwargs):  # type: ignore[no-untyped-def]
+        return FlowBuilderImageExtraction(
+            summary="Fluxo com uma seta ilegível.",
+            steps=["Início", "Fim"],
+            decisions=[],
+            outcomes=[],
+            assumptions=[],
+            ambiguities=["A seta após o início leva ao sucesso ou ao insucesso?"],
+        )
+
+    monkeypatch.setattr(flow_builder_api, "_bind_builder_workspace", fake_bind)
+    monkeypatch.setattr(flow_builder_api, "fetch_flow_builder_session", fake_fetch)
+    monkeypatch.setattr(
+        flow_builder_api,
+        "fetch_workspace_otima_billing_api_key",
+        AsyncMock(return_value="workspace-key"),
+    )
+    monkeypatch.setattr(flow_builder_api, "fetch_orchestration_catalog", fail_catalog)
+    monkeypatch.setattr(flow_builder_api, "extract_flow_builder_image", fake_extract)
+    monkeypatch.setattr(flow_builder_api, "apply_flow_builder_assistant_turn", fake_apply)
+    monkeypatch.setattr(
+        flow_builder_api,
+        "get_settings",
+        lambda: _settings(
+            orch_flow_builder_llm_model="gpt-5",
+            orch_flow_builder_llm_timeout_seconds=60,
+        ),
+    )
+    db_session = SimpleNamespace(commit=AsyncMock())
+    png = b"\x89PNG\r\n\x1a\nflow-builder-test"
+    request = FlowBuilderAssistRequest(
+        expected_version=1,
+        content="Use este desenho.",
+        image=FlowBuilderImageInput(
+            filename="fluxo.png",
+            mime_type="image/png",
+            data_base64=base64.b64encode(png).decode("ascii"),
+        ),
+    )
+
+    response = await flow_builder_api.assist_builder_session(
+        workspace_uuid=UUID(HIGHCOMM_WORKSPACE),
+        session_id=UUID("62aebf8a-abca-43a4-9815-e1f047d32e76"),
+        payload=request,
+        actor="user-123",
+        db_session=db_session,  # type: ignore[arg-type]
+    )
+
+    assert response.outcome.status == "needs_input"
+    assert response.outcome.questions[0].key == "image_ambiguity_1"
+    assert response.image_extraction is not None
+    assert applied["user_attachment_metadata"]["binary_persisted"] is False
+    assert "data_base64" not in applied["user_attachment_metadata"]
+    assert applied["user_structured_payload"]["image_extraction"]["ambiguities"]
+    assert request.image is not None and request.image.data_base64 == ""

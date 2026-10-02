@@ -28,6 +28,7 @@ from app.schemas.orch_flow_builder import (
     FlowBuilderCompileResponse,
     FlowBuilderDraftCreateRequest,
     FlowBuilderDraftCreateResponse,
+    FlowBuilderImageExtraction,
     FlowBuilderMessageCreateRequest,
     FlowBuilderPlannerOutcome,
     FlowBuilderPlannerQuestion,
@@ -37,6 +38,12 @@ from app.schemas.orch_flow_builder import (
 from app.services.flow_builder_compiler import (
     build_flow_builder_preview,
     compile_orchestration_flow,
+)
+from app.services.flow_builder_image import (
+    FlowBuilderImageError,
+    extraction_as_planner_text,
+    extract_flow_builder_image,
+    validate_flow_builder_image,
 )
 from app.services.flow_builder_planner import (
     FlowBuilderPlannerError,
@@ -148,6 +155,16 @@ def _raise_planner_error(error: FlowBuilderPlannerError) -> None:
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
     else:
         http_status = status.HTTP_502_BAD_GATEWAY
+    raise HTTPException(status_code=http_status, detail=error.message) from error
+
+
+def _raise_image_error(error: FlowBuilderImageError) -> None:
+    if error.code == "image_extraction_unavailable":
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif error.code.startswith("image_extraction_"):
+        http_status = status.HTTP_502_BAD_GATEWAY
+    else:
+        http_status = status.HTTP_422_UNPROCESSABLE_ENTITY
     raise HTTPException(status_code=http_status, detail=error.message) from error
 
 
@@ -295,22 +312,77 @@ async def assist_builder_session(
     )
     await db_session.commit()
     settings = get_settings()
+    image_extraction: FlowBuilderImageExtraction | None = None
+    user_attachment_metadata: dict = {}
+    user_structured_payload: dict = {}
+    planner_content = payload.content.strip()
+    user_message_content = planner_content
     try:
-        catalog = await fetch_orchestration_catalog(
-            workspace_uuid=safe_workspace_uuid,
-            actor=safe_actor,
-        )
-        outcome = await plan_flow_builder_turn(
-            session_id=session_id,
-            messages=current.get("messages") or [],
-            new_content=payload.content,
-            current_plan=current.get("plan") or {},
-            component_catalog=catalog,
-            model=settings.orch_flow_builder_llm_model,
-            workspace_uuid=safe_workspace_uuid,
-            workspace_api_key=workspace_api_key,
-            timeout_seconds=settings.orch_flow_builder_llm_timeout_seconds,
-        )
+        if payload.image is not None:
+            validated_image = validate_flow_builder_image(payload.image)
+            payload.image.data_base64 = ""
+            user_attachment_metadata = validated_image.metadata
+            image_extraction = await extract_flow_builder_image(
+                image=validated_image,
+                instruction=payload.content,
+                model=settings.orch_flow_builder_llm_model,
+                workspace_uuid=safe_workspace_uuid,
+                workspace_api_key=workspace_api_key,
+                timeout_seconds=settings.orch_flow_builder_llm_timeout_seconds,
+            )
+            planner_content = extraction_as_planner_text(
+                image_extraction,
+                instruction=payload.content,
+                filename=validated_image.filename,
+            )
+            user_message_content = "\n".join(
+                value
+                for value in (
+                    payload.content.strip(),
+                    f"Diagrama anexado: {validated_image.filename}",
+                )
+                if value
+            )
+            user_structured_payload = {
+                "image_extraction": image_extraction.model_dump(mode="json")
+            }
+            del validated_image
+
+        if image_extraction is not None and image_extraction.ambiguities:
+            outcome = FlowBuilderPlannerOutcome(
+                status="needs_input",
+                assistant_message=(
+                    "Analisei o diagrama, mas preciso confirmar os trechos ambíguos "
+                    "antes de montar a prévia."
+                ),
+                questions=[
+                    FlowBuilderPlannerQuestion(
+                        key=f"image_ambiguity_{index + 1}",
+                        question=ambiguity,
+                        parameter_path=f"image.ambiguities.{index}",
+                    )
+                    for index, ambiguity in enumerate(image_extraction.ambiguities[:5])
+                ],
+                assumptions=image_extraction.assumptions,
+                plan=None,
+            )
+            catalog: list[dict] = []
+        else:
+            catalog = await fetch_orchestration_catalog(
+                workspace_uuid=safe_workspace_uuid,
+                actor=safe_actor,
+            )
+            outcome = await plan_flow_builder_turn(
+                session_id=session_id,
+                messages=current.get("messages") or [],
+                new_content=planner_content,
+                current_plan=current.get("plan") or {},
+                component_catalog=catalog,
+                model=settings.orch_flow_builder_llm_model,
+                workspace_uuid=safe_workspace_uuid,
+                workspace_api_key=workspace_api_key,
+                timeout_seconds=settings.orch_flow_builder_llm_timeout_seconds,
+            )
     except FlowBuilderTargetError as error:
         logger.warning(
             "Flow Builder não conseguiu carregar o catálogo do Target Core",
@@ -332,6 +404,17 @@ async def assist_builder_session(
             },
         )
         _raise_planner_error(error)
+        raise AssertionError("unreachable")
+    except FlowBuilderImageError as error:
+        logger.warning(
+            "Flow Builder recusou imagem: %s",
+            error.code,
+            extra={
+                "event": "flow_builder_image_rejected",
+                "session_id": str(session_id),
+            },
+        )
+        _raise_image_error(error)
         raise AssertionError("unreachable")
 
     compilation = None
@@ -375,12 +458,14 @@ async def assist_builder_session(
             workspace_uuid=safe_workspace_uuid,
             session_id=str(session_id),
             expected_version=payload.expected_version,
-            user_content=payload.content,
+            user_content=user_message_content,
             assistant_content=outcome.assistant_message,
             assistant_payload={"planner_outcome": assistant_payload},
             plan=plan_payload,
             compiled_definition=compiled_definition,
             issues=issues,
+            user_attachment_metadata=user_attachment_metadata,
+            user_structured_payload=user_structured_payload,
         )
         record = await fetch_flow_builder_session(
             db_session,
@@ -403,6 +488,7 @@ async def assist_builder_session(
         outcome=outcome,
         compilation=compilation,
         preview=preview,
+        image_extraction=image_extraction,
     )
 
 
