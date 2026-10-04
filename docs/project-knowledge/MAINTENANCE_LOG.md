@@ -2974,3 +2974,66 @@ superfície de control-plane isolada, sem alterar a execução das sessões.
 - Blast radius: somente requisições do Flow Builder que contenham imagem.
   Rollback: restaurar a release anterior do ORCH; sessões e metadados já
   persistidos permanecem compatíveis porque o contrato externo não mudou.
+
+## 2026-10-04 — AI Flow Builder — checkpoint de runtime do Gate 4
+
+### REQUEST / CLASSIFICATION
+
+Preservar a evidência operacional e o ponto exato de retomada antes do reinício
+do ambiente de trabalho. Mudança exclusivamente documental; nenhuma
+configuração ou lógica de runtime foi alterada neste checkpoint.
+
+### MERGE / DEPLOY CONFIRMADOS
+
+- ORCH PR `#229`, merge `a911d74`, entregou a entrada visual do Gate 4.
+- ORCH PR `#230`, merge `2c519c3`, entregou a derivação segura para o limite do
+  gateway LLM. A revisão foi implantada em sequência nos hosts `.249`, `.237`
+  e `.239`; `.239/.249` usam `orch-core-api.service` e `.237` usa
+  `orch-api.service`.
+- Os três hosts reportaram a revisão `2c519c3`, Pillow `12.3.0`, health
+  `live/db/ready` saudável e rota protegida respondendo `401` sem credencial.
+- UI PR `#21`, merge `7b4a49e`, foi implantado na UI oficial do `.239`.
+
+### VALIDAÇÃO DO HOTFIX
+
+- `51` testes dirigidos passaram.
+- A suíte completa coletou `1.104` casos: `1.075` passaram e `29` falharam nos
+  grupos legados já conhecidos de `trigger_orch(flow_uuid=...)` e runtime
+  WhatsApp, sem relação com o transporte visual.
+- O diagrama de referência versionado é
+  `docs/project-knowledge/FluxoMulticanalBradescoCliente-v2.png`, PNG de
+  `1.493.936` bytes e SHA-256
+  `d88f6c24715f356a72901d5752dee1953796257922e0a7eb795f7288dc9d40d0`.
+
+### E2E REAL PÓS-HOTFIX
+
+- Sessão do Builder: `d2a4852a-a119-4a97-98dc-77794b4b7036`.
+- O `POST /assist` observado como request `43` respondeu HTTP `200`.
+- Os metadados persistidos descrevem o original (`image/png`, `1.493.936`
+  bytes e o SHA acima) e registram `binary_persisted=false`.
+- A lógica do diagrama foi extraída corretamente e produziu cinco ambiguidades.
+  O estado permaneceu `planning/needs_input`, com `flow_uuid=NULL` e
+  `draft_checksum=NULL`; nenhum rascunho ou publicação foi criado.
+- A resposta humana fornecida foi
+  `1. Antes 2. de telefone 3. se for invaidi, nao envia 5. 5 minutos`. Ela
+  cobriu quatro decisões de negócio, mas não respondeu de forma inequívoca ao
+  ponto sobre o destino das setas de nova tentativa.
+
+### BLOQUEIO CONFIRMADO / PRÓXIMO PASSO
+
+- O segundo `POST /assist`, request `44`, respondeu `503` com a mensagem de
+  indisponibilidade temporária do planejador.
+- Diagnóstico direto e somente leitura no `.239` confirmou `TimeoutError` em
+  `60,057s`, com catálogo de 27 cards, cinco itens no transcript, prompt de
+  sistema com 4.953 caracteres e prompt do usuário com 59.171 caracteres.
+- A causa não foi imagem inválida nem falha de catálogo: o limite exclusivo
+  atual é `ORCH_FLOW_BUILDER_LLM_TIMEOUT_SECONDS=60`. O BFF usa 90 segundos
+  para o upstream ORCH e o cliente, 120 segundos.
+- Elevar somente o timeout do planejador ORCH para 85 segundos foi proposto,
+  mas não autorizado nem aplicado. O limite compartilhado dos cards de IA não
+  deve ser alterado.
+- Retomada segura: confirmar se as setas retornam a **Selecionar telefone
+  elegível**; tratar o timeout em entrega própria; reenviar a resposta completa;
+  validar o preview; criar o draft apenas por confirmação explícita; abrir e
+  comparar o canvas; então avançar ao Gate 5 ou retornar aos canários conforme
+  o plano.
