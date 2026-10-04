@@ -100,12 +100,35 @@ adversarial de discagem humana sem perfil, rota, equipe e canal permaneceu em
 `needs_input`, sem chamada ao endpoint de draft. O gate continua fail-closed e
 restrito pela allowlist.
 
-### Gate 4 — Entrada por imagem — IMPLEMENTADO NO BRANCH, E2E/DEPLOY PENDENTES
+### Gate 4 — Entrada por imagem — IMPLANTADO, E2E PARCIAL
 
 - [x] upload com tipo/tamanho permitidos e descarte do binário após extração;
 - [x] extração para intenção/FlowPlan, nunca diretamente para `definition`;
 - [x] confirmação explícita de trechos ambíguos;
-- [ ] E2E com diagrama conhecido e comparação estrutural.
+- [x] derivação JPEG somente em memória para respeitar o limite real do gateway
+  sem alterar os metadados do original;
+- [x] merge e deploy coordenado do ORCH nos hosts `.249`, `.237` e `.239` e da
+  UI oficial no `.239`;
+- [x] E2E real de upload e extração com
+  `docs/project-knowledge/FluxoMulticanalBradescoCliente-v2.png`;
+- [ ] concluir o turno de esclarecimentos e obter preview válido; a tentativa
+  observada em 2026-10-04 atingiu o timeout configurado de 60 segundos;
+- [ ] criar explicitamente o draft e comparar sua estrutura no canvas legado.
+
+Checkpoint de retomada:
+
+- sessão do Builder: `d2a4852a-a119-4a97-98dc-77794b4b7036`;
+- a extração visual retornou cinco ambiguidades e não criou draft;
+- a resposta humana cobriu quatro decisões de negócio, mas permaneceu sem
+  confirmação inequívoca o destino das setas de nova tentativa: é preciso
+  confirmar se elas voltam para **Selecionar telefone elegível**;
+- o segundo `/assist` terminou em `503` após `60,057s`, por
+  `ORCH_FLOW_BUILDER_LLM_TIMEOUT_SECONDS=60`; não houve erro de imagem,
+  catálogo ou serialização;
+- o BFF já tolera 90 segundos de upstream e 120 segundos no cliente. Elevar o
+  timeout exclusivo do planejador ORCH para 85 segundos permanece proposta
+  não aplicada e exige uma entrega própria;
+- nenhum `flow_uuid` ou `draft_checksum` foi produzido nesse E2E.
 
 ### Gate 5 — Editar com IA e robustez — PENDENTE
 

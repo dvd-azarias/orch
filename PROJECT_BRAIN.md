@@ -168,7 +168,14 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     uma derivação JPEG limitada exclusivamente para atravessar o gateway LLM;
     SHA, MIME e tamanho persistidos continuam descrevendo o original. O binário
     e sua derivação não entram no banco, e ambiguidades impedem compilação até
-    confirmação humana. Consulte
+    confirmação humana. Os PRs ORCH `#229/#230` e UI `#21` foram incorporados
+    e implantados; o primeiro E2E pós-hotfix extraiu corretamente o diagrama
+    real, sem persistir binário ou criar draft. O turno seguinte, com respostas
+    às ambiguidades, atingiu exatamente o timeout atual de 60 segundos do
+    planejador. Aumentar esse limite para 85 segundos é apenas uma proposta
+    pendente, não configuração aplicada. O ponto de retomada é confirmar a
+    ambiguidade ainda aberta sobre o destino das setas de nova tentativa,
+    reenviar o turno e concluir `preview -> draft -> canvas`. Consulte
     `ORCH_AI_FLOW_BUILDER_CONTRACT.md` e `ORCH_AI_FLOW_BUILDER_PLAN.md`.
 
 ## O que e o ORCH
