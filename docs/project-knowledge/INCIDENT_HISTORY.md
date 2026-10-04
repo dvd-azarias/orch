@@ -569,3 +569,92 @@ A correção agenda uma task leve e exata quando somente a escrita terminal falh
 Sob carga, a fotografia de 17:00 BRT mostrou 310/310 arquivos enviados, 310/310 receipts concluídos e 310/310 vínculos ativos em três horas. A raiz SFTP ainda continha 12.902 arquivos antigos; isso foi separado como dívida de limpeza e não autorizou replay em massa.
 
 O merge `9b6a7e7` foi implantado em `10.1.20.237` com restart rolling somente dos cinco workers FileApp e preservação do `.env`. A task `app.tasks.fileapp.recover_ingest_receipt_status` foi registrada no runtime. Na auditoria posterior, 339/339 arquivos da janela de três horas estavam enviados, com receipt `completed`, source list e vínculo ativo. As quatro latências acima de 60 segundos terminaram antes do deploy; os 30 receipts mais recentes observados depois dele concluíram em no máximo 19,126 segundos. Nenhum arquivo ou efeito downstream foi repetido.
+
+## 2026-10-02 — Amplificação de conexões AMI pelo `gateway_sync`
+
+`STATUS`: ROOT CAUSE FIXED / DEPLOY VALIDATED
+
+`SEVERITY`: critical
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+`HOST`: `10.1.20.136`
+
+`PBX`: `10.1.20.137`, `10.1.20.138`, `10.1.20.139`
+
+### Sintoma e impacto
+
+- O processo PID `2199`, `python3 -m app.gateway.sync`, mantinha 905 conexões
+  AMI e 917 descritores de arquivo, com limite soft de 1.024. Eram 639
+  conexões para o `.138`, 265 para o `.139` e uma para o `.137`.
+- O Asterisk `.138` chegou a 648 usuários Manager, 642 deles originados no
+  `.136`, além de 706 descritores e 732 threads. Havia risco concreto de
+  exaustão de descritores tanto no cliente quanto no PBX.
+- O `.138` ficou indisponível entre 05:22:56 e 10:54:27 BRT, aproximadamente
+  5h31. Quando retornou, 642 sessões do `.136` reconectaram em oito segundos.
+- O banco continha exatamente três endereços PBX únicos; a multiplicação não
+  vinha de cadastro duplicado.
+
+### Causa raiz
+
+O Panoramisk já agenda a reconexão do mesmo `Manager` em falha de conexão ou
+perda do transporte. Paralelamente, o `gateway_sync` mantinha um
+`reconnect_task` próprio, que fechava e substituía o objeto com backoff. O
+`Manager.close()` não cancelava callbacks de reconexão já registrados no event
+loop. Durante a indisponibilidade, objetos abandonados se acumulavam; quando o
+PBX retornava, todos voltavam a conectar.
+
+Portanto, a causa era propriedade concorrente do ciclo de reconexão, e não
+carga legítima, banco duplicado, Supplier V1/V2, discagem ou um patch recente
+dos demais fluxos.
+
+### Contenção emergencial
+
+- Foi reiniciado exclusivamente `gateway_sync.service` no `.136`.
+- O novo processo caiu imediatamente de 905 para três conexões, uma por PBX,
+  e de 917 para 13–15 descritores.
+- Após a limpeza das sessões antigas pelo Asterisk, `.138` e `.139`
+  estabilizaram com dez usuários Manager cada: quatro originados no `.136` e
+  três de cada nó `.239` e `.249`. Os descritores ficaram em 68 e 67,
+  respectivamente.
+- Nenhum Asterisk, API ORCH, worker ou serviço de discagem foi reiniciado na
+  contenção.
+
+### Correção definitiva e publicação
+
+- A PR `GOHP-LAB/ORCHESTRATOR#66`, commit `7317f9c8`, removeu o supervisor
+  concorrente e delegou a reconexão exclusivamente ao Panoramisk.
+- Um único `Manager` é registrado por endereço antes da tentativa inicial de
+  conexão; a lista de PBXs é deduplicada preservando a ordem.
+- O merge `4d73cbd0` foi publicado no `.136` por fast-forward de `e189cc0`,
+  reiniciando somente `gateway_sync.service`.
+- O `.env` permaneceu byte a byte idêntico, checksum SHA-256
+  `ab875e6c7dca00838e71fafc87d5c83d4a20143443a5773d49163987e83729a9`.
+  A cópia temporária restrita usada para a conferência foi removida.
+
+### Evidência de validação
+
+- Dezoito testes dirigidos passaram no servidor, incluindo indisponibilidade
+  prolongada e PBXs duplicados; `compileall` também passou.
+- Um smoke TCP com o Panoramisk real simulou falha e recuperação: o mesmo
+  `Manager` permaneceu responsável e abriu somente uma conexão no retorno.
+- Após a publicação, PID `122816` permaneceu `active/running`, com
+  `NRestarts=0`, três conexões AMI e 15 descritores por mais de 2,5 minutos,
+  sem crescimento. `.138` e `.139` permaneceram em dez usuários Manager e
+  68/67 descritores.
+- A suíte completa daquele checkout não era uma baseline verde: havia dois
+  erros de coleta e, excluídos esses módulos, 306 testes passaram e 14 falhas
+  legadas não relacionadas permaneceram. A validação declarada para o patch é
+  a regressão dirigida e a evidência de runtime acima.
+
+### Risco residual e rollback
+
+A causa conhecida foi removida e o cenário de queda/retorno foi reproduzido em
+smoke real. A confirmação operacional de longa duração ocorrerá naturalmente
+no próximo ciclo real de indisponibilidade de um PBX; o invariante esperado é
+o processo continuar com um único `Manager` por endereço, sem crescimento de
+conexões ou descritores.
+
+Não há migration nem mudança de schema. O rollback consiste em retornar o
+checkout do ORCHESTRATOR ao commit anterior validado e reiniciar somente
+`gateway_sync.service`, preservando o `.env`.

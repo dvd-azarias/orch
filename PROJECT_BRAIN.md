@@ -177,6 +177,17 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     ambiguidade ainda aberta sobre o destino das setas de nova tentativa,
     reenviar o turno e concluir `preview -> draft -> canvas`. Consulte
     `ORCH_AI_FLOW_BUILDER_CONTRACT.md` e `ORCH_AI_FLOW_BUILDER_PLAN.md`.
+39. O `gateway_sync` do ORCHESTRATOR deve manter exatamente um objeto
+    Panoramisk `Manager` por endereço PBX único, e o próprio Panoramisk é o
+    único proprietário da reconexão. Não reintroduzir supervisor externo que
+    feche e substitua `Manager` em falhas: callbacks de reconexão já agendados
+    sobrevivem ao `close()` e podem reconectar objetos abandonados em massa.
+    Em 2026-10-02, uma indisponibilidade do Asterisk `.138` amplificou o
+    processo do `.136` para 905 conexões AMI e 917 descritores. A PR
+    ORCHESTRATOR `#66`, merge `4d73cbd0`, removeu a dupla propriedade,
+    deduplicou os PBXs e foi implantada reiniciando somente
+    `gateway_sync.service`. Consulte `INCIDENT_HISTORY.md` e
+    `MAINTENANCE_LOG.md`.
 
 ## O que e o ORCH
 
