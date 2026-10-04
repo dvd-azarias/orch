@@ -3037,3 +3037,50 @@ configuração ou lógica de runtime foi alterada neste checkpoint.
   validar o preview; criar o draft apenas por confirmação explícita; abrir e
   comparar o canvas; então avançar ao Gate 5 ou retornar aos canários conforme
   o plano.
+
+## 2026-10-02 — Ciclo único de conexão AMI no `gateway_sync`
+
+### REQUEST / CLASSIFICATION
+
+Conter e eliminar a tempestade de sessões AMI originada pelo ORCHESTRATOR sem
+alterar contratos de telefonia ou reiniciar componentes fora do processo
+afetado. `ALPHA_FIX_REQUIRED`, por exaustão iminente de descritores e impacto
+operacional nos Asterisks.
+
+### INVESTIGATION / ROOT CAUSE
+
+- O `gateway_sync` do `.136` mantinha 905 conexões e 917 descritores; 639
+  conexões iam para o `.138`, 265 para o `.139` e uma para o `.137`.
+- O `.138` ficou indisponível por aproximadamente 5h31 e recebeu 642 sessões
+  do `.136` nos oito segundos seguintes ao retorno.
+- O banco possuía somente três PBXs únicos. A amplificação era causada pelo
+  supervisor externo do ORCHESTRATOR substituindo objetos enquanto o
+  Panoramisk já mantinha callbacks próprios de reconexão. O `close()` não
+  cancelava os callbacks agendados dos objetos abandonados.
+
+### MINIMUM SAFE CHANGE
+
+- O restart emergencial exclusivo de `gateway_sync.service` restaurou uma
+  conexão por PBX sem tocar Asterisk, API, workers ou discagem.
+- Removido o supervisor externo; a reconexão passou a ter um único
+  proprietário, o próprio Panoramisk `Manager`.
+- O `Manager` é registrado antes da primeira tentativa de conexão e a lista de
+  PBXs é deduplicada preservando a ordem.
+- Incluídos testes assíncronos para indisponibilidade prolongada e entradas
+  duplicadas.
+- PR `GOHP-LAB/ORCHESTRATOR#66`, commit `7317f9c8`, merge `4d73cbd0`.
+
+### VALIDATION / ROLLOUT / ROLLBACK
+
+- Dezoito testes dirigidos, `compileall` e smoke TCP com Panoramisk real
+  passaram. O smoke de falha/recuperação abriu somente uma conexão no retorno.
+- O `.136` foi atualizado de `e189cc0` para `4d73cbd0`; somente
+  `gateway_sync.service` foi reiniciado. O novo processo ficou
+  `active/running`, `NRestarts=0`, com três conexões e 15 descritores após mais
+  de 2,5 minutos.
+- `.138` e `.139` estabilizaram em dez usuários Manager e 68/67 descritores,
+  sem crescimento observado. O `.env` permaneceu byte a byte idêntico.
+- A suíte completa possuía baseline conhecida não verde; os 18 testes
+  dirigidos e o runtime são a evidência específica do patch.
+- Não há migration ou schema associado. Rollback: retornar ao commit anterior
+  validado e reiniciar exclusivamente `gateway_sync.service`.
