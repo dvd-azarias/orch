@@ -472,3 +472,59 @@ class OrchRunnerBridgeTabulationResponse(BaseModel):
     orch_session_uuid: str | None = None
     orch_flow_uuid: str | None = None
     resume_required: bool = False
+
+
+class OrchLiveTabulationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["live.conversation.resolved"]
+    workspace_id: UUID
+    interaction_id: UUID
+    conversation_id: UUID
+    reason: str = Field(min_length=1, max_length=128)
+    idempotency_key: str = Field(min_length=1, max_length=512)
+    tabulation_event_id: str = Field(min_length=1, max_length=128)
+    disposition_code: str | None = Field(default=None, max_length=128)
+    disposition_category: str | None = Field(default=None, max_length=128)
+    polarity: str | None = Field(default=None, max_length=128)
+    is_cpc: bool | None = None
+    value: float | None = None
+    notes: str | None = Field(default=None, max_length=4096)
+    ends_session: bool | None = None
+    additional_data: dict = Field(default_factory=dict)
+    occurred_at: datetime | None = None
+    call_id: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def normalize_live_tabulation_text_fields(self) -> "OrchLiveTabulationRequest":
+        self.reason = self.reason.strip()
+        self.idempotency_key = self.idempotency_key.strip()
+        self.tabulation_event_id = self.tabulation_event_id.strip()
+        if not self.reason:
+            raise ValueError("reason é obrigatório.")
+        if not self.idempotency_key:
+            raise ValueError("idempotency_key é obrigatório.")
+        if not self.tabulation_event_id:
+            raise ValueError("tabulation_event_id é obrigatório.")
+        for field_name in (
+            "disposition_code",
+            "disposition_category",
+            "polarity",
+            "call_id",
+        ):
+            raw_value = getattr(self, field_name)
+            if raw_value is not None:
+                setattr(self, field_name, raw_value.strip() or None)
+        return self
+
+
+class OrchLiveTabulationResponse(BaseModel):
+    api_version: str = "v1"
+    status: Literal["applied", "ignored"]
+    accepted: bool
+    idempotent: bool
+    idempotency_key: str
+    orch_session_id: int | None = None
+    orch_session_uuid: str
+    orch_flow_uuid: str
+    resume_required: bool = False

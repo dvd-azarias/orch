@@ -1244,3 +1244,18 @@ Ao receber evento de WhatsApp na rota oficial, usar a sessão corrente (`last_ca
 - `TARGET_CORE_API_BEARER_TOKEN` (preferencial) ou `SYNC_WEBHOOK_BEARER_TOKEN`
 - timeout HTTP reaproveita `SYNC_WS_TIMEOUT_SECONDS`
 - `CELERY_FILEAPP_MAILING_ASSOC_DELAY_SECONDS` (retardo anti-corrida entre import e vínculo)
+
+## Webhook direto de tabulação de voz do Live
+
+O Atendimento Live pode postar a tabulação na sessão ORCH exata por:
+
+```text
+POST /v1/orch/{workspace_uuid}/{flow_uuid}/sessions/{orch_session_uuid}/live/tabulations
+```
+
+A migration `0029_create_orch_live_tabulation_events` fornece receipt
+idempotente por sessão e chave do evento. A rota normaliza o evento para
+`callback/tabulation`, preserva campos futuros para os cards do fluxo e ignora
+categoricamente `ends_session`: somente o grafo ORCH encerra a sessão. O
+mecanismo Runner v5 permanece inalterado. Contrato, respostas e rollout estão
+em `docs/project-knowledge/LIVE_ORCH_TABULATION_WEBHOOK.md`.

@@ -261,3 +261,18 @@ deve partir de `/private/tmp`, do servidor ou da working copy histórica.
   foi revivida.
 - Em incidente, desligar o rollout no Target Core. Não truncar as tabelas de
   receipts/links e não alterar o endpoint genérico de callback.
+
+# Webhook de voz Live → ORCH
+
+- Confirmar migration `0029` no workspace antes de habilitar o produtor Live.
+- A rota usa `workspace_uuid + flow_uuid + orch_session_uuid`; nunca substituir
+  a sessão por telefone, alias curto ou busca global entre schemas.
+- O ingress é protegido pela infraestrutura da TI; a aplicação não exige
+  credencial nesse webhook por decisão operacional de 2026-10-08.
+- Confirmar que reenvio idêntico mantém um receipt e um callback. `409` indica
+  mesma chave com payload divergente e exige inspeção da fila de falhas Live.
+- `ignored/orch_session_inactive` é sucesso HTTP e não revive a sessão.
+- Auditar explicitamente que `ends_session` não aparece no receipt normalizado,
+  no callback nem produz `ended_at`.
+- Em incidente, desligar o envio no Live. Não remover a rota Runner nem apagar
+  `orch_live_tabulation_events`.

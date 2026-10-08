@@ -163,11 +163,20 @@ send_with_dialer_handoff marca linked_actuator=dialer e bloqueia
   -> Dialer informa answered
   -> ORCH segue pela saída answered
   -> wait_for_event(event_name=callback, event_result=tabulation)
-  -> callback grava data.outcome=positive|neutral|negative
+  -> Runner bridge ou Live direto grava callback/tabulation na sessão exata
+  -> quando disposition_code existe, callback expõe data.outcome normalizado
   -> condition escolhe o braço da jornada
 ```
 
 O valor público desta composição é `tabulation`, em inglês. `tabulacao` continua reservado ao caminho legado de callback de `run_flow` e não deve ser reutilizado aqui. Para cobrir a corrida em que a tabulação chega depois do início do acionamento, mas antes de o `wait_for_event` ser armado, o novo Dialer fornece ao card um `not_before` igual ao instante de preparação. O card pode então considerar somente callbacks recebidos a partir daquele instante, sem consumir eventos anteriores da sessão. O guard é exclusivo dessa transição; as demais esperas preservam o índice-base histórico.
+
+O caminho direto de voz usa
+`POST /v1/orch/{workspace_uuid}/{flow_uuid}/sessions/{orch_session_uuid}/live/tabulations`,
+receipt próprio e correlação exclusiva pela sessão da URL. Campos futuros do
+Live permanecem disponíveis em `wait_event.data`; `disposition_code` ausente
+não é convertido artificialmente em outcome. `ends_session` é removido antes
+do receipt e do callback e jamais controla o lifecycle ORCH. A ponte Runner
+permanece independente e inalterada.
 
 Quando o caminho recebido segue para
 `select_contact_channel(next_eligible, flow_override)`, o seletor pode pedir a

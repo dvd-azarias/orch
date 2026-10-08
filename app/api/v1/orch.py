@@ -31,6 +31,8 @@ from app.schemas.orch import (
     OrchDialerSupplierV2TerminalResponse,
     OrchFlowAliasCreateResponse,
     OrchFlowAliasSummary,
+    OrchLiveTabulationRequest,
+    OrchLiveTabulationResponse,
     OrchMigrateAllResponse,
     OrchMigrateWorkspaceResponse,
     OrchResubmitRequest,
@@ -94,6 +96,10 @@ from app.services.fileapp_tipo1_service import (
     is_file_event_in_processados_folder,
     resolve_mapping_template_uuid,
     resolve_monitored_folders,
+)
+from app.services.live_orch_tabulation_service import (
+    build_live_tabulation_payloads,
+    register_live_tabulation,
 )
 from app.services.orch_trigger_service import m2_alarm_from_stopped_reason, process_single_payload
 from app.services.runner_orch_tabulation_bridge_service import (
@@ -307,6 +313,61 @@ async def _enqueue_runner_bridge_resume(
                 "workspace_uuid": workspace_uuid,
                 "flow_uuid": flow_uuid,
                 "session_id": session_id,
+            },
+        )
+
+
+async def _enqueue_live_tabulation_resume(
+    *, workspace_uuid: str, flow_uuid: str, session_id: int
+) -> None:
+    settings = get_settings()
+    if not settings.celery_enabled:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: advance_session_task.apply_async(
+                    kwargs={
+                        "workspace_uuid": workspace_uuid,
+                        "flow_uuid": flow_uuid,
+                        "session_id": session_id,
+                    },
+                    queue=settings.celery_execute_queue,
+                    routing_key=settings.celery_execute_queue,
+                )
+            ),
+            timeout=_CELERY_ENQUEUE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception(
+            "direct Live tabulation persisted but immediate resume enqueue failed",
+            extra={
+                "event": "orch.live_tabulation.resume_enqueue_failed",
+                "workspace_uuid": workspace_uuid,
+                "flow_uuid": flow_uuid,
+                "session_id": session_id,
+            },
+        )
+
+
+def _validate_live_tabulation_identity(
+    *,
+    workspace_uuid: str,
+    session_uuid: str,
+    request: OrchLiveTabulationRequest,
+) -> None:
+    mismatches: list[str] = []
+    if str(request.workspace_id) != workspace_uuid:
+        mismatches.append("workspace_id")
+    if str(request.interaction_id) != session_uuid:
+        mismatches.append("interaction_id")
+    if mismatches:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "A identidade do envelope diverge da rota.",
+                "error_code": "live_tabulation_identity_mismatch",
+                "fields": mismatches,
             },
         )
 
@@ -1198,6 +1259,101 @@ async def relay_runner_tabulation_to_orch(
         orch_session_id=result.orch_session_id,
         orch_session_uuid=result.orch_session_uuid,
         orch_flow_uuid=result.orch_flow_uuid,
+        resume_required=result.resume_required,
+    )
+
+
+@router.post(
+    "/{workspace_uuid}/{flow_uuid}/sessions/{orch_session_uuid}/live/tabulations",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=OrchLiveTabulationResponse,
+)
+async def callback_live_tabulation_by_session(
+    workspace_uuid: UUID,
+    flow_uuid: UUID,
+    orch_session_uuid: UUID,
+    request: OrchLiveTabulationRequest = Body(...),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> OrchLiveTabulationResponse:
+    safe_workspace_uuid, workspace_schema = bind_workspace_context(
+        str(workspace_uuid)
+    )
+    safe_session_uuid = str(orch_session_uuid)
+    safe_flow_uuid = str(flow_uuid)
+    _validate_live_tabulation_identity(
+        workspace_uuid=safe_workspace_uuid,
+        session_uuid=safe_session_uuid,
+        request=request,
+    )
+    await ensure_active_workspace(db_session, workspace_uuid=safe_workspace_uuid)
+
+    raw_payload = request.model_dump(mode="json")
+    request_payload, callback_payload = build_live_tabulation_payloads(raw_payload)
+    tx_context = (
+        db_session.begin_nested()
+        if db_session.in_transaction()
+        else db_session.begin()
+    )
+    async with tx_context:
+        safe_schema = workspace_schema.replace('"', '""')
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        result = await register_live_tabulation(
+            db_session,
+            session_uuid=safe_session_uuid,
+            flow_uuid=safe_flow_uuid,
+            idempotency_key=request.idempotency_key,
+            request_payload=request_payload,
+            callback_payload=callback_payload,
+        )
+    if result.status == "not_found":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "message": "Sessão ORCH não encontrada para o flow informado.",
+                "error_code": "live_tabulation_session_not_found",
+            },
+        )
+    if result.status == "conflict":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A chave idempotente já identifica outra tabulação.",
+                "error_code": "live_tabulation_idempotency_conflict",
+            },
+        )
+    if db_session.in_transaction():
+        await db_session.commit()
+    if (
+        not result.idempotent
+        and result.resume_required
+        and result.orch_session_id is not None
+    ):
+        await _enqueue_live_tabulation_resume(
+            workspace_uuid=safe_workspace_uuid,
+            flow_uuid=safe_flow_uuid,
+            session_id=result.orch_session_id,
+        )
+    logger.info(
+        "direct Live tabulation handled",
+        extra={
+            "event": "orch.live_tabulation.handled",
+            "workspace_uuid": safe_workspace_uuid,
+            "flow_uuid": safe_flow_uuid,
+            "orch_session_uuid": safe_session_uuid,
+            "idempotency_key": result.idempotency_key,
+            "status": result.status,
+            "idempotent": result.idempotent,
+            "resume_required": result.resume_required,
+        },
+    )
+    return OrchLiveTabulationResponse(
+        status=result.status,
+        accepted=result.accepted,
+        idempotent=result.idempotent,
+        idempotency_key=result.idempotency_key,
+        orch_session_id=result.orch_session_id,
+        orch_session_uuid=safe_session_uuid,
+        orch_flow_uuid=safe_flow_uuid,
         resume_required=result.resume_required,
     )
 
