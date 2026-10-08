@@ -3084,3 +3084,43 @@ operacional nos Asterisks.
   dirigidos e o runtime são a evidência específica do patch.
 - Não há migration ou schema associado. Rollback: retornar ao commit anterior
   validado e reiniciar exclusivamente `gateway_sync.service`.
+
+## 2026-10-08 — Webhook direto de tabulação de voz Live → ORCH
+
+### REQUEST / CLASSIFICATION
+
+Adicionar um segundo caminho de tabulação para o Atendimento Live postar
+diretamente na sessão ORCH exata, sem substituir nem modificar a ponte Runner
+v5 existente. `ALPHA_FIX_REQUIRED`, mínimo e aditivo para a homologação do
+fluxo canário de voz.
+
+### CONTRATO E INVARIANTES
+
+- Rota exata por `workspace_uuid + flow_uuid + orch_session_uuid`, sem alias ou
+  correlação por telefone.
+- Receipt `0029` idempotente por `orch_session_uuid + idempotency_key`.
+- Envelope futuro é aceito e disponibilizado aos cards; `disposition_code`
+  gera o alias `outcome` somente quando existe.
+- `conversation_id` é auditoria interna do Live; `occurred_at` e `call_id` são
+  opcionais.
+- Por decisão operacional, o webhook não exige credencial na aplicação; o
+  bloqueio entre Live e ORCH pertence à infraestrutura da TI.
+- `ends_session` é removido antes do receipt e do callback e não possui qualquer
+  autoridade sobre estado, cursores ou encerramento da sessão ORCH.
+
+### VALIDATION / ROLLOUT PENDENTE
+
+- Sessenta testes dirigidos do webhook novo, ponte Runner,
+  `wait_for_event`, dispatcher e repositório de sessões passaram juntos;
+  `compileall` e `git diff --check` também passaram.
+- Um teste transacional em PostgreSQL real aplicou a migration `0029`, gravou
+  receipt/callback, acordou somente a espera exata, confirmou replay sem novo
+  callback, conflito por payload divergente e ausência total de efeito de
+  `ends_session`; a transação foi revertida sem resíduos.
+- A suíte completa terminou com `1090 passed / 26 failed`. As 26 falhas são a
+  baseline já documentada de testes legados que ainda invocam
+  `trigger_orch(flow_uuid=...)`; nenhuma pertence à nova rota.
+- Ainda faltam migration de produção, smoke HTTP e canário Live pós-deploy.
+- A mudança HTTP exige rolling na tríade `.237/.239/.249`; a migration é única
+  no banco compartilhado. Rollback de tráfego é desligar o produtor Live sem
+  apagar receipts nem tocar a ponte Runner.

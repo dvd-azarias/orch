@@ -33,6 +33,9 @@
 | `orch_journey_channel_action_events` | workspace | ciclo de vida normalizado de cada acionamento |
 | `orch_journey_snapshot_delivery` | workspace | controle historico por flow/SYNC da `0023`; permanece inerte e sem writer |
 | `orch_journey_workspace_snapshot_state` | workspace | singleton de dirty generation, lease, retry, sequencia e ultimo snapshot agregado do workspace |
+| `orch_runner_session_links` | workspace | vínculo exato Runner v5 → sessão ORCH |
+| `orch_runner_tabulation_events` | workspace | receipts idempotentes da ponte Runner |
+| `orch_live_tabulation_events` | workspace | receipts idempotentes do webhook direto de voz Live |
 | `orch_alembic_version` | workspace | controle de migrations do ORCH |
 | `target.orch_flow_aliases` | central | alias curto para workspace/flow |
 
@@ -49,7 +52,7 @@
 
 ## Migrations
 
-Lista executavel: `0001` a `0015`, depois `0018` a `0024`.
+Lista executavel: `0001` a `0015`, depois `0018` a `0029`.
 
 - `0016/0017` permanecem como arquivos historicos, mas foram retiradas do pipeline porque alteravam enum de outro sistema.
 - Todas as pendencias de um workspace rodam numa transacao.
@@ -67,6 +70,12 @@ Lista executavel: `0001` a `0015`, depois `0018` a `0024`.
   ocorra durante um lease. O payload e limitado a 1 MiB por constraint. A
   migration foi validada localmente em schema temporario com rollback e ainda
   nao foi aplicada em workspace real.
+- `0027` cria a correlação e os receipts da ponte Runner v5 sem alterar a
+  tabela de sessões.
+- `0029` cria `orch_live_tabulation_events`, aditiva, com unicidade por
+  `orch_session_uuid + idempotency_key`. O payload persistido já exclui
+  `ends_session`; a tabela não possui trigger nem efeito próprio sobre o
+  lifecycle da sessão.
 - O parser SQL e simples e nao suporta genericamente dollar-quoted blocks.
 - Paths de SQL sao relativos ao diretorio de execucao.
 

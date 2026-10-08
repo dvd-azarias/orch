@@ -15,6 +15,12 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
   fallback apenas por telefone nem uma segunda allowlist no ORCH. A migration
   `0027`, os endpoints e o rollout estão documentados em
   `docs/project-knowledge/RUNNER_ORCH_TABULATION_BRIDGE.md`.
+- Tabulações de voz também podem entrar diretamente pelo webhook aditivo
+  `/{workspace_uuid}/{flow_uuid}/sessions/{orch_session_uuid}/live/tabulations`.
+  A migration `0029` deduplica por sessão+chave, a correlação nunca usa telefone
+  e `ends_session` é descartado antes do receipt/callback: somente o grafo ORCH
+  decide o encerramento. O ingresso é protegido externamente pela infraestrutura,
+  por decisão operacional. Consultar `LIVE_ORCH_TABULATION_WEBHOOK.md`.
 
 1. Este repositorio e um Alpha em producao. A regra e `STABILITY OVER ELEGANCE` e a mudanca padrao e `MINIMUM SAFE CHANGE`.
 2. A rota canonica e `POST /v1/orch/{workspace_uuid}/{flow_uuid}`. O `workspace_uuid` seleciona o schema `ws_<uuid>` e deve estar ativo/completo.
