@@ -3165,3 +3165,56 @@ exige atuação operacional do provedor, sem desfecho sintético no ORCH.
 - Não houve commit, deploy ou restart. O rollout deve promover ORCHESTRATOR
   para I1/I2 e ORCH para I4/I5, seguido de novo canário Highcomm; I3 depende de
   DLR real observado no destino.
+
+### MERGE / DEPLOY DE PRODUÇÃO
+
+- ORCH PR `#234` foi integrada no merge
+  `01df7bb082bd9d7f04311b14924423b24b8d8a36`; ORCHESTRATOR PR `#68` foi
+  integrada no merge `dae886d364a1855c5d0bf51b0c14433649f599e4`. A PR
+  Target Core `#632` continha somente documentação e não exigiu promoção de
+  runtime nem migration.
+- O ORCHESTRATOR no `.136` foi promovido por fast-forward. O `.env` anterior
+  ficou em
+  `.maintenance-backups/.env.pre-highcomm-metrics-dae886d-20261009T1440BRT`;
+  somente o override do flow `81c0d014-3c4a-4393-80cb-57d97a00aed6` mudou de
+  `orch_core_dialer_v85:latest` para `orch_core_dialer_v86:latest`.
+  `celery_sbc_to_metrics.service` e `watchdog_orch.service` terminaram
+  `active/running`, com `NRestarts=0` e zero entrada `err..alert` na janela.
+- A imagem `v86` foi construída no `.143` a partir do archive SHA-256
+  `f301a3d9c5e035a27e65aa4999b980485a0ad7cea7d82107e073ca46af14eca7`.
+  O artefato `linux/amd64` tem ID
+  `sha256:8dc3d27fb9c6e9a3b467e64deca1729676e4209727b12a85ac0cb9c46fe6f60c`
+  e label de revisão `dae886d364a1855c5d0bf51b0c14433649f599e4`; a regressão
+  dentro da imagem terminou com `97 passed, 1 deselected` e o `py_compile`
+  passou. A `v85` foi preservada para rollback.
+- O watchdog recriou o container
+  `orch_bradesco_81c0d014-3c4a-4393-80cb-57d97a00aed6` com `v86`. A auditoria
+  final confirmou `running=true`, início em `2026-10-09T17:39:12Z`, restart
+  zero e nenhum `ERROR|CRITICAL|Traceback` nos 30 minutos posteriores.
+- O ORCH foi promovido por rolling em `.239`, `.249` e `.237`. Os três hosts
+  terminaram no merge `01df7bb`; os hashes dos `.env` permaneceram
+  `4e48feb5...27f7` nos nós HTTP e `4e6f9d23...d9c4` no executor. Backups
+  `0600` foram mantidos em `.maintenance-backups/` com o prefixo
+  `.env.pre-highcomm-metrics-01df7bb-`.
+- `orch-core-api.service` em `.239/.249`, `orch-api.service`, os cinco workers
+  gerais e os workers dedicados de Journey e Metrics no `.237` terminaram
+  ativos, todos com `NRestarts=0` e zero entrada `err..alert` desde o restart.
+  Os endpoints `live`, `db`, `ready` e `celery` ficaram saudáveis; broker,
+  worker e beat reportaram `true`, e os nós workflow, Journey e Metrics
+  responderam `pong` direcionado.
+- A consulta pós-deploy às `18:13:53Z` encontrou `97/97` eventos do flow
+  publicados e zero item `pending|publishing|dead`. Ainda não havia sessão
+  posterior ao rollout: a mais recente era a `8841`, encerrada às `16:00:12Z`.
+  Portanto, infraestrutura e transporte estão validados, mas o novo canário
+  Highcomm continua obrigatório para confirmar I1/I2/I4/I5 no destino; I3
+  permanece dependente de DLR real da Highcomm.
+
+### ROLLBACK
+
+- ORCH: promover a revisão anterior nos três nós, restaurar somente o `.env`
+  correspondente se necessário e repetir o rolling das mesmas units; não há
+  migration nem compensação de dados.
+- ORCHESTRATOR: restaurar o backup de `.env`, recolocar o override `v85`,
+  reiniciar somente `celery_sbc_to_metrics.service` e `watchdog_orch.service`
+  e deixar o watchdog recriar o container. As imagens `v85` e `v86` foram
+  preservadas.
