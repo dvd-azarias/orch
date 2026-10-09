@@ -3124,3 +3124,44 @@ fluxo canário de voz.
 - A mudança HTTP exige rolling na tríade `.237/.239/.249`; a migration é única
   no banco compartilhado. Rollback de tráfego é desligar o produtor Live sem
   apagar receipts nem tocar a ponte Runner.
+
+## 2026-10-09 — Correções da homologação Metrics no fluxo Highcomm
+
+### REQUEST / CLASSIFICATION
+
+Corrigir os cinco achados I1–I5 da auditoria do fluxo
+`81c0d014-3c4a-4393-80cb-57d97a00aed6`. I1/I2/I4/I5 são
+`ALPHA_FIX_REQUIRED` por incoerência de relatório e contrato de integração; I3
+exige atuação operacional do provedor, sem desfecho sintético no ORCH.
+
+### EVIDENCE / MINIMUM SAFE CHANGE
+
+- I1/I2 pertencem ao ORCHESTRATOR/PDIAL: o contexto Supplier V2 passa a levar
+  `flow_type=orchestration` e o `contact_id` canônico nas três mensagens da
+  perna. `ANSWERED` com `billing_seconds=0` é reclassificado como `NO_ANSWER`
+  somente nessa perna V2; Supplier V1 permanece inalterado.
+- I4 pertence ao outbox ORCH: `duration_seconds` conserva a duração em voz
+  atendida e vira `0` nos demais desfechos de voz; canais digitais mantêm o
+  campo nulo.
+- I5 era uma corrida real: em `dd127482…`, `delivered` chegou antes com
+  `12:18:36`, seguido 84 ms depois por `sent` ocorrido às `12:18:35`, ambos
+  ainda pendentes no outbox. O snapshot usa o fato durável da ação e, quando o
+  `sent_at` tardio chega antes da publicação, corrige atomicamente snapshot e
+  envelopes pendentes. Eventos já publicados não são reescritos.
+- I3 foi confirmado externamente: os dois dispatches SMS ficaram `accepted`,
+  com `provider_status=13`, `messageid` e descrição "inserido para
+  processamento", mas sem qualquer callback SMS no ledger. O ACK `13` é
+  `sent`, não entrega; DLR `1/2` já é normalizado para `delivered/failed`.
+  Ausência de DLR deve ser tratada com provedor/alcance da URL, nunca por
+  fabricação de resultado.
+
+### VALIDATION / ROLLOUT PENDENTE
+
+- ORCH: `36 passed` na regressão focada com PostgreSQL real; o teste de
+  integração cobre `delivered` antes de `sent` e confirma a correção do outbox
+  pendente para o timestamp exato de envio.
+- ORCHESTRATOR: `97 passed`; um teste de dialplan foi excluído por falhar
+  igualmente no `main` sem o patch.
+- Não houve commit, deploy ou restart. O rollout deve promover ORCHESTRATOR
+  para I1/I2 e ORCH para I4/I5, seguido de novo canário Highcomm; I3 depende de
+  DLR real observado no destino.

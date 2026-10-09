@@ -55,6 +55,62 @@ def _first_positive_int(*values: Any) -> str | None:
     return None
 
 
+def _utc_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _resolve_dispatched_at(
+    *,
+    observed_at: datetime,
+    action_row: dict[str, Any],
+    runtime: dict[str, Any],
+    channel: str,
+    component_ref_id: str,
+) -> datetime:
+    sent_at = _utc_datetime(action_row.get("sent_at"))
+    if sent_at is not None:
+        return sent_at
+    if channel == "whatsapp":
+        outbound = _mapping(runtime.get("whatsapp_hsm_outbound"))
+        if str(outbound.get("component_ref_id") or "") == component_ref_id:
+            prepared_at = _utc_datetime(outbound.get("prepared_at"))
+            if prepared_at is not None:
+                return prepared_at
+    accepted_at = _utc_datetime(action_row.get("accepted_at"))
+    if accepted_at is not None:
+        return accepted_at
+    candidates = [
+        _utc_datetime(action_row.get("requested_at")),
+        _utc_datetime(observed_at),
+    ]
+    return min(candidate for candidate in candidates if candidate is not None)
+
+
+def _dispatch_duration_seconds(
+    *,
+    channel: str,
+    canonical_status: str,
+    metadata: dict[str, Any],
+) -> Any:
+    if channel == "voice":
+        if canonical_status == "answered":
+            return metadata.get("duration_seconds")
+        return 0
+    return None
+
+
 def _metrics_channel(value: Any) -> str | None:
     normalized = str(value or "").strip().lower()
     aliases = {
@@ -223,28 +279,8 @@ async def _load_or_create_dispatch_snapshot(
     db_session: AsyncSession,
     *,
     action_id: str,
-    dispatched_at: datetime,
+    observed_at: datetime,
 ) -> dict[str, Any] | None:
-    if dispatched_at.tzinfo is None:
-        dispatched_at = dispatched_at.replace(tzinfo=timezone.utc)
-    else:
-        dispatched_at = dispatched_at.astimezone(timezone.utc)
-
-    existing = (
-        await db_session.execute(
-            text(
-                """
-                SELECT snapshot
-                FROM orch_metrics_dispatch_snapshots
-                WHERE action_id = CAST(:action_id AS uuid)
-                """
-            ),
-            {"action_id": action_id},
-        )
-    ).scalar_one_or_none()
-    if isinstance(existing, dict):
-        return dict(existing)
-
     row = (
         await db_session.execute(
             text(
@@ -254,6 +290,9 @@ async def _load_or_create_dispatch_snapshot(
                     action.channel,
                     action.component_ref_id::text AS component_ref_id,
                     action.component_kind,
+                    action.requested_at,
+                    action.accepted_at,
+                    action.sent_at,
                     journey.source_session_id,
                     journey.session_uuid::text AS session_uuid,
                     journey.flow_uuid::text AS flow_uuid,
@@ -263,7 +302,8 @@ async def _load_or_create_dispatch_snapshot(
                     source.entity_address,
                     source.runtime_variables,
                     flow.display_name AS flow_name,
-                    revision.definition
+                    revision.definition,
+                    dispatch_snapshot.snapshot AS existing_snapshot
                 FROM orch_journey_channel_actions action
                 JOIN orch_journey_sessions journey
                   ON journey.id = action.journey_session_id
@@ -273,6 +313,8 @@ async def _load_or_create_dispatch_snapshot(
                   ON flow.id = journey.flow_uuid
                 LEFT JOIN flow_v2_revision revision
                   ON revision.id = journey.flow_revision_id
+                LEFT JOIN orch_metrics_dispatch_snapshots dispatch_snapshot
+                  ON dispatch_snapshot.action_id = action.action_id
                 WHERE action.action_id = CAST(:action_id AS uuid)
                 FOR UPDATE OF action
                 """
@@ -292,6 +334,81 @@ async def _load_or_create_dispatch_snapshot(
         component_ref_id=component_ref_id,
     )
     channel = str(session_row.get("channel") or "").strip().lower()
+    dispatched_at = _resolve_dispatched_at(
+        observed_at=observed_at,
+        action_row=session_row,
+        runtime=runtime,
+        channel=channel,
+        component_ref_id=component_ref_id,
+    )
+    existing = session_row.get("existing_snapshot")
+    if isinstance(existing, dict):
+        existing_snapshot = dict(existing)
+        existing_dispatched_at = _utc_datetime(
+            existing_snapshot.get("dispatched_at")
+        )
+        if existing_dispatched_at == dispatched_at:
+            return existing_snapshot
+        already_published = bool(
+            (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM orch_metrics_event_outbox
+                            WHERE event_type = 'flow.dispatch.updated.v1'
+                              AND envelope #>> '{payload,dispatch_id}' = :action_id
+                              AND published_at IS NOT NULL
+                        )
+                        """
+                    ),
+                    {"action_id": action_id},
+                )
+            ).scalar_one()
+        )
+        if already_published:
+            return existing_snapshot
+        dispatched_at_text = dispatched_at.isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        existing_snapshot["dispatched_at"] = dispatched_at_text
+        await db_session.execute(
+            text(
+                """
+                UPDATE orch_metrics_dispatch_snapshots
+                SET dispatched_at = CAST(:dispatched_at AS timestamptz),
+                    snapshot = CAST(:snapshot AS jsonb)
+                WHERE action_id = CAST(:action_id AS uuid)
+                """
+            ),
+            {
+                "action_id": action_id,
+                "dispatched_at": dispatched_at,
+                "snapshot": json.dumps(existing_snapshot, ensure_ascii=False),
+            },
+        )
+        await db_session.execute(
+            text(
+                """
+                UPDATE orch_metrics_event_outbox
+                SET envelope = jsonb_set(
+                        envelope,
+                        '{payload,dispatched_at}',
+                        to_jsonb(CAST(:dispatched_at_text AS text)),
+                        true
+                    )
+                WHERE event_type = 'flow.dispatch.updated.v1'
+                  AND envelope #>> '{payload,dispatch_id}' = :action_id
+                  AND published_at IS NULL
+                """
+            ),
+            {
+                "action_id": action_id,
+                "dispatched_at_text": dispatched_at_text,
+            },
+        )
+        return existing_snapshot
     snapshot = {
         "dispatch_id": str(session_row["action_id"]),
         "dispatched_at": dispatched_at.isoformat(
@@ -419,7 +536,7 @@ async def try_enqueue_metrics_dispatch_event(
             snapshot = await _load_or_create_dispatch_snapshot(
                 db_session,
                 action_id=action_id,
-                dispatched_at=occurred_at,
+                observed_at=occurred_at,
             )
             if snapshot is None:
                 return
@@ -448,7 +565,11 @@ async def try_enqueue_metrics_dispatch_event(
                 "provider_status": provider_status,
                 "error_code": safe_metadata.get("error_code"),
                 "error_message": _first_text(safe_metadata.get("error_message")),
-                "duration_seconds": safe_metadata.get("duration_seconds"),
+                "duration_seconds": _dispatch_duration_seconds(
+                    channel=channel,
+                    canonical_status=canonical_status,
+                    metadata=safe_metadata,
+                ),
             }
             await enqueue_metrics_event(
                 db_session,
