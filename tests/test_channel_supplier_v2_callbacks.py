@@ -167,6 +167,7 @@ def _configure_resume_execution(
 @pytest.mark.parametrize(
     ("event_kind", "payload", "expected"),
     [
+        ("status", {"messageid": "m-1", "status": 13}, "sent"),
         ("status", {"messageid": "m-1", "status": 12}, "sent"),
         ("status", {"messageid": "m-1", "status": 4}, "sent"),
         ("dlr", {"messageid": "m-1", "status": 1}, "delivered"),

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from app.services.metrics_orchestration_event_service import (
     _canonical_dispatch_status,
+    _dispatch_duration_seconds,
+    _resolve_dispatched_at,
     resolve_metrics_contact_snapshot,
 )
 
@@ -98,3 +102,61 @@ def test_voice_dispatch_statuses_are_exactly_the_pdial_taxonomy() -> None:
     } == expected
     assert _canonical_dispatch_status(channel="voice", native_status="no_connected") is None
     assert _canonical_dispatch_status(channel="voice", native_status="limit_reached") is None
+
+
+def test_voice_duration_is_emitted_only_for_answered_calls() -> None:
+    metadata = {"duration_seconds": 28}
+
+    assert _dispatch_duration_seconds(
+        channel="voice",
+        canonical_status="answered",
+        metadata=metadata,
+    ) == 28
+    assert _dispatch_duration_seconds(
+        channel="voice",
+        canonical_status="no_answer",
+        metadata=metadata,
+    ) == 0
+    assert _dispatch_duration_seconds(
+        channel="sms",
+        canonical_status="sent",
+        metadata=metadata,
+    ) is None
+
+
+def test_whatsapp_dispatch_time_precedes_out_of_order_provider_callbacks() -> None:
+    component_ref_id = "8ad3af4c-b4f0-4b8f-adf1-a011f0882585"
+    prepared_at = datetime(2026, 10, 9, 15, 32, 22, tzinfo=UTC)
+    delivered_at = datetime(2026, 10, 9, 15, 32, 24, tzinfo=UTC)
+
+    dispatched_at = _resolve_dispatched_at(
+        observed_at=delivered_at,
+        action_row={"requested_at": delivered_at},
+        runtime={
+            "whatsapp_hsm_outbound": {
+                "component_ref_id": component_ref_id,
+                "prepared_at": prepared_at.isoformat(),
+            }
+        },
+        channel="whatsapp",
+        component_ref_id=component_ref_id,
+    )
+
+    assert dispatched_at == prepared_at
+    assert dispatched_at <= delivered_at
+
+    sent_at = datetime(2026, 10, 9, 15, 32, 23, tzinfo=UTC)
+    corrected_at = _resolve_dispatched_at(
+        observed_at=sent_at,
+        action_row={"requested_at": delivered_at, "sent_at": sent_at},
+        runtime={
+            "whatsapp_hsm_outbound": {
+                "component_ref_id": component_ref_id,
+                "prepared_at": prepared_at.isoformat(),
+            }
+        },
+        channel="whatsapp",
+        component_ref_id=component_ref_id,
+    )
+
+    assert corrected_at == sent_at

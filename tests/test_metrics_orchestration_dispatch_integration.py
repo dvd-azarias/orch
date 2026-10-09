@@ -351,5 +351,106 @@ async def test_real_digital_events_freeze_one_complete_dispatch_snapshot(
             ).scalar_one()
             assert snapshot_count == 1
             assert journey_session_id > 0
+
+            whatsapp_prepared_at = occurred_at + timedelta(seconds=7)
+            whatsapp_sent_at = occurred_at + timedelta(seconds=9)
+            whatsapp_delivered_at = occurred_at + timedelta(seconds=10)
+            runtime["workflow_v2"]["selected_contact_channel"] = {
+                "type": "whatsapp",
+                "address": "5511975620806",
+            }
+            runtime["whatsapp_hsm_outbound"] = {
+                "component_ref_id": str(component_uuid),
+                "prepared_at": whatsapp_prepared_at.isoformat(),
+                "template_name": "template_canario",
+            }
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE orch_sessions
+                    SET runtime_variables = CAST(:runtime AS jsonb)
+                    WHERE id = :source_session_id
+                    """
+                ),
+                {
+                    "source_session_id": source_session_id,
+                    "runtime": json.dumps(runtime),
+                },
+            )
+            whatsapp_action = await record_journey_channel_action_event(
+                db_session,
+                source_session_id=source_session_id,
+                flow_uuid=str(flow_uuid),
+                session_uuid=str(session_uuid),
+                channel="whatsapp",
+                source_kind="whatsapp_provider_message",
+                source_id="wamid.out-of-order",
+                native_status="delivered",
+                event_id="wamid.out-of-order",
+                occurred_at=whatsapp_delivered_at,
+                component_ref_id=str(component_uuid),
+                component_kind="send_whatsapp",
+                provider_reference="wamid.out-of-order",
+                metadata={"provider_status": "delivered"},
+            )
+            assert whatsapp_action is not None
+            await record_journey_channel_action_event(
+                db_session,
+                source_session_id=source_session_id,
+                flow_uuid=str(flow_uuid),
+                session_uuid=str(session_uuid),
+                channel="whatsapp",
+                source_kind="whatsapp_provider_message",
+                source_id="wamid.out-of-order",
+                native_status="sent",
+                event_id="wamid.out-of-order",
+                occurred_at=whatsapp_sent_at,
+                component_ref_id=str(component_uuid),
+                component_kind="send_whatsapp",
+                provider_reference="wamid.out-of-order",
+                metadata={"provider_status": "sent"},
+            )
+
+            whatsapp_rows = (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT envelope
+                        FROM orch_metrics_event_outbox
+                        WHERE event_type = 'flow.dispatch.updated.v1'
+                          AND envelope #>> '{payload,dispatch_id}' = :dispatch_id
+                        ORDER BY id
+                        """
+                    ),
+                    {"dispatch_id": whatsapp_action.action_id},
+                )
+            ).scalars().all()
+            assert [row["payload"]["status"] for row in whatsapp_rows] == [
+                "delivered",
+                "sent",
+            ]
+            expected_dispatched_at = whatsapp_sent_at.isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z")
+            assert {
+                row["payload"]["dispatched_at"] for row in whatsapp_rows
+            } == {expected_dispatched_at}
+            whatsapp_snapshot = (
+                await db_session.execute(
+                    text(
+                        """
+                        SELECT dispatched_at, snapshot
+                        FROM orch_metrics_dispatch_snapshots
+                        WHERE action_id = CAST(:action_id AS uuid)
+                        """
+                    ),
+                    {"action_id": whatsapp_action.action_id},
+                )
+            ).mappings().one()
+            assert whatsapp_snapshot["dispatched_at"] == whatsapp_sent_at
+            assert (
+                whatsapp_snapshot["snapshot"]["dispatched_at"]
+                == expected_dispatched_at
+            )
         finally:
             await transaction.rollback()
