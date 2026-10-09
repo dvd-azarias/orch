@@ -327,7 +327,11 @@ async def _load_or_create_dispatch_snapshot(
 
     session_row = dict(row)
     runtime = _mapping(session_row.get("runtime_variables"))
-    contact = resolve_metrics_contact_snapshot(session_row)
+    contact = await _stable_metrics_contact_snapshot(
+        db_session,
+        session_row=session_row,
+        session_uuid=str(session_row["session_uuid"]),
+    )
     component_ref_id = str(session_row["component_ref_id"])
     component = _component_from_definition(
         session_row.get("definition"),
@@ -609,6 +613,7 @@ def resolve_metrics_contact_snapshot(session_row: dict[str, Any]) -> dict[str, A
     session_identity = _mapping(runtime.get("session_identity"))
 
     person_uuid = _first_uuid(
+        session_row.get("source_person_uuid"),
         selected.get("person_uuid"),
         adoption.get("person_uuid"),
         operational_scope.get("person_uuid"),
@@ -669,6 +674,82 @@ def resolve_metrics_contact_snapshot(session_row: dict[str, Any]) -> dict[str, A
     }
 
 
+def _source_contact_list_member_id(session_row: dict[str, Any]) -> str | None:
+    runtime = _mapping(session_row.get("runtime_variables"))
+    session_identity = _mapping(runtime.get("session_identity"))
+    input_payload = _mapping(runtime.get("input_payload"))
+    last_payload = _mapping(runtime.get("last_payload"))
+    return _first_positive_int(
+        session_identity.get("contact_list_member_id"),
+        input_payload.get("contact_list_member_id"),
+        last_payload.get("contact_list_member_id"),
+    )
+
+
+async def _enrich_source_person_uuid(
+    db_session: AsyncSession,
+    *,
+    session_row: dict[str, Any],
+) -> None:
+    if _first_uuid(session_row.get("source_person_uuid")):
+        return
+    member_id = _source_contact_list_member_id(session_row)
+    if member_id is None:
+        return
+    table_available = bool(
+        (
+            await db_session.execute(
+                text("SELECT to_regclass('contact_list_members') IS NOT NULL")
+            )
+        ).scalar_one()
+    )
+    if not table_available:
+        return
+    person_uuid = (
+        await db_session.execute(
+            text(
+                """
+                SELECT person_uuid::text
+                FROM contact_list_members
+                WHERE id = CAST(:member_id AS bigint)
+                  AND person_uuid IS NOT NULL
+                LIMIT 1
+                """
+            ),
+            {"member_id": int(member_id)},
+        )
+    ).scalar_one_or_none()
+    if person_uuid:
+        session_row["source_person_uuid"] = str(person_uuid)
+
+
+async def _stable_metrics_contact_snapshot(
+    db_session: AsyncSession,
+    *,
+    session_row: dict[str, Any],
+    session_uuid: str,
+) -> dict[str, Any]:
+    started_context = (
+        await db_session.execute(
+            text(
+                """
+                SELECT envelope->'context'
+                FROM orch_metrics_event_outbox
+                WHERE idempotency_key = :idempotency_key
+                LIMIT 1
+                """
+            ),
+            {"idempotency_key": f"session:{session_uuid}:started"},
+        )
+    ).scalar_one_or_none()
+    contact = resolve_metrics_contact_snapshot(session_row)
+    if isinstance(started_context, dict) and started_context.get("contact_id"):
+        contact["contact_id"] = str(started_context["contact_id"])
+        return contact
+    await _enrich_source_person_uuid(db_session, session_row=session_row)
+    return resolve_metrics_contact_snapshot(session_row)
+
+
 async def _source_session_row(
     db_session: AsyncSession,
     *,
@@ -698,7 +779,9 @@ async def _source_session_row(
             {"source_session_id": source_session_id},
         )
     ).mappings().first()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    return dict(row)
 
 
 def _base_context(
@@ -736,6 +819,7 @@ async def _enqueue_session_open_events(
     )
     if session_row is None:
         return
+    await _enrich_source_person_uuid(db_session, session_row=session_row)
     contact = resolve_metrics_contact_snapshot(session_row)
     context = _base_context(
         flow_uuid=flow_uuid,
@@ -816,6 +900,7 @@ async def try_enqueue_metrics_session_open_events(
                 "session_uuid": session_uuid,
                 "exception_type": type(exc).__name__,
             },
+            exc_info=True,
         )
 
 
@@ -845,7 +930,11 @@ async def try_enqueue_metrics_node_entered(
             )
             if session_row is None:
                 return
-            contact = resolve_metrics_contact_snapshot(session_row)
+            contact = await _stable_metrics_contact_snapshot(
+                db_session,
+                session_row=session_row,
+                session_uuid=session_uuid,
+            )
             await enqueue_metrics_event(
                 db_session,
                 workspace_uuid=workspace_uuid,
@@ -878,6 +967,7 @@ async def try_enqueue_metrics_node_entered(
                 "component_ref_id": component_ref_id,
                 "exception_type": type(exc).__name__,
             },
+            exc_info=True,
         )
 
 
@@ -919,7 +1009,11 @@ async def try_enqueue_metrics_node_exited(
             ).mappings().first()
             if session_row is None or visit_row is None:
                 return
-            contact = resolve_metrics_contact_snapshot(session_row)
+            contact = await _stable_metrics_contact_snapshot(
+                db_session,
+                session_row=session_row,
+                session_uuid=session_uuid,
+            )
             entered_at = visit_row["entered_at"]
             duration_ms = max(
                 0,
@@ -959,6 +1053,7 @@ async def try_enqueue_metrics_node_exited(
                 "component_ref_id": component_ref_id,
                 "exception_type": type(exc).__name__,
             },
+            exc_info=True,
         )
 
 
@@ -987,7 +1082,11 @@ async def try_enqueue_metrics_session_terminal_events(
             )
             if session_row is None:
                 return
-            contact = resolve_metrics_contact_snapshot(session_row)
+            contact = await _stable_metrics_contact_snapshot(
+                db_session,
+                session_row=session_row,
+                session_uuid=session_uuid,
+            )
             context = _base_context(
                 flow_uuid=flow_uuid,
                 session_uuid=session_uuid,
@@ -998,6 +1097,20 @@ async def try_enqueue_metrics_session_terminal_events(
                 max(0, int((occurred_at - started_at).total_seconds() * 1000))
                 if started_at is not None
                 else 0
+            )
+            nodes_executed = int(
+                (
+                    await db_session.execute(
+                        text(
+                            """
+                            SELECT COUNT(*)
+                            FROM orch_journey_stage_visits
+                            WHERE session_uuid = CAST(:session_uuid AS uuid)
+                            """
+                        ),
+                        {"session_uuid": session_uuid},
+                    )
+                ).scalar_one()
             )
             execution_event_type = (
                 "flow.execution.failed.v1"
@@ -1016,6 +1129,7 @@ async def try_enqueue_metrics_session_terminal_events(
                     "status": lifecycle_status,
                     "execution_id": session_uuid,
                     "duration_ms": duration_ms,
+                    "nodes_executed": nodes_executed,
                 }
             )
             await enqueue_metrics_event(
@@ -1037,8 +1151,11 @@ async def try_enqueue_metrics_session_terminal_events(
                 context=context,
                 payload={
                     "status": lifecycle_status,
+                    "direction": "OUTBOUND",
+                    "started_at": started_at.isoformat() if started_at is not None else None,
                     "duration_seconds": duration_ms // 1000,
-                    "messages_exchanged": 0,
+                    "messages_sent": 0,
+                    "messages_received": 0,
                 },
                 occurred_at=occurred_at,
                 flow_uuid=flow_uuid,
@@ -1055,4 +1172,5 @@ async def try_enqueue_metrics_session_terminal_events(
                 "lifecycle_status": lifecycle_status,
                 "exception_type": type(exc).__name__,
             },
+            exc_info=True,
         )

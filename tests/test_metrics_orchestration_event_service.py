@@ -64,6 +64,25 @@ def test_contact_snapshot_prefers_selected_channel_and_normalizes_voice() -> Non
     assert snapshot["destination"] == "5511999999999"
 
 
+def test_contact_snapshot_prefers_source_person_resolved_before_session_start() -> None:
+    row = {
+        "source_person_uuid": "d8cfc3a5-0290-48a6-b935-7421683b84d5",
+        "entity": "external-123",
+        "runtime_variables": {
+            "session_identity": {"contact_list_member_id": 77},
+            "variables": {
+                "contact": {
+                    "person_uuid": "5b03521c-b81c-4c2e-ad31-9e11ad90a42b",
+                }
+            },
+        },
+    }
+
+    snapshot = resolve_metrics_contact_snapshot(row)
+
+    assert snapshot["contact_id"] == "d8cfc3a5-0290-48a6-b935-7421683b84d5"
+
+
 def test_digital_dispatch_statuses_follow_metrics_contract() -> None:
     assert _canonical_dispatch_status(channel="whatsapp", native_status="sent") == "sent"
     assert _canonical_dispatch_status(channel="whatsapp", native_status="read") == "read"

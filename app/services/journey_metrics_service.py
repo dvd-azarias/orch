@@ -502,6 +502,7 @@ async def record_journey_component_entry(
     entered_visit_number: int | None = None
     entered_component_ref_id: str | None = None
     entered_at: datetime | None = None
+    implicitly_closed_visits: list[dict[str, Any]] = []
     try:
         component_ref_id = _component_ref_id(component, card_cursor)
         stage_id, stage_issue = _component_stage(component)
@@ -606,25 +607,34 @@ async def record_journey_component_entry(
                     )
                 return
 
-            await db_session.execute(
-                text(
-                    """
-                    UPDATE orch_journey_stage_visits
-                    SET exited_at = GREATEST(
-                            entered_at,
-                            CAST(:occurred_at AS timestamptz)
+            implicitly_closed_visits = [
+                dict(row)
+                for row in (
+                    await db_session.execute(
+                        text(
+                            """
+                            UPDATE orch_journey_stage_visits
+                            SET exited_at = GREATEST(
+                                    entered_at,
+                                    CAST(:occurred_at AS timestamptz)
+                                ),
+                                exit_kind = COALESCE(exit_kind, 'transition'),
+                                updated_at = NOW()
+                            WHERE journey_session_id = :journey_session_id
+                              AND exited_at IS NULL
+                            RETURNING
+                                id,
+                                component_ref_id::text AS component_ref_id,
+                                component_kind
+                            """
                         ),
-                        exit_kind = COALESCE(exit_kind, 'transition'),
-                        updated_at = NOW()
-                    WHERE journey_session_id = :journey_session_id
-                      AND exited_at IS NULL
-                    """
-                ),
-                {
-                    "journey_session_id": context.journey_session_id,
-                    "occurred_at": now,
-                },
-            )
+                        {
+                            "journey_session_id": context.journey_session_id,
+                            "occurred_at": now,
+                        },
+                    )
+                ).mappings().all()
+            ]
 
             if stage_id is None:
                 await db_session.execute(
@@ -767,6 +777,18 @@ async def record_journey_component_entry(
             await mark_journey_workspace_snapshot_dirty(
                 db_session,
                 observed_at=now,
+            )
+
+        for closed_visit in implicitly_closed_visits:
+            await try_enqueue_metrics_node_exited(
+                db_session,
+                source_session_id=context.source_session_id,
+                flow_uuid=context.flow_uuid,
+                session_uuid=context.session_uuid,
+                visit_id=int(closed_visit["id"]),
+                component_ref_id=str(closed_visit["component_ref_id"]),
+                component_kind=str(closed_visit.get("component_kind") or "unknown"),
+                occurred_at=now,
             )
 
         if (
@@ -962,6 +984,7 @@ async def finalize_journey_session_metrics(
     emitted_lifecycle_status: str | None = None
     emitted_terminal_outcome: str | None = None
     emitted_at: datetime | None = None
+    terminal_closed_visits: list[dict[str, Any]] = []
     try:
         now = occurred_at or datetime.now(timezone.utc)
         tx_context = (
@@ -1055,26 +1078,35 @@ async def finalize_journey_session_metrics(
                 },
             )
             if is_terminal:
-                await db_session.execute(
-                    text(
-                        """
-                        UPDATE orch_journey_stage_visits
-                        SET exited_at = GREATEST(
-                                entered_at,
-                                CAST(:occurred_at AS timestamptz)
+                terminal_closed_visits = [
+                    dict(row)
+                    for row in (
+                        await db_session.execute(
+                            text(
+                                """
+                                UPDATE orch_journey_stage_visits
+                                SET exited_at = GREATEST(
+                                        entered_at,
+                                        CAST(:occurred_at AS timestamptz)
+                                    ),
+                                    exit_kind = COALESCE(exit_kind, :exit_kind),
+                                    updated_at = NOW()
+                                WHERE journey_session_id = :journey_session_id
+                                  AND exited_at IS NULL
+                                RETURNING
+                                    id,
+                                    component_ref_id::text AS component_ref_id,
+                                    component_kind
+                                """
                             ),
-                            exit_kind = COALESCE(exit_kind, :exit_kind),
-                            updated_at = NOW()
-                        WHERE journey_session_id = :journey_session_id
-                          AND exited_at IS NULL
-                        """
-                    ),
-                    {
-                        "journey_session_id": context.journey_session_id,
-                        "occurred_at": ended_at or now,
-                        "exit_kind": terminal_class,
-                    },
-                )
+                            {
+                                "journey_session_id": context.journey_session_id,
+                                "occurred_at": ended_at or now,
+                                "exit_kind": terminal_class,
+                            },
+                        )
+                    ).mappings().all()
+                ]
             await _touch_flow_coverage(
                 db_session,
                 flow_uuid=context.flow_uuid,
@@ -1088,6 +1120,17 @@ async def finalize_journey_session_metrics(
                 emitted_lifecycle_status = lifecycle_status
                 emitted_terminal_outcome = terminal_outcome
                 emitted_at = ended_at or now
+        for closed_visit in terminal_closed_visits:
+            await try_enqueue_metrics_node_exited(
+                db_session,
+                source_session_id=context.source_session_id,
+                flow_uuid=context.flow_uuid,
+                session_uuid=context.session_uuid,
+                visit_id=int(closed_visit["id"]),
+                component_ref_id=str(closed_visit["component_ref_id"]),
+                component_kind=str(closed_visit.get("component_kind") or "unknown"),
+                occurred_at=emitted_at or now,
+            )
         if emitted_lifecycle_status is not None and emitted_at is not None:
             await try_enqueue_metrics_session_terminal_events(
                 db_session,
