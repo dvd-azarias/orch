@@ -38,8 +38,10 @@ O multilane permanece independente e explicitamente delimitado por
 
 1. Promover Target Core e ORCH com os gates globais ainda desligados.
 2. Promover ORCHESTRATOR e configurar a descoberta global de filas humanas.
-3. No control plane `.136`, tornar v86 a imagem default e remover overrides de
-   imagem antigos; preservar os masters do Supplier V2.
+3. No control plane `.136`, tornar v86 a imagem default, remover overrides de
+   imagem antigos, manter `DIALER_SUPPLIER_V2_DISPATCH_ENABLED=true` e esvaziar
+   `DIALER_SUPPLIER_V2_DISPATCH_FLOW_UUIDS`. No Kerberos, allowlist vazia com o
+   master ligado significa dispatch global; multilane continua independente.
 4. Ativar o gate global Target em rolling `.239` e `.249`, com health e smoke
    entre os nós.
 5. Ativar os gates globais ORCH no nó executor `.237`; aplicar configuração de
