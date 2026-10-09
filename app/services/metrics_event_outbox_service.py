@@ -53,6 +53,14 @@ def metrics_events_enabled_for_workspace(
         safe_workspace_uuid = str(UUID(str(workspace_uuid)))
     except (TypeError, ValueError, AttributeError):
         return False
+    if bool(
+        getattr(
+            effective_settings,
+            "orch_metrics_events_allow_all_workspaces",
+            False,
+        )
+    ):
+        return True
     allowed = {
         str(UUID(value))
         for value in effective_settings.orch_metrics_events_workspace_allowlist

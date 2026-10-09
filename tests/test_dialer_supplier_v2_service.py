@@ -216,6 +216,32 @@ def test_feature_flag_requires_workspace_and_flow_allowlists() -> None:
     )
 
 
+def test_global_feature_flag_accepts_any_valid_context_but_remains_fail_closed() -> None:
+    settings = _settings(
+        dialer_supplier_v2_allow_all_contexts=True,
+        dialer_supplier_v2_workspace_allowlist=(),
+        dialer_supplier_v2_flow_allowlist=(),
+    )
+    assert service.dialer_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        flow_uuid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+    assert not service.dialer_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid="not-a-uuid",
+        flow_uuid=FLOW_UUID,
+    )
+    assert not service.dialer_supplier_v2_enabled_for_context(
+        settings=_settings(
+            dialer_supplier_v2_enabled=False,
+            dialer_supplier_v2_allow_all_contexts=True,
+        ),
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+    )
+
+
 def test_multilane_gate_requires_supplier_and_dedicated_flow_allowlist() -> None:
     enabled = _settings(
         orch_dialer_multilane_v2_enabled=True,

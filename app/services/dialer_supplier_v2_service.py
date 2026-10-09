@@ -175,6 +175,8 @@ def dialer_supplier_v2_enabled_for_context(
         normalized = str(UUID(str(flow_uuid)))
     except (TypeError, ValueError, AttributeError):
         return False
+    if bool(getattr(settings, "dialer_supplier_v2_allow_all_contexts", False)):
+        return True
     allowed_workspaces = {
         str(UUID(str(item)))
         for item in settings.dialer_supplier_v2_workspace_allowlist

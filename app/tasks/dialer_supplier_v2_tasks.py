@@ -859,12 +859,15 @@ async def _reconcile_pending_dialer_supplier_v2_cycles_task() -> dict[str, int]:
     flow_allowlist = [
         str(item) for item in settings.dialer_supplier_v2_flow_allowlist
     ]
+    allow_all_contexts = bool(
+        getattr(settings, "dialer_supplier_v2_allow_all_contexts", False)
+    )
     allowed_workspaces = {
         str(item) for item in settings.dialer_supplier_v2_workspace_allowlist
     }
     for workspace in workspaces:
         workspace_uuid = str(workspace["workspace_uuid"])
-        if workspace_uuid not in allowed_workspaces:
+        if not allow_all_contexts and workspace_uuid not in allowed_workspaces:
             continue
         _safe_workspace_uuid, workspace_schema = bind_workspace_context(
             workspace_uuid
@@ -878,6 +881,7 @@ async def _reconcile_pending_dialer_supplier_v2_cycles_task() -> dict[str, int]:
                 rows = await _list_reconcilable_dialer_supplier_v2_cycles(
                     db_session,
                     flow_allowlist=flow_allowlist,
+                    allow_all_flows=allow_all_contexts,
                     registration_lease_seconds=int(
                         settings.dialer_supplier_v2_registration_lease_seconds
                     ),
@@ -928,6 +932,7 @@ async def _list_reconcilable_dialer_supplier_v2_cycles(
     db_session: Any,
     *,
     flow_allowlist: list[str],
+    allow_all_flows: bool = False,
     registration_lease_seconds: int,
     limit: int,
     _table_name: str = "orch_sessions",
@@ -959,7 +964,10 @@ async def _list_reconcilable_dialer_supplier_v2_cycles(
             FROM __ORCH_SESSIONS_TABLE__
             WHERE state = 1
               AND ended_at IS NULL
-              AND flow_uuid = ANY(CAST(:flow_uuids AS uuid[]))
+              AND (
+                    :allow_all_flows
+                    OR flow_uuid = ANY(CAST(:flow_uuids AS uuid[]))
+              )
               AND (
                     runtime_variables #>> '{workflow_v2,dialer_supplier_v2,status}' = 'pending'
                     OR (
@@ -995,6 +1003,7 @@ async def _list_reconcilable_dialer_supplier_v2_cycles(
         text(query_sql),
         {
             "flow_uuids": flow_allowlist,
+            "allow_all_flows": bool(allow_all_flows),
             "lease_seconds": max(30, int(registration_lease_seconds)),
             "pending_retry_recovery_seconds": _PENDING_RETRY_RECOVERY_SECONDS,
             "limit": max(1, int(limit)),

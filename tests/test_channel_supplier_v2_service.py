@@ -161,6 +161,30 @@ def test_channel_dispatch_gate_requires_both_allowlists() -> None:
     )
 
 
+def test_channel_dispatch_global_gate_accepts_any_valid_context() -> None:
+    settings = _settings()
+    settings.channel_supplier_v2_allow_all_contexts = True
+    settings.channel_supplier_v2_workspace_allowlist = ()
+    settings.channel_supplier_v2_flow_allowlist = ()
+
+    assert channel_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid="11111111-1111-4111-8111-111111111111",
+        flow_uuid="33333333-3333-4333-8333-333333333333",
+    )
+    assert not channel_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid="not-a-uuid",
+        flow_uuid=FLOW_UUID,
+    )
+    settings.channel_supplier_v2_enabled = False
+    assert not channel_supplier_v2_enabled_for_context(
+        settings=settings,
+        workspace_uuid=WORKSPACE_UUID,
+        flow_uuid=FLOW_UUID,
+    )
+
+
 def test_callback_token_is_signed_scoped_and_contains_no_sensitive_data() -> None:
     settings = _settings()
     token = build_channel_callback_token(

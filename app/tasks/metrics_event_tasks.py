@@ -49,6 +49,9 @@ async def _publish_pending_metrics_events() -> dict[str, int]:
         normalize_workspace_uuid(value)
         for value in settings.orch_metrics_events_workspace_allowlist
     }
+    allow_all_workspaces = bool(
+        getattr(settings, "orch_metrics_events_allow_all_workspaces", False)
+    )
     session_factory = get_session_factory()
     async with session_factory() as db_session:
         workspaces = await list_completed_workspaces(db_session)
@@ -64,7 +67,7 @@ async def _publish_pending_metrics_events() -> dict[str, int]:
     }
     for workspace in workspaces:
         workspace_uuid = normalize_workspace_uuid(str(workspace["workspace_uuid"]))
-        if workspace_uuid not in allowed_workspaces:
+        if not allow_all_workspaces and workspace_uuid not in allowed_workspaces:
             continue
         counters["workspaces_scanned"] += 1
         _safe_workspace_uuid, workspace_schema = bind_workspace_context(workspace_uuid)

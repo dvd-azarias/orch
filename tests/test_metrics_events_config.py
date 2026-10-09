@@ -22,6 +22,7 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(key, value)
     for key in (
         "ORCH_METRICS_EVENTS_ENABLED",
+        "ORCH_METRICS_EVENTS_ALLOW_ALL_WORKSPACES",
         "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST",
         "METRICS_API_BASE_URL",
         "METRICS_API_KEY",
@@ -40,9 +41,28 @@ def test_metrics_events_are_disabled_and_isolated_by_default(
     settings = config.get_settings()
 
     assert settings.orch_metrics_events_enabled is False
+    assert settings.orch_metrics_events_allow_all_workspaces is False
     assert settings.orch_metrics_events_workspace_allowlist == ()
     assert settings.celery_metrics_events_queue == "orch_metrics_events"
     assert settings.celery_beat_metrics_events_enabled is False
+    config.get_settings.cache_clear()
+
+
+def test_metrics_events_global_mode_accepts_empty_workspace_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    monkeypatch.setenv("CELERY_ENABLED", "true")
+    monkeypatch.setenv("ORCH_METRICS_EVENTS_ENABLED", "true")
+    monkeypatch.setenv("ORCH_METRICS_EVENTS_ALLOW_ALL_WORKSPACES", "true")
+    monkeypatch.setenv("METRICS_API_BASE_URL", "https://metrics.example.test/api")
+    monkeypatch.setenv("METRICS_API_KEY", "test-key")
+
+    settings = config.get_settings()
+
+    assert settings.orch_metrics_events_enabled is True
+    assert settings.orch_metrics_events_allow_all_workspaces is True
+    assert settings.orch_metrics_events_workspace_allowlist == ()
     config.get_settings.cache_clear()
 
 

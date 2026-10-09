@@ -144,6 +144,8 @@ def channel_supplier_v2_enabled_for_context(
     try:
         workspace = str(UUID(str(workspace_uuid)))
         flow = str(UUID(str(flow_uuid)))
+        if bool(getattr(settings, "channel_supplier_v2_allow_all_contexts", False)):
+            return True
         workspaces = {
             str(UUID(str(item)))
             for item in settings.channel_supplier_v2_workspace_allowlist

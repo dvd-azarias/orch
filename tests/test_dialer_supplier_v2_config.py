@@ -24,6 +24,7 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(key, value)
     for key in (
         "DIALER_SUPPLIER_V2_ENABLED",
+        "DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS",
         "DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST",
         "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST",
         "CELERY_DIALER_SUPPLIER_V2_QUEUE",
@@ -50,6 +51,7 @@ def test_supplier_v2_is_disabled_and_isolated_by_default(
     settings = config.get_settings()
 
     assert settings.dialer_supplier_v2_enabled is False
+    assert settings.dialer_supplier_v2_allow_all_contexts is False
     assert settings.dialer_supplier_v2_workspace_allowlist == ()
     assert settings.dialer_supplier_v2_flow_allowlist == ()
     assert settings.celery_dialer_supplier_v2_queue == "orch_dialer_supplier_v2"
@@ -187,6 +189,52 @@ def test_supplier_v2_enabled_accepts_explicit_flow_allowlist(
     assert settings.dialer_supplier_v2_enabled is True
     assert settings.dialer_supplier_v2_workspace_allowlist == (WORKSPACE_UUID,)
     assert settings.dialer_supplier_v2_flow_allowlist == (FLOW_UUID,)
+    config.get_settings.cache_clear()
+
+
+def test_supplier_v2_global_mode_accepts_empty_context_allowlists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    monkeypatch.setenv("CELERY_ENABLED", "true")
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_ENABLED", "true")
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS", "true")
+    monkeypatch.setenv(
+        "TARGET_CORE_SUPPLIER_API_BASE_URL",
+        "https://supplier.internal",
+    )
+    monkeypatch.setenv("TARGET_CORE_API_BEARER_TOKEN", "internal-token")
+
+    settings = config.get_settings()
+
+    assert settings.dialer_supplier_v2_enabled is True
+    assert settings.dialer_supplier_v2_allow_all_contexts is True
+    assert settings.dialer_supplier_v2_workspace_allowlist == ()
+    assert settings.dialer_supplier_v2_flow_allowlist == ()
+    config.get_settings.cache_clear()
+
+
+def test_supplier_v2_global_mode_keeps_multilane_explicitly_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    monkeypatch.setenv("CELERY_ENABLED", "true")
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_ENABLED", "true")
+    monkeypatch.setenv("DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS", "true")
+    monkeypatch.setenv(
+        "TARGET_CORE_SUPPLIER_API_BASE_URL",
+        "https://supplier.internal",
+    )
+    monkeypatch.setenv("TARGET_CORE_API_BEARER_TOKEN", "internal-token")
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_ENABLED", "true")
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS", FLOW_UUID)
+    monkeypatch.setenv("ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW", "2")
+
+    settings = config.get_settings()
+
+    assert settings.dialer_supplier_v2_allow_all_contexts is True
+    assert settings.dialer_supplier_v2_flow_allowlist == ()
+    assert settings.orch_dialer_multilane_v2_flow_uuids == (FLOW_UUID,)
     config.get_settings.cache_clear()
 
 

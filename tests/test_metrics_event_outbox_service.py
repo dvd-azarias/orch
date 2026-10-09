@@ -56,6 +56,21 @@ def test_workspace_gate_is_fail_closed() -> None:
         settings=enabled,
     )
 
+    global_enabled = replace(
+        settings,
+        orch_metrics_events_enabled=True,
+        orch_metrics_events_allow_all_workspaces=True,
+        orch_metrics_events_workspace_allowlist=(),
+    )
+    assert metrics_events_enabled_for_workspace(
+        str(uuid4()),
+        settings=global_enabled,
+    )
+    assert not metrics_events_enabled_for_workspace(
+        "not-a-uuid",
+        settings=global_enabled,
+    )
+
 
 def test_retry_backoff_is_exponential_and_bounded() -> None:
     assert metrics_retry_delay_seconds(

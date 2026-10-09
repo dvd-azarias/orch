@@ -131,8 +131,13 @@ e rollout:
 ### Eventos de orquestracao para a Metrics API
 
 - `ORCH_METRICS_EVENTS_ENABLED=false`: gate global, desligado por padrao.
+- `ORCH_METRICS_EVENTS_ALLOW_ALL_WORKSPACES=false`: quando `true`, captura e
+  publica eventos de todos os workspaces concluídos. O gate principal continua
+  obrigatório e UUIDs de entrada inválidos continuam rejeitados.
 - `ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST`: UUIDs explicitamente autorizados;
-  vazio falha fechado quando o gate esta ativo.
+  vazio falha fechado quando o gate esta ativo e o modo global está desligado.
+  A lista pode permanecer preenchida como configuração de rollback enquanto o
+  modo global estiver ativo.
 - `METRICS_API_BASE_URL`: base terminada em `/api`; o publicador acrescenta
   `/v1/events/ingest`.
 - `METRICS_API_KEY`: segredo enviado somente no header `X-API-Key`; nunca
@@ -163,10 +168,15 @@ Detalhes e gates: `docs/project-knowledge/METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
   obrigatória quando o card for usado e exige restart de API/workers.
 - Registro de ciclo Dialer Supplier V2: `DIALER_SUPPLIER_V2_ENABLED=false` por
   padrão, com `DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST` e
-  `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST` obrigatórias quando habilitado. A primeira
-  limita também os schemas consultados pelo reconciliador; nunca deixá-la
-  global em banco compartilhado. O Gate exige `CELERY_ENABLED=true`, pois a
-  chamada externa é deliberadamente feita somente depois do commit.
+  `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST` obrigatórias quando habilitado em modo
+  canário. `DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS=true` autoriza qualquer par
+  válido de workspace/flow e faz o reconciliador percorrer todos os workspaces
+  concluídos; o master flag continua obrigatório. As allowlists podem permanecer
+  preenchidas como rollback imediato e voltam a valer ao desligar o modo global.
+  Esse gate alcança somente a intenção materializada pelo card
+  `send_with_dialer_handoff`: `dialer` e `send_with_dialer` continuam no Supplier
+  V1 e não são convertidos por configuração. O Gate exige `CELERY_ENABLED=true`,
+  pois a chamada externa é deliberadamente feita somente depois do commit.
   Também exige `TARGET_CORE_SUPPLIER_API_BASE_URL` no perfil Supplier e
   `TARGET_CORE_API_BEARER_TOKEN`; ausência impede a inicialização. Timeout,
   tentativas, backoff, lease, intervalo e lote de reconciliação usam
@@ -181,10 +191,11 @@ Detalhes e gates: `docs/project-knowledge/METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
   do ambiente; manter `false` nos demais.
 - Múltiplos cards do novo Dialer no mesmo flow permanecem fail-closed por
   padrão. O ORCH exige simultaneamente o Gate Supplier V2 acima e
-  `ORCH_DIALER_MULTILANE_V2_ENABLED=true`, além de o flow constar tanto em
-  `ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS` quanto em
-  `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST`. UUID ausente, inválido, duplicado ou
-  fora da interseção impede a inicialização. Os limites locais usam
+  `ORCH_DIALER_MULTILANE_V2_ENABLED=true`, além de o flow constar em
+  `ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS`. No modo canário Supplier V2, ele também
+  deve constar em `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST`; no modo global, apenas a
+  allowlist dedicada de multilane continua delimitando essa capacidade. UUID
+  ausente, inválido ou duplicado impede a inicialização. Os limites locais usam
   `ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW` e
   `ORCH_DIALER_MULTILANE_V2_MAX_EXECUTION_GROUPS_PER_FLOW`; com o Gate ligado,
   o primeiro deve ser pelo menos `2` e o segundo não pode excedê-lo. Os
@@ -193,10 +204,12 @@ Detalhes e gates: `docs/project-knowledge/METRICS_ORCHESTRATION_EVENTS_PLAN.md`.
   dos gates de Kerberos e `service_dialer` e do canário controlado definidos em
   `MULTI_DIALER_EXECUTION_PLAN.md`.
 - Dispatch SMS/RCS Supplier V2: `CHANNEL_SUPPLIER_V2_ENABLED=false` por padrão.
-  A ativação exige allowlists explícitas em
+  Em modo canário, a ativação exige allowlists explícitas em
   `CHANNEL_SUPPLIER_V2_WORKSPACE_ALLOWLIST` e
-  `CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST`, `CELERY_ENABLED=true`, URL/bearer do
-  perfil Supplier e uma chave Fernet exclusiva em
+  `CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST`. O modo global explícito usa
+  `CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS=true`; o master flag, UUIDs válidos,
+  `CELERY_ENABLED=true`, URL/bearer do perfil Supplier e uma chave Fernet
+  exclusiva em
   `CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY`. O identificador da chave usa
   `CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY_ID`; a mesma chave/id deve existir no
   Target Core. O registro pós-commit usa a fila exclusiva configurada em

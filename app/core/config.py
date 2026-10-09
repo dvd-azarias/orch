@@ -62,6 +62,7 @@ class Settings:
     orch_journey_redis_url: str | None
     orch_journey_ws_ticket_ttl_seconds: int
     orch_metrics_events_enabled: bool
+    orch_metrics_events_allow_all_workspaces: bool
     orch_metrics_api_base_url: str | None
     orch_metrics_api_key: str | None
     orch_metrics_events_workspace_allowlist: tuple[str, ...]
@@ -174,6 +175,7 @@ class Settings:
     target_core_api_bearer_token: str | None
     target_core_supplier_api_base_url: str | None
     dialer_supplier_v2_enabled: bool
+    dialer_supplier_v2_allow_all_contexts: bool
     dialer_supplier_v2_workspace_allowlist: tuple[str, ...]
     dialer_supplier_v2_flow_allowlist: tuple[str, ...]
     dialer_supplier_v2_http_timeout_seconds: float
@@ -183,6 +185,7 @@ class Settings:
     dialer_supplier_v2_reconcile_batch_size: int
     dialer_supplier_v2_registration_lease_seconds: int
     channel_supplier_v2_enabled: bool
+    channel_supplier_v2_allow_all_contexts: bool
     channel_supplier_v2_workspace_allowlist: tuple[str, ...]
     channel_supplier_v2_flow_allowlist: tuple[str, ...]
     channel_supplier_v2_encryption_key: str | None
@@ -547,6 +550,9 @@ def get_settings() -> Settings:
         orch_metrics_events_enabled=_read_env_bool(
             "ORCH_METRICS_EVENTS_ENABLED", False
         ),
+        orch_metrics_events_allow_all_workspaces=_read_env_bool(
+            "ORCH_METRICS_EVENTS_ALLOW_ALL_WORKSPACES", False
+        ),
         orch_metrics_api_base_url=_read_env_optional("METRICS_API_BASE_URL"),
         orch_metrics_api_key=_read_env_optional("METRICS_API_KEY"),
         orch_metrics_events_workspace_allowlist=_read_env_csv(
@@ -844,6 +850,9 @@ def get_settings() -> Settings:
         dialer_supplier_v2_enabled=_read_env_bool(
             "DIALER_SUPPLIER_V2_ENABLED", False
         ),
+        dialer_supplier_v2_allow_all_contexts=_read_env_bool(
+            "DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS", False
+        ),
         dialer_supplier_v2_workspace_allowlist=_read_env_csv(
             "DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST", ()
         ),
@@ -885,6 +894,9 @@ def get_settings() -> Settings:
         ),
         channel_supplier_v2_enabled=_read_env_bool(
             "CHANNEL_SUPPLIER_V2_ENABLED", False
+        ),
+        channel_supplier_v2_allow_all_contexts=_read_env_bool(
+            "CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS", False
         ),
         channel_supplier_v2_workspace_allowlist=_read_env_csv(
             "CHANNEL_SUPPLIER_V2_WORKSPACE_ALLOWLIST", ()
@@ -1025,10 +1037,14 @@ def get_settings() -> Settings:
                 "CELERY_ENABLED=true é obrigatório quando "
                 "ORCH_METRICS_EVENTS_ENABLED=true."
             )
-        if not settings.orch_metrics_events_workspace_allowlist:
+        if (
+            not settings.orch_metrics_events_allow_all_workspaces
+            and not settings.orch_metrics_events_workspace_allowlist
+        ):
             raise ValueError(
                 "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST é obrigatória quando "
-                "ORCH_METRICS_EVENTS_ENABLED=true."
+                "ORCH_METRICS_EVENTS_ENABLED=true e "
+                "ORCH_METRICS_EVENTS_ALLOW_ALL_WORKSPACES=false."
             )
         try:
             for workspace_uuid in settings.orch_metrics_events_workspace_allowlist:
@@ -1106,15 +1122,23 @@ def get_settings() -> Settings:
                 "DIALER_SUPPLIER_V2_ENABLED=true, pois o registro ocorre "
                 "somente após o commit em fila dedicada."
             )
-        if not settings.dialer_supplier_v2_workspace_allowlist:
+        if (
+            not settings.dialer_supplier_v2_allow_all_contexts
+            and not settings.dialer_supplier_v2_workspace_allowlist
+        ):
             raise ValueError(
                 "DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST é obrigatória quando "
-                "DIALER_SUPPLIER_V2_ENABLED=true."
+                "DIALER_SUPPLIER_V2_ENABLED=true e "
+                "DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS=false."
             )
-        if not settings.dialer_supplier_v2_flow_allowlist:
+        if (
+            not settings.dialer_supplier_v2_allow_all_contexts
+            and not settings.dialer_supplier_v2_flow_allowlist
+        ):
             raise ValueError(
                 "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST é obrigatória quando "
-                "DIALER_SUPPLIER_V2_ENABLED=true."
+                "DIALER_SUPPLIER_V2_ENABLED=true e "
+                "DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS=false."
             )
         try:
             for workspace_uuid in settings.dialer_supplier_v2_workspace_allowlist:
@@ -1143,15 +1167,23 @@ def get_settings() -> Settings:
                 "CELERY_ENABLED=true é obrigatório quando "
                 "CHANNEL_SUPPLIER_V2_ENABLED=true."
             )
-        if not settings.channel_supplier_v2_workspace_allowlist:
+        if (
+            not settings.channel_supplier_v2_allow_all_contexts
+            and not settings.channel_supplier_v2_workspace_allowlist
+        ):
             raise ValueError(
                 "CHANNEL_SUPPLIER_V2_WORKSPACE_ALLOWLIST é obrigatória quando "
-                "CHANNEL_SUPPLIER_V2_ENABLED=true."
+                "CHANNEL_SUPPLIER_V2_ENABLED=true e "
+                "CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS=false."
             )
-        if not settings.channel_supplier_v2_flow_allowlist:
+        if (
+            not settings.channel_supplier_v2_allow_all_contexts
+            and not settings.channel_supplier_v2_flow_allowlist
+        ):
             raise ValueError(
                 "CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST é obrigatória quando "
-                "CHANNEL_SUPPLIER_V2_ENABLED=true."
+                "CHANNEL_SUPPLIER_V2_ENABLED=true e "
+                "CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS=false."
             )
         try:
             for workspace_uuid in settings.channel_supplier_v2_workspace_allowlist:
@@ -1231,15 +1263,16 @@ def get_settings() -> Settings:
             raise ValueError(
                 "ORCH_DIALER_MULTILANE_V2_FLOW_UUIDS contém UUID inválido ou duplicado."
             )
-        supplier_flows = {
-            str(UUID(flow_uuid))
-            for flow_uuid in settings.dialer_supplier_v2_flow_allowlist
-        }
-        if not multilane_flows.issubset(supplier_flows):
-            raise ValueError(
-                "Todo flow multilane do ORCH deve também estar em "
-                "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST."
-            )
+        if not settings.dialer_supplier_v2_allow_all_contexts:
+            supplier_flows = {
+                str(UUID(flow_uuid))
+                for flow_uuid in settings.dialer_supplier_v2_flow_allowlist
+            }
+            if not multilane_flows.issubset(supplier_flows):
+                raise ValueError(
+                    "Todo flow multilane do ORCH deve também estar em "
+                    "DIALER_SUPPLIER_V2_FLOW_ALLOWLIST."
+                )
         if settings.orch_dialer_multilane_v2_max_lanes_per_flow < 2:
             raise ValueError(
                 "ORCH_DIALER_MULTILANE_V2_MAX_LANES_PER_FLOW deve ser pelo menos 2 "
