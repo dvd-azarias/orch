@@ -3264,8 +3264,54 @@ execução de cards ou seleção de Supplier.
   `direction`/`started_at`; Ruff passou nos dois arquivos alterados;
 - `git diff --check` passou nos três repositórios.
 
+### DEPLOY / EVIDENCE
+
+- Foram promovidos os merges Target Core
+  `7b37560b8577dac199a9c9827ea995f843a3b4e2`, ORCH
+  `ba02433db099ca7200f22202558f0e9cfb96b9a3` e ORCHESTRATOR
+  `4751ba0942bb011657e1373f9828d9dc2c6a5983`.
+- No Target, `target-core-runner.service` recebeu o merge primeiro no `.249` e
+  depois no `.239`. Os dois health checks responderam `status=ok`; as units
+  terminaram `active/running`, com `NRestarts=0` e sem entrada `err..alert`
+  desde os restarts.
+- A auditoria dos entrypoints mostrou que `headless_engine.py`,
+  `finish_flow.py` e os helpers de Metrics alterados também executam nos
+  workers assíncronos Runner v5 dos hosts `.128/.129`. Como esses checkouts
+  possuem linhas locais divergentes da `main`, não foi feito merge integral:
+  os quatro arquivos de runtime, cujos blobs-base eram idênticos ao SHA
+  anterior do Target, receberam backport cirúrgico e commits de recuperação
+  locais `4456e8b17b4c153225fbf2b125e87fb64e5a24da` no `.128` e
+  `0f3a5d4107f514de29c4d72298bc9b436a21b90a` no `.129`.
+- Os quatro `celery_runnerv5_flow_engine` de cada host `.128/.129` foram
+  reiniciados individualmente. Os oito nós responderam `pong`, ficaram
+  `active/running`, com `NRestarts=0` no novo processo e sem erro no journal.
+  Os workers de ingest não foram alterados; seus contadores históricos de
+  restart não pertencem a este rollout.
+- O ORCH foi promovido por rolling `.239 → .249 → .237`. As APIs dos três nós,
+  os cinco workers de workflow e os workers dedicados de Journey e Metrics no
+  `.237` terminaram saudáveis. `live`, `db`, `ready` e `celery` ficaram verdes;
+  broker, worker e beat reportaram `true`, todos os sete nós Celery auditados
+  responderam `pong`, `NRestarts=0` e não houve entrada `err..alert` na janela.
+- No ORCHESTRATOR `.136`, somente `celery_sbc_to_metrics.service` foi
+  reiniciado: a unit ficou `active/running`, `NRestarts=0`, sem erro no journal,
+  e `telco@from_sbc_to_metrics_136` respondeu `pong`. O `.143` e a imagem v86
+  foram deliberadamente preservados, pois os containers apenas publicam a task
+  pelo nome e não importam o módulo alterado do worker `.136`.
+- O roteamento de discagem não foi alterado no rollout: cards legados continuam
+  em Supplier V1 e somente o card explícito `send_with_dialer_handoff` seleciona
+  Supplier V2.
+- A consulta read-only após o corte global de `2026-10-09T21:51:35Z` encontrou
+  zero sessão, zero evento do flow e zero item novo no outbox. Não há backlog
+  pós-corte, mas também não existe execução nova que permita declarar o POST
+  externo funcionalmente validado. O canário Highcomm e a observação no destino
+  Metrics continuam obrigatórios para o fechamento E2E.
+
 ### ROLLBACK
 
+- Target: restaurar a revisão anterior nos Runners `.249/.239`; nos hosts
+  `.128/.129`, reverter somente os commits locais de backport e reiniciar os
+  oito flow engines de forma sequencial. Não alinhar os checkouts divergentes
+  por merge integral.
 - ORCH: reverter os dois services e testes; não há migration;
 - ORCHESTRATOR: reverter o produtor SBC/Metrics. O roteamento Supplier V1/V2 e
   as imagens de discador permanecem inalterados.
