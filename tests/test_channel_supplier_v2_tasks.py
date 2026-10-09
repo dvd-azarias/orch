@@ -108,6 +108,60 @@ async def test_reconciler_recovers_only_allowlisted_workspace_on_dedicated_queue
 
 
 @pytest.mark.asyncio
+async def test_global_reconciler_scans_every_completed_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second_workspace_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    settings = _settings(
+        channel_supplier_v2_allow_all_contexts=True,
+    )
+    inspected: list[dict] = []
+    enqueued: list[dict] = []
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: (lambda: _Session()))
+    monkeypatch.setattr(
+        tasks,
+        "list_completed_workspaces",
+        lambda _session: _async_value(
+            [
+                {"workspace_uuid": WORKSPACE_UUID},
+                {"workspace_uuid": second_workspace_uuid},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "bind_workspace_context",
+        lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"),
+    )
+
+    async def _list_all(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        inspected.append(kwargs)
+        return [{"id": 71, "flow_uuid": FLOW_UUID, "attempts": 0}]
+
+    monkeypatch.setattr(
+        tasks,
+        "_list_reconcilable_channel_supplier_v2_dispatches",
+        _list_all,
+    )
+    monkeypatch.setattr(
+        tasks.register_channel_supplier_v2_dispatch_task,
+        "apply_async",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+
+    result = await tasks._reconcile_pending_channel_supplier_v2_dispatches_task()
+
+    assert result == {"scanned": 2, "enqueued": 2}
+    assert len(inspected) == 2
+    assert all(item["allow_all_flows"] is True for item in inspected)
+    assert {item["kwargs"]["workspace_uuid"] for item in enqueued} == {
+        WORKSPACE_UUID,
+        second_workspace_uuid,
+    }
+
+
+@pytest.mark.asyncio
 async def test_reconciler_is_inert_when_feature_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

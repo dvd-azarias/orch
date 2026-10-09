@@ -34,9 +34,9 @@ dinâmicos do discador. Eles não substituem nenhum dos gates desta tabela.
 
 | Capacidade | Aplicação/host | Configuração | Processo a recarregar |
 | --- | --- | --- | --- |
-| Discador Supplier V2 | ORCH `.237` | `DIALER_SUPPLIER_V2_ENABLED`, `DIALER_SUPPLIER_V2_WORKSPACE_ALLOWLIST`, `DIALER_SUPPLIER_V2_FLOW_ALLOWLIST` | `orch-celery-worker_01..05` e `orch-celery-dialer-supplier-v2-worker` |
-| Materialização SMS/RCS | ORCH `.237` | `CHANNEL_SUPPLIER_V2_ENABLED`, `CHANNEL_SUPPLIER_V2_WORKSPACE_ALLOWLIST`, `CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST`, chave/id de envelope e configuração de callback | `orch-celery-worker_01..05` |
-| Execução real SMS/RCS | Target Core `.239/.249` | `CONTACT_SUPPLIER_CHANNEL_DISPATCH_V2_ENABLED`, `..._WORKSPACE_UUIDS`, `..._FLOW_UUIDS`, mapa de chaves, endpoints e timeout | `target-core-supplier` e `celery_contact_supplier_v2_channel_dispatch` |
+| Discador Supplier V2 | ORCH `.237` | `DIALER_SUPPLIER_V2_ENABLED`; canário por allowlists ou global por `DIALER_SUPPLIER_V2_ALLOW_ALL_CONTEXTS` | `orch-celery-worker_01..05` e `orch-celery-dialer-supplier-v2-worker` |
+| Materialização SMS/RCS | ORCH `.237` | `CHANNEL_SUPPLIER_V2_ENABLED`; canário por allowlists ou global por `CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS`, chave/id de envelope e configuração de callback | `orch-celery-worker_01..05` |
+| Execução real SMS/RCS | Target Core `.239/.249` | `CONTACT_SUPPLIER_CHANNEL_DISPATCH_V2_ENABLED`; canário por allowlists ou global por `..._ALLOW_ALL_CONTEXTS`, mapa de chaves, endpoints e timeout | `target-core-supplier` e `celery_contact_supplier_v2_channel_dispatch` |
 | Callback público SMS/RCS | ORCH `.237/.239/.249` | `CHANNEL_SUPPLIER_V2_CALLBACKS_ENABLED` e as mesmas allowlists de workspace/flow | API ORCH de cada nó; `.239` antes de `.249` e `.237` somente quando sua API mudou |
 | WhatsApp | ORCH/Target no caminho existente | política do destinatário no card, template/ANI, membro escolhido e callbacks do provedor | somente o processo que consumir a configuração efetivamente alterada |
 
@@ -48,7 +48,22 @@ Nos nós `.239/.249` existem dois projetos e dois `.env` diferentes:
 
 Atualizar somente um deles deixa a jornada incompleta.
 
+## Invariante V1 x V2
+
+O rollout global não migra cards existentes. `dialer` e `send_with_dialer`
+continuam produzindo contrato Supplier V1. Somente
+`send_with_dialer_handoff` produz contrato Supplier V2. A imagem v86 executa os
+dois contratos e valida a combinação card/contrato; portanto trocar a imagem
+default para v86 não altera, por si só, o contrato de um card legado.
+
+As flags `*_ALLOW_ALL_CONTEXTS` removem apenas a segmentação por workspace e
+flow do caminho V2 já identificado. Elas não mudam o seletor de contrato.
+
 ## Checklist para novo flow no mesmo workspace
+
+Em modo global, os passos de inclusão nas allowlists de workspace/flow abaixo
+não são necessários. Mantê-las preenchidas é recomendado para rollback rápido:
+ao desligar `*_ALLOW_ALL_CONTEXTS`, elas voltam a ser o escopo efetivo.
 
 1. Confirmar revisão publicada, `session_mode`, cards usados, Perfil de
    Discagem publicado, destino e branches conectadas.
@@ -126,8 +141,10 @@ de SMS/RCS não comprova WhatsApp.
 
 ## Rollback
 
-Restaurar somente os backups dos `.env` alterados e reiniciar, em rolling, os
-mesmos processos da matriz. Retirar o flow de uma allowlist impede novos
+Desligar primeiro a flag global correspondente e reiniciar, em rolling, os
+mesmos processos da matriz; as allowlists canárias preservadas retomam o
+controle. Se necessário, restaurar somente os backups dos `.env` alterados.
+Retirar o flow de uma allowlist em modo canário impede novos
 registros; não apaga outboxes, ciclos, tentativas, mensagens ou callbacks já
 persistidos. Tratamento de registros existentes é operação separada e exige
 evidência e autorização próprias.

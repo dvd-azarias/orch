@@ -26,6 +26,7 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
         "CELERY_ENABLED",
         "CHANNEL_SUPPLIER_V2_ENABLED",
+        "CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS",
         "CHANNEL_SUPPLIER_V2_WORKSPACE_ALLOWLIST",
         "CHANNEL_SUPPLIER_V2_FLOW_ALLOWLIST",
         "CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY",
@@ -63,8 +64,34 @@ def test_channel_callbacks_are_disabled_by_default(
 
     settings = config.get_settings()
 
+    assert settings.channel_supplier_v2_allow_all_contexts is False
     assert settings.channel_supplier_v2_callbacks_enabled is False
     assert settings.channel_supplier_v2_callback_base_url is None
+    config.get_settings.cache_clear()
+
+
+def test_channel_supplier_v2_global_mode_accepts_empty_context_allowlists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _minimal_environment(monkeypatch)
+    monkeypatch.setenv("CELERY_ENABLED", "true")
+    monkeypatch.setenv("CHANNEL_SUPPLIER_V2_ENABLED", "true")
+    monkeypatch.setenv("CHANNEL_SUPPLIER_V2_ALLOW_ALL_CONTEXTS", "true")
+    monkeypatch.setenv(
+        "CHANNEL_SUPPLIER_V2_ENCRYPTION_KEY",
+        Fernet.generate_key().decode("ascii"),
+    )
+    monkeypatch.setenv(
+        "TARGET_CORE_SUPPLIER_API_BASE_URL", "https://target.internal"
+    )
+    monkeypatch.setenv("TARGET_CORE_API_BEARER_TOKEN", "internal-token")
+
+    settings = config.get_settings()
+
+    assert settings.channel_supplier_v2_enabled is True
+    assert settings.channel_supplier_v2_allow_all_contexts is True
+    assert settings.channel_supplier_v2_workspace_allowlist == ()
+    assert settings.channel_supplier_v2_flow_allowlist == ()
     config.get_settings.cache_clear()
 
 

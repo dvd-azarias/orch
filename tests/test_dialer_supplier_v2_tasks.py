@@ -588,6 +588,68 @@ async def test_reconciler_recovers_pending_intent_on_dedicated_queue(
 
 
 @pytest.mark.asyncio
+async def test_global_reconciler_scans_every_completed_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second_workspace_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    settings = _settings(
+        dialer_supplier_v2_allow_all_contexts=True,
+    )
+    inspected: list[dict] = []
+    enqueued: list[dict] = []
+    monkeypatch.setattr(tasks, "get_settings", lambda: settings)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: (lambda: _Session()))
+    monkeypatch.setattr(
+        tasks,
+        "list_completed_workspaces",
+        lambda _session: _async_value(
+            [
+                {"workspace_uuid": WORKSPACE_UUID},
+                {"workspace_uuid": second_workspace_uuid},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "bind_workspace_context",
+        lambda workspace_uuid: (workspace_uuid, f"ws_{workspace_uuid}"),
+    )
+
+    async def _list_all(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        inspected.append(kwargs)
+        return [
+            {
+                "id": 71,
+                "flow_uuid": FLOW_UUID,
+                "attempts": 0,
+                "resolution_attempts": 0,
+                "status": "pending",
+            }
+        ]
+
+    monkeypatch.setattr(
+        tasks,
+        "_list_reconcilable_dialer_supplier_v2_cycles",
+        _list_all,
+    )
+    monkeypatch.setattr(
+        tasks.register_dialer_supplier_v2_cycle_task,
+        "apply_async",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+
+    result = await tasks._reconcile_pending_dialer_supplier_v2_cycles_task()
+
+    assert result == {"scanned": 2, "enqueued": 2}
+    assert len(inspected) == 2
+    assert all(item["allow_all_flows"] is True for item in inspected)
+    assert {item["kwargs"]["workspace_uuid"] for item in enqueued} == {
+        WORKSPACE_UUID,
+        second_workspace_uuid,
+    }
+
+
+@pytest.mark.asyncio
 async def test_reconciler_routes_attempt_resolution_to_its_dedicated_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

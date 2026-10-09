@@ -135,7 +135,8 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     local ao executor e não altera schema, filas, canvas ou contratos HTTP.
 36. A integração de eventos de orquestração com a Metrics API é aditiva e
     independente da dashboard/WebSocket próprio, PDIAL e CTI Server. Quando o
-    gate e a allowlist autorizam o workspace, fatos de sessão, execução, nós e
+    gate e a allowlist (ou o opt-in global explícito) autorizam o workspace,
+    fatos de sessão, execução, nós e
     dispatches são gravados em outbox durável e publicados em lote por worker
     exclusivo. `interaction_id` é o UUID da sessão ORCH; `contact_id` segue
     `person_uuid -> contact_list_member_id -> contact_draft_id -> external`;
@@ -152,10 +153,16 @@ Esta memoria descreve o comportamento confirmado no repositorio. Ela nao comprov
     `CHANNEL_SUPPLIER_V2_*` no ORCH `.237`,
     `CONTACT_SUPPLIER_CHANNEL_DISPATCH_V2_*` no Target Core `.239/.249` e
     paridade de callback `CHANNEL_SUPPLIER_V2_*` nas APIs ORCH
-    `.237/.239/.249`. `.239/.249` possuem dois projetos e dois `.env`; alterar
-    um não configura o outro. WhatsApp permanece um caminho independente.
+    `.237/.239/.249`. Depois da homologação, flags `*_ALLOW_ALL_CONTEXTS`
+    removem apenas a segmentação workspace/flow desses caminhos V2; master
+    flags, contrato e validações continuam obrigatórios. `dialer` e
+    `send_with_dialer` permanecem Supplier V1; somente
+    `send_with_dialer_handoff` usa V2, inclusive sob a imagem v86. Multilane
+    conserva gates e allowlists próprios. `.239/.249` possuem dois projetos e
+    dois `.env`; alterar um não configura o outro. WhatsApp permanece um caminho independente.
     Consultar `SUPPLIER_V2_FLOW_ACTIVATION_RUNBOOK.md` antes de ativar flow ou
-    workspace novo.
+    workspace novo e `SUPPLIER_V2_GLOBAL_ROLLOUT_2026-10-09.md` para promoção e
+    rollback globais.
 38. O AI Flow Builder pertence ao ORCH e cria somente rascunhos
     `mode=orchestration`. A UI oficial usa um BFF same-origin com credencial
     dedicada; conversa e `FlowPlan` ficam no schema do workspace; o compilador
