@@ -13,7 +13,6 @@ from app.services.journey_metrics_service import (
     finalize_journey_session_metrics,
     initialize_journey_session_metrics,
     record_journey_component_entry,
-    record_journey_component_transition,
 )
 from app.services.migration_service import _run_migration_file
 
@@ -32,6 +31,7 @@ async def test_journey_writes_durable_metrics_events_without_duplicates(
     session_uuid = uuid4()
     person_uuid = uuid4()
     component_uuid = uuid4()
+    second_component_uuid = uuid4()
     started_at = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
     enabled_settings = replace(
         get_settings(),
@@ -84,6 +84,25 @@ async def test_journey_writes_durable_metrics_events_without_duplicates(
                     """
                 )
             )
+            await db_session.execute(
+                text(
+                    f"""
+                    CREATE TABLE "{safe_schema}".contact_list_members (
+                        id BIGINT PRIMARY KEY,
+                        person_uuid UUID
+                    )
+                    """
+                )
+            )
+            await db_session.execute(
+                text(
+                    f"""
+                    INSERT INTO "{safe_schema}".contact_list_members (id, person_uuid)
+                    VALUES (77, :person_uuid)
+                    """
+                ),
+                {"person_uuid": person_uuid},
+            )
             for migration_path in (
                 "sql/023_create_orch_journey_metrics_tables.sql",
                 "sql/024_create_orch_journey_workspace_snapshot_state.sql",
@@ -115,9 +134,8 @@ async def test_journey_writes_durable_metrics_events_without_duplicates(
                         "flow_uuid": flow_uuid,
                         "started_at": started_at,
                         "runtime_variables": (
-                            '{"variables":{"contact":{"person_uuid":"'
-                            + str(person_uuid)
-                            + '","identifier":"34455521852"}}}'
+                            '{"session_identity":{"contact_list_member_id":77},'
+                            '"variables":{"contact":{"identifier":"34455521852"}}}'
                         ),
                     },
                 )
@@ -161,18 +179,25 @@ async def test_journey_writes_durable_metrics_events_without_duplicates(
                 component_kind="identidade_person",
                 occurred_at=started_at + timedelta(seconds=2),
             )
-            await record_journey_component_transition(
+            second_component = {
+                "ref_id": str(second_component_uuid),
+                "component_id": "send_with_sms",
+                "parameters": {"stage": "abordagem"},
+            }
+            await record_journey_component_entry(
                 db_session,
                 context=context,
-                component=component,
-                card_cursor=str(component_uuid),
+                component=second_component,
+                card_cursor=str(second_component_uuid),
+                component_kind="send_with_sms",
                 occurred_at=started_at + timedelta(seconds=3),
             )
-            await record_journey_component_transition(
+            await record_journey_component_entry(
                 db_session,
                 context=context,
-                component=component,
-                card_cursor=str(component_uuid),
+                component=second_component,
+                card_cursor=str(second_component_uuid),
+                component_kind="send_with_sms",
                 occurred_at=started_at + timedelta(seconds=4),
             )
             await db_session.execute(
@@ -211,10 +236,12 @@ async def test_journey_writes_durable_metrics_events_without_duplicates(
                 "flow.execution.started.v1",
                 "flow.node.entered.v1",
                 "flow.node.exited.v1",
+                "flow.node.entered.v1",
+                "flow.node.exited.v1",
                 "flow.execution.completed.v1",
                 "interaction.session.ended.v1",
             ]
-            assert len({row["idempotency_key"] for row in events}) == 6
+            assert len({row["idempotency_key"] for row in events}) == 8
             assert all(
                 row["envelope"]["context"]["flow_type"] == "orchestration"
                 for row in events
@@ -223,5 +250,16 @@ async def test_journey_writes_durable_metrics_events_without_duplicates(
                 row["envelope"]["context"]["contact_id"] == str(person_uuid)
                 for row in events
             )
+            completed_payload = events[-2]["envelope"]["payload"]
+            assert completed_payload["nodes_executed"] == 2
+            ended_payload = events[-1]["envelope"]["payload"]
+            assert ended_payload == {
+                "status": "completed",
+                "direction": "OUTBOUND",
+                "started_at": started_at.isoformat(),
+                "duration_seconds": 5,
+                "messages_sent": 0,
+                "messages_received": 0,
+            }
         finally:
             await transaction.rollback()

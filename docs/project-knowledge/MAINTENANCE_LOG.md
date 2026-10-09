@@ -3218,3 +3218,54 @@ exige atuação operacional do provedor, sem desfecho sintético no ORCH.
   reiniciar somente `celery_sbc_to_metrics.service` e `watchdog_orch.service`
   e deixar o watchdog recriar o container. As imagens `v85` e `v86` foram
   preservadas.
+
+## 2026-10-09 — Regularização terminal da jornada Metrics Highcomm
+
+### REQUEST / CLASSIFICATION
+
+Corrigir F1, F3, F4 e F6 apontados pela equipe da Metrics na execução do fluxo
+`81c0d014-3c4a-4393-80cb-57d97a00aed6`. Classificação
+`ALPHA_FIX_REQUIRED`; mudança cirúrgica no writer/outbox da jornada, sem alterar
+execução de cards ou seleção de Supplier.
+
+### CHANGE / SAFETY
+
+- o início da sessão resolve `contact_list_member_id → person_uuid` antes do
+  primeiro evento quando a associação existe; eventos posteriores reutilizam o
+  `contact_id` gravado no `session.started`, impedindo troca de identidade no
+  meio da jornada;
+- o fechamento implícito de um visit ao entrar no próximo card agora também
+  produz `flow.node.exited.v1`; a finalização terminal faz o mesmo para todo
+  visit ainda aberto antes de emitir os eventos terminais;
+- `flow.execution.completed.v1` inclui `nodes_executed`, contado a partir dos
+  visits duráveis da sessão;
+- `interaction.session.ended.v1` inclui `direction=OUTBOUND`, `started_at`,
+  `messages_sent=0` e `messages_received=0`, removendo o campo fora do contrato
+  `messages_exchanged`;
+- no produtor SBC do ORCHESTRATOR, o `DialBegin` guarda direção e timestamp e o
+  `session.ended` da perna os reutiliza. O fallback sem contexto continua sendo
+  Supplier V1/de-para legado; somente `SupplierContract=v2` usa o flow ORCH de
+  origem.
+
+### LIMITES CONFIRMADOS
+
+- o vínculo analítico campanha ORCH → conversa com atendente ainda depende de
+  definição conjunta do campo pela Metrics API; não foi criado campo ad hoc;
+- `provider_status=13` é ACK de processamento do SMS. A ausência de DLR é uma
+  pendência de callback/provedor e não autoriza sintetizar entrega ou falha.
+
+### VALIDATION
+
+- ORCH: `19 passed` na regressão ampliada com PostgreSQL real, cobrindo writer
+  de jornada, fechamento implícito e terminal, dispatch snapshot, outbox e
+  migration; Ruff passou nos quatro arquivos Python alterados;
+- ORCHESTRATOR: `27 passed` no produtor SBC/Metrics, incluindo explicitamente
+  Supplier V1 legado, Supplier V2 correlacionado e reaproveitamento de
+  `direction`/`started_at`; Ruff passou nos dois arquivos alterados;
+- `git diff --check` passou nos três repositórios.
+
+### ROLLBACK
+
+- ORCH: reverter os dois services e testes; não há migration;
+- ORCHESTRATOR: reverter o produtor SBC/Metrics. O roteamento Supplier V1/V2 e
+  as imagens de discador permanecem inalterados.
