@@ -321,6 +321,7 @@ def _is_terminal_workflow_error_code(code: str) -> bool:
     return (
         code in TERMINAL_WORKFLOW_ERROR_CODES
         or code.startswith("identidade_person_")
+        or code.startswith("manage_contact_")
         or code.startswith("manage_contact_channels_")
         or code.startswith("source_list_membership_")
     )
@@ -7456,6 +7457,113 @@ MANAGE_CONTACT_CHANNELS_CONFLICT_CODES = {
     "manage_contact_channels_conflicting_duplicate",
     "manage_contact_channels_multiple_primary",
 }
+MANAGE_CONTACT_RESOURCES = {"person", "channels", "list_membership"}
+MANAGE_CONTACT_DELEGATE_KIND_BY_RESOURCE = {
+    "person": "create_contact",
+    "channels": "manage_contact_channels",
+    "list_membership": "source_list_membership",
+}
+
+
+def _manage_contact_effective_kind(component: dict[str, Any]) -> str:
+    kind = component_kind(component)
+    if kind != "manage_contact":
+        return kind
+    params = _manage_contact_channels_parameters(component)
+    resource = str(
+        _catalog_parameter_scalar(
+            params.get("resource"),
+            preferred_keys=("resource", "id", "value"),
+        )
+        or ""
+    ).strip().lower()
+    return MANAGE_CONTACT_DELEGATE_KIND_BY_RESOURCE.get(resource, kind)
+
+
+def _manage_contact_delegate_component(
+    component: dict[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    params = _manage_contact_channels_parameters(component)
+    resource = str(
+        _catalog_parameter_scalar(
+            params.get("resource"),
+            preferred_keys=("resource", "id", "value"),
+        )
+        or ""
+    ).strip().lower()
+    if resource not in MANAGE_CONTACT_RESOURCES:
+        raise WorkflowExecutionError(
+            "manage_contact_invalid_resource",
+            "O campo resource deve selecionar dados cadastrais, canais ou vínculo com lista.",
+        )
+
+    output_var = params.get("output_var")
+    delegate_kind = MANAGE_CONTACT_DELEGATE_KIND_BY_RESOURCE[resource]
+    if resource == "person":
+        delegate_parameters = {
+            "person_action": params.get("person_action"),
+            "identifier": params.get("identifier"),
+            "enrichment_policy": params.get("enrichment_policy"),
+            "mapping": params.get("mapping"),
+            "output_var": output_var,
+        }
+    elif resource == "channels":
+        delegate_parameters = {
+            "person_uuid": params.get("channels_person_uuid"),
+            "operation": params.get("channels_operation"),
+            "channels": params.get("channels"),
+            "output_var": output_var,
+        }
+    else:
+        delegate_parameters = {
+            "person_uuid": params.get("membership_person_uuid"),
+            "mailing_source": params.get("mailing_source"),
+            "mailing_id": params.get("mailing_id"),
+            "membership_state": params.get("membership_state"),
+            "membership_purpose": params.get("membership_purpose"),
+            "output_var": output_var,
+        }
+
+    delegated = copy.deepcopy(component)
+    delegated["component_id"] = delegate_kind
+    delegated["parameters"] = delegate_parameters
+    return resource, delegate_kind, delegated
+
+
+def _manage_contact_public_branch(branch_label: str | None) -> str | None:
+    if branch_label in {"created", "updated"}:
+        return "changed"
+    return branch_label
+
+
+def _capture_manage_contact_runtime_result(
+    *,
+    runtime_variables: dict[str, Any],
+    resource: str,
+    delegate_kind: str,
+    component_ref_id: Any,
+    branch_label: str | None,
+) -> None:
+    result_key = f"{delegate_kind}_last_result"
+    error_key = f"{delegate_kind}_last_error"
+    delegated_result = runtime_variables.get(result_key)
+    delegated_error = runtime_variables.get(error_key)
+    runtime_variables.pop("manage_contact_last_result", None)
+    runtime_variables.pop("manage_contact_last_error", None)
+    if isinstance(delegated_result, dict):
+        runtime_variables["manage_contact_last_result"] = {
+            **copy.deepcopy(delegated_result),
+            "resource": resource,
+            "delegate_component_id": delegate_kind,
+            "branch": branch_label,
+        }
+    if isinstance(delegated_error, dict):
+        runtime_variables["manage_contact_last_error"] = {
+            **copy.deepcopy(delegated_error),
+            "component_ref_id": component_ref_id,
+            "resource": resource,
+            "delegate_component_id": delegate_kind,
+        }
 
 
 def _manage_contact_channels_parameters(component: dict[str, Any]) -> dict[str, Any]:
@@ -10322,7 +10430,7 @@ async def execute_workflow_m2_for_session(
             str(session_state.get("next_card_uuid") or "")
         )
         initial_component_kind = (
-            component_kind(initial_component)
+            _manage_contact_effective_kind(initial_component)
             if isinstance(initial_component, dict)
             else ""
         )
@@ -10770,6 +10878,8 @@ async def execute_workflow_m2_for_session(
                 )
 
             kind = component_kind(component)
+            catalog_kind = kind
+            manage_contact_resource: str | None = None
             branch_label: str | None = None
 
             await record_journey_component_entry(
@@ -10782,6 +10892,10 @@ async def execute_workflow_m2_for_session(
             )
 
             try:
+                if catalog_kind == "manage_contact":
+                    manage_contact_resource, kind, component = (
+                        _manage_contact_delegate_component(component)
+                    )
                 _ensure_unbound_person_component_supported(
                     session_scope=session_scope,
                     component_kind_value=kind,
@@ -12540,6 +12654,19 @@ async def execute_workflow_m2_for_session(
                         details={"message": str(exc)},
                     )
                     raise
+
+            if (
+                catalog_kind == "manage_contact"
+                and manage_contact_resource is not None
+            ):
+                branch_label = _manage_contact_public_branch(branch_label)
+                _capture_manage_contact_runtime_result(
+                    runtime_variables=runtime_variables,
+                    resource=manage_contact_resource,
+                    delegate_kind=kind,
+                    component_ref_id=component.get("ref_id"),
+                    branch_label=branch_label,
+                )
 
             current = next_card_uuid
             if branch_label is not None:

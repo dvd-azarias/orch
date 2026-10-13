@@ -31,6 +31,7 @@ Plano aprovado em 2026-09-06 para evoluir o ORCH com mudancas pequenas, isoladas
 | 8 | `send_with_email` | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
 | 9 | `fail_flow` | A classificar no desenho do envelope | Planejado |
 | F1 | `send_with_dialer_handoff` para o fluxo integrado | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
+| U1 | `manage_contact` (fachada unificada) | `ALPHA_FIX_OPTIONAL` | Em desenvolvimento |
 
 ## Checklist padrao por card
 
@@ -52,6 +53,37 @@ Aplicar este checklist separadamente a cada item de 1 a 9:
 - [ ] PR ORCH integrado e rollout validado.
 - [ ] Documentacao e evidencias atualizadas.
 - [ ] Item marcado como concluido no estado geral.
+
+## Item U1 — `manage_contact`
+
+Objetivo: reduzir a carga cognitiva do catálogo expondo um único card **Gerenciar
+Contato** para dados cadastrais, canais e vínculo com lista, sem fundir as
+responsabilidades internas já validadas no Alpha.
+
+Contrato em ensaio:
+
+- cada ocorrência escolhe exatamente um recurso: `person`, `channels` ou
+  `list_membership`;
+- o runtime traduz a configuração e reutiliza, respectivamente,
+  `create_contact`, `manage_contact_channels` ou `source_list_membership`;
+- as branches públicas são `changed`, `unchanged`, `not_found`, `conflict` e
+  `exception`; os resultados específicos `created|updated` continuam no payload;
+- o card permanece `is_develop` e na mesma allowlist dos cards canários;
+- `identidade_person`, seleção de canal e verificação de restrições permanecem
+  separados porque representam consulta externa e decisões de jornada;
+- os três cards anteriores continuam válidos e visíveis durante o ensaio. A
+  aposentadoria começa pela ocultação no catálogo e só remove o runtime depois
+  de migrar definições existentes e confirmar zero referências.
+
+Validação e gates antes de considerar o item concluído:
+
+- [x] executar testes automatizados direcionados, stack local completa e smoke
+  encadeado das fases homologadas;
+- [ ] confirmar o comportamento dos campos condicionais no editor visual;
+- [ ] depois do merge, fazer rollout controlado em produção e executar os três
+  recursos no flow canário Highcomm
+  `81c0d014-3c4a-4393-80cb-57d97a00aed6`, contido por `is_develop` e allowlist;
+- [ ] colher aceite funcional antes de ocultar qualquer card legado.
 
 ## Item 0 — Fixacao da revisao por sessao
 
