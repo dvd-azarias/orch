@@ -134,6 +134,11 @@ completa o envelope canônico (`event_id`, `source`, `billing`, `trace`,
 erro da Metrics ficam truncadas na outbox para diagnóstico, sem registrar
 headers nem a chave de API.
 
+Evidência de produção em 2026-10-22: os itens canários `644215` e `644225`,
+antes rejeitados com HTTP 422, foram rearmados após o rollout do envelope
+canônico e publicados com HTTP 202 em uma tentativa. O histórico anterior não
+foi reprocessado.
+
 ### Gate M3 — dispatches digitais
 
 - [x] WhatsApp: `sent`, `delivered`, `read`, `failed` e primeira resposta
