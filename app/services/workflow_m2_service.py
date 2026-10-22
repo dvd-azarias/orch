@@ -141,6 +141,7 @@ from app.services.switch_bot_flow_service import (
     is_meta_user_message_payload,
     resolve_target_flow_uuid,
 )
+from app.services.whatsapp_health_service import WhatsAppHealthError, query_whatsapp_health
 from app.services.workflow_engine import (
     component_kind,
     extract_edges,
@@ -5387,6 +5388,17 @@ def _resolve_component_exception_branch_label(
         if token.startswith("exception"):
             return token
     return None
+
+async def _run_whatsapp_health(*, definition: dict[str, Any], current_card_uuid: str, component: dict[str, Any], runtime_variables: dict[str, Any]) -> str:
+    labels = outgoing_branch_labels(definition, current_card_uuid=current_card_uuid)
+    if set(labels) != {"verde", "amarelo", "vermelho"} or len(labels) != 3:
+        raise WorkflowExecutionError("whatsapp_health_invalid_branches", "O card whatsapp_health deve possuir exatamente uma saída verde, amarela e vermelha.")
+    try:
+        result = await query_whatsapp_health(component=component)
+    except WhatsAppHealthError as exc:
+        raise WorkflowExecutionError(exc.code, exc.message) from exc
+    runtime_variables["whatsapp_health_last_result"] = {"component_ref_id": component.get("ref_id"), "number": result.number, "quality_rating": result.quality_code, "branch": result.branch, "status_description": result.status_description, "updated_at": result.updated_at}
+    return result.branch
 
 
 def _resolve_condition_branch_label(
@@ -11198,6 +11210,13 @@ async def execute_workflow_m2_for_session(
                                 ),
                             },
                         )
+                elif kind == "whatsapp_health":
+                    branch_label = await _run_whatsapp_health(
+                        definition=definition,
+                        current_card_uuid=next_card_uuid,
+                        component=component,
+                        runtime_variables=runtime_variables,
+                    )
                 elif kind == "select_contact_channel":
                     try:
                         channel_execution = await _run_select_contact_channel(
