@@ -4436,10 +4436,13 @@ def _emit_metrics_context(
     channel = system.get("channel")
     if not channel and isinstance(whatsapp_response, dict):
         channel = "WHATSAPP"
+    normalized_channel = str(channel or "OTHER").strip().upper() or "OTHER"
+    agent_id = system.get("agent_id") or f"{normalized_channel}-{hashlib.sha1(session_uuid.encode('utf-8')).hexdigest()[:8].upper()}"
     context: dict[str, Any] = {
         "flow_id": system.get("flow_id") or flow_uuid,
         "interaction_id": system.get("interaction_id") or session_uuid,
-        "channel": channel or "OTHER",
+        "channel": normalized_channel,
+        "agent_id": agent_id,
     }
     for key in ("context", "dimensions", "shared_context", "sharedContext"):
         if isinstance(params.get(key), dict):

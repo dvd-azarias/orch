@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from uuid import uuid4
 
 import pytest
@@ -58,6 +59,7 @@ async def test_emit_metrics_persists_whatsapp_status_metric_in_outbox(
         "flow_id": flow_uuid,
         "interaction_id": session_uuid,
         "channel": "WHATSAPP",
+        "agent_id": f"WHATSAPP-{hashlib.sha1(session_uuid.encode('utf-8')).hexdigest()[:8].upper()}",
         "message_status": "read",
     }
     assert event["payload"] == {
