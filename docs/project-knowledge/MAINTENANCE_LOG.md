@@ -3420,3 +3420,19 @@ o segundo card de métrica.
   `alias_or_flow_uuid`, divergência já documentada em `KNOWN_QUIRKS.md`;
 - `py_compile` e `git diff --check` passaram. Rollout e novo canário real ainda
   são obrigatórios para encerrar a validação E2E.
+
+### DEPLOY / EVIDENCE
+
+- PR ORCH `#247`, merge
+  `479206a5715617be2b3eef5a5cdad0e3c9c0f7c3`, promovido no nó executor
+  `.237` às `2026-10-22T17:22:08Z` por fast-forward a partir de `5649356`;
+- os cinco workers gerais receberam rolling restart individual e PID novo;
+  `orch-api.service` também recebeu PID novo para eliminar qualquer fallback
+  inline com código antigo. Todas as seis units terminaram `active/running`,
+  `NRestarts=0` e sem entrada `err..alert` desde o corte;
+- os nós Celery `orch-celery-worker@237_01..05` responderam `pong`; os quatro
+  health checks da API estabilizaram após a janela normal de restart;
+- a primeira consulta read-only pós-corte encontrou zero sessão, zero callback
+  e zero métrica nova do flow alvo. Portanto, o runtime novo está saudável,
+  mas a confirmação E2E de `disparos_com_sucesso` permanece dependente da
+  próxima sessão real; nenhum evento histórico foi rearmado.
