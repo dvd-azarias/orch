@@ -164,6 +164,7 @@ class Settings:
     celery_billing_queue: str
     orch_lab_workspace_uuid: str | None
     orch_default_workspace_uuid: str | None
+    sync_ws_base_url: str | None
     sync_ws_client_id: str | None
     sync_ws_client_secret: str | None
     arquivos_client_id: str | None
@@ -829,6 +830,7 @@ def get_settings() -> Settings:
             "ORCH_DEFAULT_WORKSPACE_UUID",
             _read_env_optional("ORCH_LAB_WORKSPACE_UUID"),
         ),
+        sync_ws_base_url=_read_env_optional("SYNC_WS_BASE_URL"),
         sync_ws_client_id=_read_env_optional("SYNC_WS_CLIENT_ID"),
         sync_ws_client_secret=_read_env_optional("SYNC_WS_CLIENT_SECRET"),
         arquivos_client_id=_read_env_optional("ARQUIVOS_CLIENT_ID", _read_env_optional("SYNC_WS_CLIENT_ID")),
