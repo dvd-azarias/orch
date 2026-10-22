@@ -3347,5 +3347,21 @@ os eventos `metric.custom.emitted.v1` recebiam HTTP 422 no destino Metrics.
 - a suíte global registrou `1119 passed` e 27 falhas preexistentes/fora do
   escopo: 26 testes chamam a assinatura antiga `trigger_orch(flow_uuid=...)`
   e um teste herdou lock de sessão após a execução longa;
-- a validação externa final exige publicar a revisão e reprocessar somente os
-  itens `metric.custom.*` mortos previamente auditados do fluxo canário.
+- a validação externa final foi executada somente sobre os dois itens mais
+  recentes previamente auditados do fluxo canário, sem backfill do histórico.
+
+### DEPLOY / EVIDENCE
+
+- PR ORCH `#245`, merge `56493560f1079e869651c0bfe51218c092815d4f`,
+  promovido no nó de execução `.237`;
+- `METRICS_ENVIRONMENT=live` e `METRICS_TIER=standard` foram alinhados ao
+  Target Core, com backup prévio do `.env` em
+  `.maintenance-backups/.env.metrics-canonical.20261022T163900Z`;
+- somente `orch-celery-metrics-events-worker.service` foi reiniciado: terminou
+  `active/running`, `NRestarts=0`; `/health/ready` respondeu `ready=true`;
+- os itens `644215` e `644225`, do workspace
+  `0c8a4e83-fcff-4f0e-8459-9e6861449d59` e flow
+  `fbf9eacd-632a-4df7-a8ff-9b8e85466c51`, foram rearmados com guards de
+  identidade e estado. Ambos passaram de `dead`/HTTP 422 para
+  `published`/HTTP 202 em uma única tentativa;
+- itens históricos anteriores permaneceram `dead` e não foram reprocessados.
