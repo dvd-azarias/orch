@@ -104,6 +104,21 @@ ou WebSocket; retorno restabelecido drena sem duplicar o fato logico.
 Gate de saida: uma sessao canaria reproduz sua jornada na Metrics sem alterar
 o snapshot/WebSocket proprio.
 
+### Card `emit_metrics` no M2
+
+O card catalogado no Target Core para `mode=orchestration` usa o mesmo
+`metrics_list` do modo BOT. No ORCH, ele apenas grava os eventos configurados
+na `orch_metrics_event_outbox`, na mesma transacao da sessao; o worker Metrics
+REST faz o POST posterior. Assim, o card pode ser ligado depois de coletores
+como `process_whatsapp_response` sem bloquear a retomada do fluxo. Nesse caso,
+o contexto padrao inclui `channel=WHATSAPP` e `message_status` com o status
+coletado (`sent`, `delivered`, `read`, `failed` etc.).
+
+Cada métrica tem chave de idempotência determinística pela sessão, revisão,
+card, configuração e valor resolvido. Com a integração desabilitada para o
+workspace, o card é no-op seguro e registra esse resultado em
+`variables.customs.emit_metrics.last`.
+
 ### Gate M3 — dispatches digitais
 
 - [x] WhatsApp: `sent`, `delivered`, `read`, `failed` e primeira resposta
