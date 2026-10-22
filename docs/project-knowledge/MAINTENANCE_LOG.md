@@ -3365,3 +3365,58 @@ os eventos `metric.custom.emitted.v1` recebiam HTTP 422 no destino Metrics.
   identidade e estado. Ambos passaram de `dead`/HTTP 422 para
   `published`/HTTP 202 em uma única tentativa;
 - itens históricos anteriores permaneceram `dead` e não foram reprocessados.
+
+## 2026-10-22 — Retomada ordenada de métricas nativas do WhatsApp
+
+### REQUEST / CLASSIFICATION
+
+Avaliar a produção após o rollout do publicador de `emit_metrics` e corrigir a
+ausência da métrica ligada ao branch `delivered`. Classificação
+`ALPHA_FIX_REQUIRED`: o transporte ao Metrics estava saudável, mas callbacks
+reais do mesmo envio podiam ser consumidos ou descartados antes de atravessar
+o segundo card de métrica.
+
+### EVIDENCIA / CAUSA
+
+- os outbox items `645798` e `645803`, ambos `disparos_realizados`, foram
+  publicados em uma tentativa com HTTP 202; o catálogo Metrics confirmou
+  `total_events=4` e `last_event_at=2026-10-22T16:47:51.731000`;
+- `disparos_com_sucesso` permaneceu em zero, embora as sessões `4828` e `4829`
+  tenham registrado `whatsapp_delivered_at` e callbacks `delivered`;
+- na sessão `4828`, `delivered` chegou antes de `sent`, foi claimed e marcado
+  como processado antes de a engine aplicar `waiting_previous_whatsapp_status`;
+  o `sent` posterior substituiu o payload e terminou o fluxo;
+- na sessão `4829`, `sent` atravessou `emit_metrics` e `finish_flow`; o
+  `delivered` posterior reabriu a sessão, mas a retomada do mesmo card foi
+  confundida com entrada em um novo outbound e recebeu
+  `discard_reason=before_outbound_whatsapp_card_entry`;
+- a revisão fixada nas duas sessões era a v53
+  `216b6cdc-5484-4fac-b025-5636d47be7aa`, com os branches `sent` e
+  `delivered` apontando para os cards corretos. Portanto, a causa estava na
+  retomada/ordenação do M2, não no definition nem no publicador Metrics.
+
+### CHANGE / SAFETY
+
+- somente a retomada explícita do mesmo `process_card_cursor` deixa de ser
+  tratada como entrada em um card outbound novo; a proteção que descarta
+  eventos realmente anteriores a outro envio foi preservada;
+- quando `delivered` ou `read` precisa aguardar seu pre-requisito, o claim do
+  evento e liberado atomicamente (`processed_at=NULL`) antes de persistir a
+  espera, permitindo retry e ordenação sem duplicar o callback;
+- status claimed na mesma execução atualizam a fotografia em memória usada
+  pela ordenação, permitindo drenar `sent -> delivered -> read` no mesmo loop;
+- não há migration, alteração de definition, mudança no contrato do card
+  `send_whatsapp_template` nem alteração no publicador Metrics.
+
+### VALIDATION PRE-DEPLOY
+
+- `17 passed` na suíte completa do card WhatsApp e repositório de eventos,
+  incluindo entrada nova, callback tardio após `finish_flow` e
+  `delivered-before-sent`;
+- `146 passed` na regressão unitária ampla da engine M2;
+- `2 passed` na suíte atual de `emit_metrics`;
+- 13 testes legados adicionais falharam antes de exercitar runtime por ainda
+  chamarem `trigger_orch(flow_uuid=...)`; a assinatura vigente é
+  `alias_or_flow_uuid`, divergência já documentada em `KNOWN_QUIRKS.md`;
+- `py_compile` e `git diff --check` passaram. Rollout e novo canário real ainda
+  são obrigatórios para encerrar a validação E2E.

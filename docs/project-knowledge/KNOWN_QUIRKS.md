@@ -22,6 +22,16 @@ O detector exige `payload.file` como dicionario. Sinais S3/MinIO isolados docume
 
 O codigo atual pode reabrir sessoes finalizadas de WhatsApp e manter status em waiting para permitir retomada do workflow. Dialer tambem tem correlacao por janela. Isso e evolucao funcional, nao simples CRUD de estado.
 
+## Status WhatsApp podem chegar fora de ordem
+
+O callback `delivered` pode chegar antes de `sent`, e `read` antes de
+`delivered`. A engine ordena esses status por pre-requisito e deixa o evento
+adiantado pendente durante a janela de espera; marcar o evento como processado
+antes da espera perde a ramificacao posterior. Da mesma forma, reabrir uma
+sessao finalizada pelo cursor do mesmo card outbound nao constitui entrada em
+um novo envio e nao pode acionar o descarte
+`before_outbound_whatsapp_card_entry`.
+
 ## entity_origin_app
 
 E historico e nao muda a cada evento. Para origem corrente, usar runtime.
