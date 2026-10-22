@@ -319,7 +319,12 @@ Detalhes e ownership: `docs/project-knowledge/DATABASE.md`.
   dashboard. O ordinal da tentativa da Supplier fica em metadata; o
   `action_sequence` continua global no escopo sessao/card/canal. A entrada em
   um card WhatsApp outbound descarta eventos pendentes anteriores com motivo
-  auditavel, sem consumir esse historico como resultado do novo envio.
+  auditavel, sem consumir esse historico como resultado do novo envio. A
+  retomada pelo `channel_resume.whatsapp.process_card_cursor` nao e uma nova
+  entrada: callbacks tardios do mesmo envio devem voltar ao card sem passar
+  por esse descarte. Status adiantados (`delivered` antes de `sent`, `read`
+  antes de `delivered`) permanecem pendentes durante a janela de ordenacao e
+  sao drenados depois do pre-requisito.
 
 - O primeiro canário de escrita do `identidade_person` (`9ec18a2d-3807-43e2-9c2e-1db2ed4ff170`) encontrou a pessoa na Identidade.io, mas reverteu o savepoint com `identidade_person_persistence_failed`: o normalizador preservava `birthday` como string ISO e o `asyncpg` exige `datetime.date` para a coluna PostgreSQL `date`. Não houve escrita parcial nem fan-out. A correção converte a data somente na fronteira SQL, preservando a string serializável no runtime. Além da transação real revertida, o canário E2E pré-deploy `1b54233b-7075-42c9-8085-35c8afad5db7` criou pessoa, draft, 8 canais, materializou 8 membros, vinculou a lista com HTTP 200 e terminou em `state=3`; o flow ganhou exatamente uma sessão. A confirmação pós-deploy do mesmo código ainda permanece pendente.
 

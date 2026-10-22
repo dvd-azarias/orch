@@ -146,6 +146,9 @@ async def _get_session_state_row(session_id: int) -> dict:
                         ended_at,
                         last_card_uuid::text AS last_card_uuid,
                         next_card_uuid::text AS next_card_uuid,
+                        frozen_until,
+                        whatsapp_sent_at,
+                        whatsapp_delivered_at,
                         runtime_variables
                     FROM "{schema}".orch_sessions
                     WHERE id = :session_id
@@ -459,6 +462,252 @@ async def test_send_whatsapp_template_accepts_plain_status_branch(monkeypatch: p
         assert row["ended_at"] is not None
     finally:
         await _cleanup_flow_with_revision(flow_uuid=inserted_flow_uuid, revision_uuid=revision_uuid)
+
+
+def _whatsapp_status_reentry_definition(
+    *,
+    send_uuid: str,
+    sent_finish_uuid: str,
+    delivered_finish_uuid: str,
+) -> dict:
+    return {
+        "trigger_start_by_ref_id": send_uuid,
+        "components": [
+            {
+                "uuid": send_uuid,
+                "ref_id": send_uuid,
+                "component_id": "send_whatsapp_template",
+                "parameters": {
+                    "whatsapp_interactive_config": {
+                        "selected_number": "1147371486",
+                        "numbers": [
+                            {
+                                "number": "1147371486",
+                                "value": {
+                                    "max_daily_rate_limit_consumption": 100,
+                                    "meta_payload": {
+                                        "to": "{{recipient_phone_number}}",
+                                        "type": "text",
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                },
+            },
+            {
+                "uuid": sent_finish_uuid,
+                "ref_id": sent_finish_uuid,
+                "component_id": "finish_flow",
+                "parameters": {},
+            },
+            {
+                "uuid": delivered_finish_uuid,
+                "ref_id": delivered_finish_uuid,
+                "component_id": "finish_flow",
+                "parameters": {},
+            },
+        ],
+        "branches": [
+            {"from": send_uuid, "to": sent_finish_uuid, "branch": "sent"},
+            {
+                "from": send_uuid,
+                "to": delivered_finish_uuid,
+                "branch": "delivered",
+            },
+        ],
+    }
+
+
+def _enable_inline_m2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workflow_runtime_service, "_read_flag_true", lambda _settings: True)
+    monkeypatch.setattr(workflow_m2_service, "_read_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(celery_enabled=False, celery_fileapp_ingest_enabled=True),
+    )
+    monkeypatch.setattr(
+        orch_trigger_service,
+        "get_settings",
+        lambda: SimpleNamespace(celery_enabled=False),
+    )
+
+
+@pytest.mark.asyncio
+async def test_late_delivered_resumes_same_outbound_card_after_sent_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _ensure_flow_tables()
+    settings = get_settings()
+    flow_uuid = str(uuid4())
+    send_uuid = "ca111111-1111-1111-1111-111111111111"
+    sent_finish_uuid = "ca222222-2222-2222-2222-222222222222"
+    delivered_finish_uuid = "ca333333-3333-3333-3333-333333333333"
+    definition = _whatsapp_status_reentry_definition(
+        send_uuid=send_uuid,
+        sent_finish_uuid=sent_finish_uuid,
+        delivered_finish_uuid=delivered_finish_uuid,
+    )
+    inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(
+        flow_uuid=flow_uuid,
+        definition=definition,
+    )
+    _enable_inline_m2(monkeypatch)
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as db_session:
+            sent = await orch_api._trigger_orch_for_workspace(
+                workspace_uuid=settings.orch_lab_workspace_uuid,
+                flow_uuid=UUID(flow_uuid),
+                payload=_whatsapp_status_payload(status="sent"),
+                db_session=db_session,
+                validate_workspace=False,
+                schema_override=settings.database_schema,
+            )
+        first_row = await _get_session_state_row(sent.session_id)
+        assert first_row["last_card_uuid"] == sent_finish_uuid
+        assert first_row["ended_at"] is not None
+        assert first_row["whatsapp_sent_at"] is not None
+
+        async with session_factory() as db_session:
+            delivered = await orch_api._trigger_orch_for_workspace(
+                workspace_uuid=settings.orch_lab_workspace_uuid,
+                flow_uuid=UUID(flow_uuid),
+                payload=_whatsapp_status_payload(status="delivered"),
+                db_session=db_session,
+                validate_workspace=False,
+                schema_override=settings.database_schema,
+            )
+
+        assert delivered.session_id == sent.session_id
+        final_row = await _get_session_state_row(delivered.session_id)
+        assert final_row["last_card_uuid"] == delivered_finish_uuid, final_row
+        assert final_row["ended_at"] is not None
+
+        async with session_factory() as db_session:
+            event_row = (
+                await db_session.execute(
+                    text(
+                        f"""
+                        SELECT processed_at, discard_reason
+                        FROM "{settings.database_schema.replace('"', '""')}".orch_channel_events
+                        WHERE session_id = :session_id
+                          AND channel = 'whatsapp'
+                          AND event_type = 'delivered'
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"session_id": delivered.session_id},
+                )
+            ).mappings().one()
+        assert event_row["processed_at"] is not None
+        assert event_row["discard_reason"] is None
+    finally:
+        await _cleanup_flow_with_revision(
+            flow_uuid=inserted_flow_uuid,
+            revision_uuid=revision_uuid,
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivered_before_sent_is_released_then_drained_in_status_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _ensure_flow_tables()
+    settings = get_settings()
+    flow_uuid = str(uuid4())
+    send_uuid = "cb111111-1111-1111-1111-111111111111"
+    sent_finish_uuid = "cb222222-2222-2222-2222-222222222222"
+    delivered_finish_uuid = "cb333333-3333-3333-3333-333333333333"
+    definition = _whatsapp_status_reentry_definition(
+        send_uuid=send_uuid,
+        sent_finish_uuid=sent_finish_uuid,
+        delivered_finish_uuid=delivered_finish_uuid,
+    )
+    inserted_flow_uuid, revision_uuid = await _insert_flow_with_revision(
+        flow_uuid=flow_uuid,
+        definition=definition,
+    )
+    _enable_inline_m2(monkeypatch)
+    monkeypatch.setitem(
+        workflow_m2_service.WHATSAPP_STATUS_ORDER_TTL_SECONDS,
+        "delivered",
+        300,
+    )
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as db_session:
+            delivered = await orch_api._trigger_orch_for_workspace(
+                workspace_uuid=settings.orch_lab_workspace_uuid,
+                flow_uuid=UUID(flow_uuid),
+                payload=_whatsapp_status_payload(status="delivered"),
+                db_session=db_session,
+                validate_workspace=False,
+                schema_override=settings.database_schema,
+            )
+        assert delivered.workflow_execution is not None
+        assert delivered.workflow_execution["stopped_reason"] == "frozen_wait_active"
+
+        async with session_factory() as db_session:
+            deferred_row = (
+                await db_session.execute(
+                    text(
+                        f"""
+                        SELECT processed_at, discard_reason
+                        FROM "{settings.database_schema.replace('"', '""')}".orch_channel_events
+                        WHERE session_id = :session_id
+                          AND channel = 'whatsapp'
+                          AND event_type = 'delivered'
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"session_id": delivered.session_id},
+                )
+            ).mappings().one()
+        assert deferred_row["processed_at"] is None
+        assert deferred_row["discard_reason"] is None
+
+        async with session_factory() as db_session:
+            sent = await orch_api._trigger_orch_for_workspace(
+                workspace_uuid=settings.orch_lab_workspace_uuid,
+                flow_uuid=UUID(flow_uuid),
+                payload=_whatsapp_status_payload(status="sent"),
+                db_session=db_session,
+                validate_workspace=False,
+                schema_override=settings.database_schema,
+            )
+
+        assert sent.session_id == delivered.session_id
+        final_row = await _get_session_state_row(sent.session_id)
+        assert final_row["last_card_uuid"] == delivered_finish_uuid
+        assert final_row["ended_at"] is not None
+
+        async with session_factory() as db_session:
+            remaining = (
+                await db_session.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM "{settings.database_schema.replace('"', '""')}".orch_channel_events
+                        WHERE session_id = :session_id
+                          AND channel = 'whatsapp'
+                          AND processed_at IS NULL
+                        """
+                    ),
+                    {"session_id": sent.session_id},
+                )
+            ).scalar_one()
+        assert int(remaining) == 0
+    finally:
+        await _cleanup_flow_with_revision(
+            flow_uuid=inserted_flow_uuid,
+            revision_uuid=revision_uuid,
+        )
 
 
 @pytest.mark.asyncio

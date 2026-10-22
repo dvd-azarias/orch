@@ -11,6 +11,7 @@ from app.repositories.orch_channel_events_repository import (
     mark_channel_event_processed_by_identity,
     mark_pending_channel_events_processed,
     mark_whatsapp_messages_processed_by_ids,
+    release_claimed_channel_event,
 )
 
 
@@ -122,6 +123,30 @@ async def test_fetch_channel_event_by_identity_can_recover_processed_cdr() -> No
     assert "processed_at IS NULL" not in session.statement
     assert "event_id = :event_id" in session.statement
     assert session.parameters["event_id"] == "GW02-later.1"
+
+
+@pytest.mark.asyncio
+async def test_release_claimed_channel_event_is_scoped_to_exact_pending_owner() -> None:
+    session = _Session({"id": 14927})
+
+    released = await release_claimed_channel_event(
+        session,  # type: ignore[arg-type]
+        event_row_id=14927,
+        session_id=4829,
+        channel="whatsapp",
+    )
+
+    assert released is True
+    assert "SET processed_at = NULL" in session.statement
+    assert "id = :event_row_id" in session.statement
+    assert "session_id = :session_id" in session.statement
+    assert "channel = :channel" in session.statement
+    assert "discard_reason IS NULL" in session.statement
+    assert session.parameters == {
+        "event_row_id": 14927,
+        "session_id": 4829,
+        "channel": "whatsapp",
+    }
 
 
 @pytest.mark.asyncio

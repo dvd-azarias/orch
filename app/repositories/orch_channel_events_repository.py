@@ -182,6 +182,35 @@ async def claim_next_pending_channel_event(
         return None
 
 
+async def release_claimed_channel_event(
+    db_session: AsyncSession,
+    *,
+    event_row_id: int,
+    session_id: int,
+    channel: str,
+) -> bool:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_channel_events
+            SET processed_at = NULL
+            WHERE id = :event_row_id
+              AND session_id = :session_id
+              AND channel = :channel
+              AND processed_at IS NOT NULL
+              AND discard_reason IS NULL
+            RETURNING id
+            """
+        ),
+        {
+            "event_row_id": event_row_id,
+            "session_id": session_id,
+            "channel": channel,
+        },
+    )
+    return result.first() is not None
+
+
 async def fetch_next_pending_channel_event(
     db_session: AsyncSession,
     *,

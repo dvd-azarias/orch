@@ -62,6 +62,7 @@ from app.repositories.orch_channel_events_repository import (
     fetch_next_pending_channel_event,
     has_pending_channel_events,
     mark_channel_event_processed,
+    release_claimed_channel_event,
 )
 from app.repositories.orch_sessions_repository import (
     assign_dialer_handoff_routing_for_session,
@@ -239,6 +240,12 @@ WHATSAPP_STATUS_ORDER_TTL_SECONDS = {
     "read": 45,
 }
 WHATSAPP_STATUS_ORDER_RETRY_SECONDS = 3
+WHATSAPP_STATUS_SESSION_FIELDS = {
+    "sent": "whatsapp_sent_at",
+    "delivered": "whatsapp_delivered_at",
+    "read": "whatsapp_read_at",
+    "failed": "whatsapp_failed_at",
+}
 DIALER_RESPONSE_BRANCH_BY_STATUS = {
     "answered": "answered",
     "busy": "busy",
@@ -3620,6 +3627,20 @@ def _compute_whatsapp_status_order_delay(
         return None
 
     return now_utc + timedelta(seconds=WHATSAPP_STATUS_ORDER_RETRY_SECONDS)
+
+
+def _record_claimed_whatsapp_status_for_order(
+    *,
+    pending_event: dict[str, Any],
+    session_state: dict[str, Any],
+) -> None:
+    status = str(pending_event.get("event_type") or "").strip().lower()
+    session_field = WHATSAPP_STATUS_SESSION_FIELDS.get(status)
+    if session_field is None or session_state.get(session_field) is not None:
+        return
+    session_state[session_field] = pending_event.get("event_ts") or datetime.now(
+        timezone.utc
+    )
 
 
 def _should_resume_whatsapp_blocking_execution(
@@ -10980,6 +11001,11 @@ async def execute_workflow_m2_for_session(
         executed_steps = 0
         last_card_uuid = session_state.get("last_card_uuid")
         next_card_uuid = current_card_uuid
+        resumed_whatsapp_card_uuid = (
+            str(resume_cursor)
+            if should_preempt_to_whatsapp_resume_cursor and resume_cursor is not None
+            else None
+        )
 
         for _ in range(max_steps):
             if not next_card_uuid:
@@ -11697,9 +11723,14 @@ async def execute_workflow_m2_for_session(
                         runtime_variables,
                         process_card_cursor=next_card_uuid,
                     )
+                    resuming_outbound_whatsapp_card = (
+                        resumed_whatsapp_card_uuid is not None
+                        and str(next_card_uuid) == resumed_whatsapp_card_uuid
+                    )
                     entering_outbound_whatsapp_card = (
                         last_card_uuid is not None
                         and str(last_card_uuid) != str(next_card_uuid)
+                        and not resuming_outbound_whatsapp_card
                     )
                     if entering_outbound_whatsapp_card:
                         discarded_pre_entry_events = await discard_pending_channel_events(
@@ -11725,6 +11756,10 @@ async def execute_workflow_m2_for_session(
                         channel="whatsapp",
                     )
                     if isinstance(pending_whatsapp_event, dict):
+                        _record_claimed_whatsapp_status_for_order(
+                            pending_event=pending_whatsapp_event,
+                            session_state=session_state,
+                        )
                         payload = pending_whatsapp_event.get("payload")
                         if isinstance(payload, dict):
                             runtime_variables["last_payload"] = payload
@@ -11799,6 +11834,13 @@ async def execute_workflow_m2_for_session(
                             runtime_variables=runtime_variables,
                             session_state=session_state,
                         )) is not None:
+                            if isinstance(pending_whatsapp_event, dict):
+                                await release_claimed_channel_event(
+                                    db_session,
+                                    event_row_id=int(pending_whatsapp_event["id"]),
+                                    session_id=session_id,
+                                    channel="whatsapp",
+                                )
                             await replace_session_workflow_state(
                                 db_session,
                                 session_id=session_id,
@@ -11934,6 +11976,10 @@ async def execute_workflow_m2_for_session(
                         channel="whatsapp",
                     )
                     if isinstance(pending_whatsapp_event, dict):
+                        _record_claimed_whatsapp_status_for_order(
+                            pending_event=pending_whatsapp_event,
+                            session_state=session_state,
+                        )
                         payload = pending_whatsapp_event.get("payload")
                         if isinstance(payload, dict):
                             runtime_variables["last_payload"] = payload
@@ -11946,6 +11992,13 @@ async def execute_workflow_m2_for_session(
                         runtime_variables=runtime_variables,
                         session_state=session_state,
                     )) is not None:
+                        if isinstance(pending_whatsapp_event, dict):
+                            await release_claimed_channel_event(
+                                db_session,
+                                event_row_id=int(pending_whatsapp_event["id"]),
+                                session_id=session_id,
+                                channel="whatsapp",
+                            )
                         await replace_session_workflow_state(
                             db_session,
                             session_id=session_id,
