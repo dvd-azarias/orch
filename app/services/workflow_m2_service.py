@@ -127,6 +127,7 @@ from app.services.manage_contact_channels_service import (
     apply_contact_channel_operation,
     parse_requested_contact_channels,
 )
+from app.services.metrics_event_outbox_service import enqueue_metrics_event
 from app.services.otima_llm_service import execute_otima_llm_prompt
 from app.services.phone_normalizer import normalize_phone_to_canonical_ani
 from app.services.restriction_list_check_service import (
@@ -4390,6 +4391,158 @@ def _run_set_variables(component: dict[str, Any], runtime_variables: dict[str, A
                 customs = {}
                 variables["customs"] = customs
             _set_by_path(customs, variable_path, value)
+
+
+def _emit_metrics_entries(params: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = params.get("metrics_list")
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        for key in ("items", "entries", "metrics", "value"):
+            if isinstance(raw.get(key), list):
+                return [item for item in raw[key] if isinstance(item, dict)]
+        if "metric_id" in raw or "metric" in raw:
+            return [raw]
+    return []
+
+
+def _emit_metrics_operation(value: Any, metric_type: str) -> str | None:
+    candidate = value
+    if isinstance(candidate, dict):
+        candidate = next(
+            (candidate[key] for key in ("id", "value", "operation", "name") if candidate.get(key) is not None),
+            None,
+        )
+    if isinstance(candidate, list):
+        candidate = candidate[0] if candidate else None
+    if candidate is not None and str(candidate).strip():
+        return str(candidate).strip().lower()
+    return {"counter": "increment", "gauge": "set", "histogram": "record"}.get(
+        metric_type.lower()
+    )
+
+
+def _emit_metrics_context(
+    *,
+    params: dict[str, Any],
+    variables: dict[str, Any],
+    flow_uuid: str,
+    session_uuid: str,
+    runtime_variables: dict[str, Any],
+) -> dict[str, str]:
+    system = variables.get("system") if isinstance(variables.get("system"), dict) else {}
+    whatsapp_response = runtime_variables.get("whatsapp_last_response")
+    channel = system.get("channel")
+    if not channel and isinstance(whatsapp_response, dict):
+        channel = "WHATSAPP"
+    context: dict[str, Any] = {
+        "flow_id": system.get("flow_id") or flow_uuid,
+        "interaction_id": system.get("interaction_id") or session_uuid,
+        "channel": channel or "OTHER",
+    }
+    for key in ("context", "dimensions", "shared_context", "sharedContext"):
+        if isinstance(params.get(key), dict):
+            context.update(params[key])
+    raw_metrics = params.get("metrics_list")
+    if isinstance(raw_metrics, dict):
+        for key in ("context", "dimensions"):
+            if isinstance(raw_metrics.get(key), dict):
+                context.update(raw_metrics[key])
+    if isinstance(whatsapp_response, dict) and whatsapp_response.get("status"):
+        context.setdefault("message_status", whatsapp_response["status"])
+    return {
+        str(key): str(value)
+        for key, raw in context.items()
+        if (value := _render_value(raw, variables)) is not None and str(value).strip()
+    }
+
+
+async def _run_emit_metrics(
+    *,
+    db_session: AsyncSession,
+    workspace_uuid: str,
+    flow_uuid: str,
+    session_uuid: str,
+    revision_id: str | None,
+    component: dict[str, Any],
+    runtime_variables: dict[str, Any],
+) -> None:
+    params = component.get("parameters") if isinstance(component.get("parameters"), dict) else {}
+    variables = _ensure_variables(runtime_variables)
+    variables.setdefault("system", {})
+    metrics = _emit_metrics_entries(params)
+    if not metrics:
+        raise WorkflowExecutionError("emit_metrics_empty", "O card emit_metrics precisa de ao menos uma métrica configurada.")
+
+    context = _emit_metrics_context(
+        params=params,
+        variables=variables,
+        flow_uuid=flow_uuid,
+        session_uuid=session_uuid,
+        runtime_variables=runtime_variables,
+    )
+    queued: list[dict[str, Any]] = []
+    skipped = 0
+    for index, entry in enumerate(metrics):
+        metric = entry.get("metric") or entry.get("selected") or entry.get("definition") or {}
+        metric = metric if isinstance(metric, dict) else {}
+        metric_id = entry.get("metric_id") or metric.get("metric_id") or metric.get("id") or metric.get("value")
+        metric_type = entry.get("metric_type") or metric.get("metric_type") or metric.get("type") or metric.get("category")
+        if not metric_id or not metric_type:
+            raise WorkflowExecutionError("emit_metrics_invalid_metric", f"A métrica {index} precisa de metric_id e metric_type.")
+        value = entry.get("value")
+        if value is None:
+            value = next((entry[key] for key in ("metric_value", "metricValue", "input_value", "valor") if key in entry), None)
+        value = _render_value(value, variables)
+        if isinstance(value, bool) or value is None:
+            raise WorkflowExecutionError("emit_metrics_invalid_value", f"A métrica {index} precisa de um valor numérico.")
+        try:
+            numeric_value = float(str(value).replace(",", "."))
+        except (TypeError, ValueError):
+            raise WorkflowExecutionError("emit_metrics_invalid_value", f"A métrica {index} precisa de um valor numérico.") from None
+        operation = _emit_metrics_operation(entry.get("operation") or metric.get("operation"), str(metric_type))
+        if str(metric_type).strip().lower() == "histogram":
+            operation = "record"
+        payload: dict[str, Any] = {"metric_id": str(metric_id), "metric_type": str(metric_type), "value": numeric_value}
+        if operation:
+            payload["operation"] = operation
+        event_type = str(entry.get("event_type") or metric.get("event_type") or "metric.custom.emitted.v1")
+        idempotency_input = {
+            "revision_id": revision_id,
+            "component_ref_id": component.get("ref_id"),
+            "index": index,
+            "event_type": event_type,
+            "context": context,
+            "payload": payload,
+        }
+        fingerprint = hashlib.sha256(json.dumps(idempotency_input, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        event_id = await enqueue_metrics_event(
+            db_session,
+            workspace_uuid=workspace_uuid,
+            idempotency_key=f"emit_metrics:{session_uuid}:{fingerprint}",
+            event_type=event_type,
+            context=context,
+            payload=payload,
+            flow_uuid=flow_uuid,
+            session_uuid=session_uuid,
+        )
+        if event_id is None:
+            skipped += 1
+        else:
+            queued.append({"event_id": event_id, "event_type": event_type, "metric_id": payload["metric_id"], "metric_type": payload["metric_type"], "operation": payload.get("operation"), "value": payload["value"]})
+
+    customs = variables.setdefault("customs", {})
+    emit_metrics_state = customs.setdefault("emit_metrics", {})
+    emit_metrics_state["last"] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "branch": "sucesso",
+        "enqueued": len(queued),
+        "skipped": skipped,
+        "tasks": queued or None,
+        "metrics": [item["metric_id"] for item in queued],
+        "context": context,
+    }
+    runtime_variables["emit_metrics_last_result"] = emit_metrics_state["last"]
 
 
 def _compare_values(left: Any, op: str, right: Any) -> bool:
@@ -11443,6 +11596,17 @@ async def execute_workflow_m2_for_session(
                             },
                         )
                         branch_label = exception_branch
+                elif kind == "emit_metrics":
+                    await _run_emit_metrics(
+                        db_session=db_session,
+                        workspace_uuid=get_current_workspace_uuid(),
+                        flow_uuid=flow_uuid,
+                        session_uuid=str(session_uuid_for_metrics or session_id),
+                        revision_id=revision_id_for_metrics,
+                        component=component,
+                        runtime_variables=runtime_variables,
+                    )
+                    branch_label = "next"
                 elif kind == "cache_post":
                     try:
                         branch_label = await _run_cache_post(
