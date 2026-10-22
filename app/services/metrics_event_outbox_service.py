@@ -376,3 +376,61 @@ def publish_metrics_events_batch(
         retryable=False,
         success=200 <= status_code < 300,
     )
+
+
+def publish_custom_metric_event(
+    *,
+    event: dict[str, Any],
+    settings: Settings,
+) -> MetricsPublishResult:
+    """Deliver the Target Core `emit_metrics` envelope to Metrics unchanged.
+
+    The regular orchestration stream is a batch API.  Custom metrics are a
+    distinct Metrics resource: Target Core posts the event itself, one at a
+    time, under the `/api` base path.  Keep this adapter separate so changing
+    that card contract cannot alter the established generic-event publisher.
+    """
+    base_url = str(settings.orch_metrics_api_base_url or "").rstrip("/")
+    api_key = str(settings.orch_metrics_api_key or "").strip()
+    if not base_url or not api_key:
+        raise RuntimeError("metrics_api_not_configured")
+    metrics_base_url = base_url if base_url.endswith("/api") else f"{base_url}/api"
+    request = Request(
+        f"{metrics_base_url}/v1/events/ingest",
+        data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(  # noqa: S310 - endpoint is validated in Settings
+            request,
+            timeout=settings.orch_metrics_events_http_timeout_seconds,
+        ) as response:
+            status_code = int(response.status)
+            response_text = response.read(1000).decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        status_code = int(exc.code)
+        response_text = exc.read(1000).decode("utf-8", errors="replace")
+        return MetricsPublishResult(
+            status_code=status_code,
+            response_text=response_text,
+            retryable=status_code == 429 or status_code >= 500,
+            success=False,
+        )
+    except (URLError, TimeoutError, OSError) as exc:
+        return MetricsPublishResult(
+            status_code=None,
+            response_text=type(exc).__name__,
+            retryable=True,
+            success=False,
+        )
+    return MetricsPublishResult(
+        status_code=status_code,
+        response_text=response_text,
+        retryable=False,
+        success=200 <= status_code < 300,
+    )

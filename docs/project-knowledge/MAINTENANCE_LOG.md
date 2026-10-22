@@ -3315,3 +3315,29 @@ execução de cards ou seleção de Supplier.
 - ORCH: reverter os dois services e testes; não há migration;
 - ORCHESTRATOR: reverter o produtor SBC/Metrics. O roteamento Supplier V1/V2 e
   as imagens de discador permanecem inalterados.
+## 2026-10-22 — Contrato de publicação do card `emit_metrics`
+
+### REQUEST / CLASSIFICATION
+
+Corrigir a entrega do card `emit_metrics` no M2 após callback real de WhatsApp.
+Classificação `ALPHA_FIX_REQUIRED`: o card e a retomada estavam corretos, mas
+os eventos `metric.custom.emitted.v1` recebiam HTTP 422 ao serem publicados no
+contrato de jornada em lote.
+
+### CAUSA / CHANGE
+
+- o Target Core (BOT) publica o recurso de métrica customizada como evento
+  singular em `POST /api/v1/events/ingest`;
+- o ORCH gravava corretamente na outbox, mas o worker agrupava esse recurso no
+  wrapper `{"events": [...]}`, reservado aos eventos de jornada;
+- o worker Metrics agora particiona somente `metric.custom.*` e o envia no
+  contrato singular. Eventos de jornada continuam no publicador batch atual;
+- não houve mudança no M2, no cursor de retomada, em
+  `send_whatsapp_template`, nem nos coletores/callbacks de WhatsApp.
+
+### VALIDATION
+
+- testes de contrato, partição do worker e M2 passaram localmente;
+- a migration da outbox passou com PostgreSQL real em schema efêmero;
+- a validação externa final exige publicar a revisão e reprocessar somente os
+  itens `metric.custom.*` mortos previamente auditados do fluxo canário.

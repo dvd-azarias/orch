@@ -16,6 +16,7 @@ from app.services.metrics_event_outbox_service import (
     mark_metrics_events_failed,
     mark_metrics_events_published,
     metrics_retry_delay_seconds,
+    publish_custom_metric_event,
     publish_metrics_events_batch,
 )
 from app.services.workspace_service import bind_workspace_context, list_completed_workspaces
@@ -89,62 +90,88 @@ async def _publish_pending_metrics_events() -> dict[str, int]:
             if not claimed:
                 continue
             counters["claimed"] += len(claimed)
-            result = await asyncio.to_thread(
-                publish_metrics_events_batch,
-                events=[item.envelope for item in claimed],
-                claim_token=claim_token,
-                settings=settings,
-            )
-            item_ids = [item.id for item in claimed]
-            async with session_factory() as db_session:
-                async with db_session.begin():
-                    await db_session.execute(
-                        text(f'SET LOCAL search_path TO "{safe_schema}"')
+            custom_metrics = [
+                item for item in claimed if item.event_type.startswith("metric.custom.")
+            ]
+            regular_events = [item for item in claimed if item not in custom_metrics]
+            deliveries = []
+            if regular_events:
+                deliveries.append(
+                    (
+                        "batch",
+                        regular_events,
+                        await asyncio.to_thread(
+                            publish_metrics_events_batch,
+                            events=[item.envelope for item in regular_events],
+                            claim_token=claim_token,
+                            settings=settings,
+                        ),
                     )
-                    if result.success:
-                        counters["published"] += await mark_metrics_events_published(
-                            db_session,
-                            claim_token=claim_token,
-                            item_ids=item_ids,
-                            http_status=int(result.status_code or 200),
+                )
+            for item in custom_metrics:
+                deliveries.append(
+                    (
+                        "custom_metric",
+                        [item],
+                        await asyncio.to_thread(
+                            publish_custom_metric_event,
+                            event=item.envelope,
+                            settings=settings,
+                        ),
+                    )
+                )
+            for delivery_kind, items, result in deliveries:
+                item_ids = [item.id for item in items]
+                async with session_factory() as db_session:
+                    async with db_session.begin():
+                        await db_session.execute(
+                            text(f'SET LOCAL search_path TO "{safe_schema}"')
                         )
-                    else:
-                        delay_seconds = metrics_retry_delay_seconds(
-                            attempt=max(item.attempts for item in claimed),
-                            initial_seconds=(
-                                settings.orch_metrics_events_retry_initial_seconds
-                            ),
-                            maximum_seconds=(
-                                settings.orch_metrics_events_retry_max_seconds
-                            ),
-                        )
-                        retried, dead = await mark_metrics_events_failed(
-                            db_session,
-                            claim_token=claim_token,
-                            item_ids=item_ids,
-                            retryable=result.retryable,
-                            retry_delay_seconds=delay_seconds,
-                            max_attempts=settings.orch_metrics_events_max_attempts,
-                            http_status=result.status_code,
-                            error=(
-                                f"metrics_http_{result.status_code}"
-                                if result.status_code is not None
-                                else "metrics_network_error"
-                            ),
-                        )
-                        counters["retried"] += retried
-                        counters["dead"] += dead
-            logger.info(
-                "metrics events batch processed",
-                extra={
-                    "event": "orch.metrics_events.batch_processed",
-                    "workspace_uuid": workspace_uuid,
-                    "claimed": len(claimed),
-                    "http_status": result.status_code,
-                    "success": result.success,
-                    "retryable": result.retryable,
-                },
-            )
+                        if result.success:
+                            counters["published"] += await mark_metrics_events_published(
+                                db_session,
+                                claim_token=claim_token,
+                                item_ids=item_ids,
+                                http_status=int(result.status_code or 200),
+                            )
+                        else:
+                            delay_seconds = metrics_retry_delay_seconds(
+                                attempt=max(item.attempts for item in items),
+                                initial_seconds=(
+                                    settings.orch_metrics_events_retry_initial_seconds
+                                ),
+                                maximum_seconds=(
+                                    settings.orch_metrics_events_retry_max_seconds
+                                ),
+                            )
+                            retried, dead = await mark_metrics_events_failed(
+                                db_session,
+                                claim_token=claim_token,
+                                item_ids=item_ids,
+                                retryable=result.retryable,
+                                retry_delay_seconds=delay_seconds,
+                                max_attempts=settings.orch_metrics_events_max_attempts,
+                                http_status=result.status_code,
+                                error=(
+                                    f"metrics_http_{result.status_code}"
+                                    if result.status_code is not None
+                                    else "metrics_network_error"
+                                ),
+                            )
+                            counters["retried"] += retried
+                            counters["dead"] += dead
+                logger.info(
+                    "metrics events delivery processed",
+                    extra={
+                        "event": "orch.metrics_events.delivery_processed",
+                        "workspace_uuid": workspace_uuid,
+                        "delivery_kind": delivery_kind,
+                        "claimed": len(items),
+                        "http_status": result.status_code,
+                        "success": result.success,
+                        "retryable": result.retryable,
+                    },
+                )
         except Exception as exc:
             logger.exception(
                 "metrics events workspace publication failed",
