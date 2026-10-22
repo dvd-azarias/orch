@@ -196,7 +196,10 @@ def test_custom_metric_uses_target_core_singular_contract(
     assert request.full_url == "https://metrics.example.test/api/v1/events/ingest"
     assert request.get_header("X-api-key") == "metrics-test-key"
     assert request.get_header("X-idempotency-key") is None
-    assert json.loads(request.data) == event
+    assert json.loads(request.data) == {
+        key: event[key]
+        for key in ("event_type", "workspace_id", "timestamp", "context", "payload")
+    }
     assert captured["timeout"] == 3.0
     assert result.success is True
     assert result.status_code == 202

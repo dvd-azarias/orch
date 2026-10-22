@@ -395,9 +395,17 @@ def publish_custom_metric_event(
     if not base_url or not api_key:
         raise RuntimeError("metrics_api_not_configured")
     metrics_base_url = base_url if base_url.endswith("/api") else f"{base_url}/api"
+    # Target Core's `emit_metrics` resource has a stricter envelope than the
+    # orchestration journey stream.  Keep durable/outbox metadata internal and
+    # reproduce only the public contract that its Metrics worker sends.
+    request_body = {
+        key: event[key]
+        for key in ("event_type", "workspace_id", "timestamp", "context", "payload")
+        if key in event
+    }
     request = Request(
         f"{metrics_base_url}/v1/events/ingest",
-        data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
