@@ -119,6 +119,13 @@ card, configuração e valor resolvido. Com a integração desabilitada para o
 workspace, o card é no-op seguro e registra esse resultado em
 `variables.customs.emit_metrics.last`.
 
+`metric.custom.*` é um recurso distinto da Metrics API: o worker o envia um a
+um como o próprio evento para `POST /api/v1/events/ingest`, sem o wrapper
+`{"events": [...]}` do stream de jornada. Os demais eventos da outbox continuam
+no publicador em lote. Essa separação preserva o contrato já usado pelo card
+BOT no Target Core e não altera a retomada M2 nem o card
+`send_whatsapp_template`.
+
 ### Gate M3 — dispatches digitais
 
 - [x] WhatsApp: `sent`, `delivered`, `read`, `failed` e primeira resposta

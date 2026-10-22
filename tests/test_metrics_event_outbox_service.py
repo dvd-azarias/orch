@@ -11,6 +11,7 @@ from app.services.metrics_event_outbox_service import (
     build_metrics_event,
     metrics_events_enabled_for_workspace,
     metrics_retry_delay_seconds,
+    publish_custom_metric_event,
     publish_metrics_events_batch,
 )
 
@@ -142,6 +143,60 @@ def test_publish_uses_documented_ingest_path_and_authentication(
     assert request.get_header("X-api-key") == "metrics-test-key"
     assert request.get_header("X-idempotency-key") == claim_token
     assert json.loads(request.data) == {"events": [event]}
+    assert captured["timeout"] == 3.0
+    assert result.success is True
+    assert result.status_code == 202
+
+
+def test_custom_metric_uses_target_core_singular_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 202
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return b'{"accepted":1}'
+
+    def _urlopen(request: object, *, timeout: float) -> _Response:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("app.services.metrics_event_outbox_service.urlopen", _urlopen)
+    settings = replace(
+        get_settings(),
+        orch_metrics_api_base_url="https://metrics.example.test",
+        orch_metrics_api_key="metrics-test-key",
+        orch_metrics_events_http_timeout_seconds=3.0,
+    )
+    event = build_metrics_event(
+        workspace_uuid=WORKSPACE_UUID,
+        event_type="metric.custom.emitted.v1",
+        context={"channel": "WHATSAPP", "message_status": "delivered"},
+        payload={
+            "metric_id": "disparos_com_sucesso",
+            "metric_type": "counter",
+            "operation": "increment",
+            "value": 1,
+        },
+    )
+
+    result = publish_custom_metric_event(event=event, settings=settings)
+
+    request = captured["request"]
+    assert request.full_url == "https://metrics.example.test/api/v1/events/ingest"
+    assert request.get_header("X-api-key") == "metrics-test-key"
+    assert request.get_header("X-idempotency-key") is None
+    assert json.loads(request.data) == event
     assert captured["timeout"] == 3.0
     assert result.success is True
     assert result.status_code == 202
