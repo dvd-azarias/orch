@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -12,6 +13,29 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+
+
+_METRICS_CHANNEL_ALIASES = {
+    "voice": "VOZ",
+    "voz": "VOZ",
+    "telefone": "VOZ",
+    "phone": "VOZ",
+    "pbx": "VOZ",
+    "bot": "PLAYGROUND",
+    "playground": "PLAYGROUND",
+    "custom": "WEBHOOK",
+}
+_METRICS_ALLOWED_CHANNELS = {
+    "VOZ",
+    "WHATSAPP",
+    "EMAIL",
+    "SMS",
+    "RCS",
+    "WEBCHAT",
+    "TELEGRAM",
+    "PLAYGROUND",
+    "WEBHOOK",
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +63,132 @@ def _utc_iso(value: datetime | None = None) -> str:
     return current.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _metrics_event_timestamp(value: Any) -> tuple[str, int]:
+    parsed: datetime | None = None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        parsed = datetime.now(timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return _utc_iso(parsed), int(parsed.timestamp() * 1000)
+
+
+def _normalize_metrics_channel(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in (
+            "channel_type",
+            "channel.type",
+            "type",
+            "channel",
+            "provider",
+            "mode",
+        ):
+            normalized = _normalize_metrics_channel(value.get(key))
+            if normalized:
+                return normalized
+        return None
+    channel = str(value).strip()
+    if not channel:
+        return None
+    pattern = re.compile(
+        r'''["']?(?:channel(?:[_\.\s]?type)?|type)["']?\s*[:=]\s*'''
+        r'''["']?([A-Za-z_]+)["']?''',
+        re.IGNORECASE,
+    )
+    extracted = None
+    for match in pattern.finditer(channel):
+        candidate = match.group(1).strip()
+        if candidate.lower() not in {"none", "null", "undefined"}:
+            extracted = candidate
+            break
+    if extracted:
+        channel = extracted
+    elif channel.startswith("{") and channel.endswith("}"):
+        return None
+    normalized = _METRICS_CHANNEL_ALIASES.get(channel.lower(), channel.upper())
+    return normalized if normalized in _METRICS_ALLOWED_CHANNELS else None
+
+
+def _canonicalize_custom_metric_event(
+    event: dict[str, Any],
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Mirror Target Core's canonical event envelope and final channel guard."""
+
+    canonical = dict(event)
+    context = canonical.get("context")
+    context = dict(context) if isinstance(context, dict) else {}
+    payload = canonical.get("payload")
+    payload = dict(payload) if isinstance(payload, dict) else {}
+
+    workspace_id = canonical.get("workspace_id") or context.get("workspace_id")
+    if workspace_id is not None and str(workspace_id).strip():
+        workspace_text = str(workspace_id).strip()
+        canonical["workspace_id"] = workspace_text
+        context["workspace_id"] = workspace_text
+    context["mode"] = "orchestration"
+    context["flow_type"] = "orchestration"
+
+    normalized_channel = _normalize_metrics_channel(context.get("channel"))
+    if not normalized_channel:
+        for payload_key in ("channel", "entry_point", "from_channel", "to_channel"):
+            normalized_channel = _normalize_metrics_channel(payload.get(payload_key))
+            if normalized_channel:
+                break
+    if not normalized_channel:
+        normalized_channel = _normalize_metrics_channel(canonical.get("channel"))
+    context["channel"] = normalized_channel or "WEBHOOK"
+
+    canonical["context"] = context
+    canonical["payload"] = payload
+    if not isinstance(canonical.get("event_id"), str) or not canonical[
+        "event_id"
+    ].strip():
+        canonical["event_id"] = str(uuid4())
+
+    timestamp, timestamp_ms = _metrics_event_timestamp(canonical.get("timestamp"))
+    canonical["timestamp"] = timestamp
+    # `emit_metrics` no Target Core is born without source; seu canonicalizador
+    # sempre produz este valor. A origem `orch` pertence ao stream generico e
+    # nao deve vazar para o recurso dedicado deste card.
+    canonical["source"] = "flow-executor"
+
+    billing = canonical.get("billing")
+    billing = dict(billing) if isinstance(billing, dict) else {}
+    billing.setdefault("tokens", 0)
+    billing.setdefault("units", [])
+    canonical["billing"] = billing
+
+    interaction_id = context.get("interaction_id")
+    trace = canonical.get("trace")
+    trace = dict(trace) if isinstance(trace, dict) else {}
+    if interaction_id and not trace.get("correlation_id"):
+        trace["correlation_id"] = f"corr_{interaction_id}"
+    if not trace.get("idempotency_key"):
+        trace["idempotency_key"] = (
+            f"{canonical.get('workspace_id')}:{interaction_id}:"
+            f"{canonical.get('event_type')}:{timestamp_ms}"
+        )
+    canonical["trace"] = trace
+
+    labels = canonical.get("labels")
+    labels = dict(labels) if isinstance(labels, dict) else {}
+    labels.setdefault("environment", settings.metrics_environment or "production")
+    if settings.metrics_tier:
+        labels.setdefault("tier", settings.metrics_tier)
+    canonical["labels"] = labels
+    return canonical
 
 
 def metrics_events_enabled_for_workspace(
@@ -383,7 +533,7 @@ def publish_custom_metric_event(
     event: dict[str, Any],
     settings: Settings,
 ) -> MetricsPublishResult:
-    """Deliver the Target Core `emit_metrics` envelope to Metrics unchanged.
+    """Deliver `emit_metrics` through the same contract as Target Core.
 
     The regular orchestration stream is a batch API.  Custom metrics are a
     distinct Metrics resource: Target Core posts the event itself, one at a
@@ -395,14 +545,11 @@ def publish_custom_metric_event(
     if not base_url or not api_key:
         raise RuntimeError("metrics_api_not_configured")
     metrics_base_url = base_url if base_url.endswith("/api") else f"{base_url}/api"
-    # Target Core's `emit_metrics` resource has a stricter envelope than the
-    # orchestration journey stream.  Keep durable/outbox metadata internal and
-    # reproduce only the public contract that its Metrics worker sends.
-    request_body = {
-        key: event[key]
-        for key in ("event_type", "workspace_id", "timestamp", "context", "payload")
-        if key in event
-    }
+    # Target Core completes the canonical envelope in its dispatcher and then
+    # sanitizes the channel immediately before the singular POST.  Reproduce
+    # both steps here; `OTHER`, for example, is not accepted by Metrics and is
+    # intentionally mapped to the same WEBHOOK fallback used by Target Core.
+    request_body = _canonicalize_custom_metric_event(event, settings=settings)
     request = Request(
         f"{metrics_base_url}/v1/events/ingest",
         data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),

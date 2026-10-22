@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -177,17 +178,26 @@ def test_custom_metric_uses_target_core_singular_contract(
         orch_metrics_api_base_url="https://metrics.example.test",
         orch_metrics_api_key="metrics-test-key",
         orch_metrics_events_http_timeout_seconds=3.0,
+        metrics_environment="live",
+        metrics_tier="standard",
     )
+    interaction_id = str(uuid4())
+    occurred_at = datetime(2026, 10, 22, 15, 59, 11, 26000, tzinfo=timezone.utc)
     event = build_metrics_event(
         workspace_uuid=WORKSPACE_UUID,
         event_type="metric.custom.emitted.v1",
-        context={"channel": "WHATSAPP", "message_status": "delivered"},
+        context={
+            "channel": "OTHER",
+            "interaction_id": interaction_id,
+            "message_status": "delivered",
+        },
         payload={
             "metric_id": "disparos_com_sucesso",
             "metric_type": "counter",
             "operation": "increment",
             "value": 1,
         },
+        occurred_at=occurred_at,
     )
 
     result = publish_custom_metric_event(event=event, settings=settings)
@@ -196,9 +206,26 @@ def test_custom_metric_uses_target_core_singular_contract(
     assert request.full_url == "https://metrics.example.test/api/v1/events/ingest"
     assert request.get_header("X-api-key") == "metrics-test-key"
     assert request.get_header("X-idempotency-key") is None
-    assert json.loads(request.data) == {
-        key: event[key]
-        for key in ("event_type", "workspace_id", "timestamp", "context", "payload")
+    body = json.loads(request.data)
+    assert body == {
+        **event,
+        "source": "flow-executor",
+        "billing": {"tokens": 0, "units": []},
+        "context": {
+            **event["context"],
+            "channel": "WEBHOOK",
+            "flow_type": "orchestration",
+            "mode": "orchestration",
+            "workspace_id": WORKSPACE_UUID,
+        },
+        "labels": {"environment": "live", "tier": "standard"},
+        "trace": {
+            "correlation_id": f"corr_{interaction_id}",
+            "idempotency_key": (
+                f"{WORKSPACE_UUID}:{interaction_id}:metric.custom.emitted.v1:"
+                "1792684751026"
+            ),
+        },
     }
     assert captured["timeout"] == 3.0
     assert result.success is True

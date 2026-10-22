@@ -26,6 +26,8 @@ def _minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST",
         "METRICS_API_BASE_URL",
         "METRICS_API_KEY",
+        "METRICS_ENVIRONMENT",
+        "METRICS_TIER",
         "CELERY_METRICS_EVENTS_QUEUE",
         "CELERY_BEAT_METRICS_EVENTS_ENABLED",
     ):
@@ -45,6 +47,8 @@ def test_metrics_events_are_disabled_and_isolated_by_default(
     assert settings.orch_metrics_events_workspace_allowlist == ()
     assert settings.celery_metrics_events_queue == "orch_metrics_events"
     assert settings.celery_beat_metrics_events_enabled is False
+    assert settings.metrics_environment is None
+    assert settings.metrics_tier is None
     config.get_settings.cache_clear()
 
 

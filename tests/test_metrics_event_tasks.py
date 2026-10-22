@@ -44,6 +44,19 @@ async def _async_value(value):  # type: ignore[no-untyped-def]
     return value
 
 
+def test_publish_error_preserves_truncated_metrics_validation_detail() -> None:
+    result = MetricsPublishResult(
+        status_code=422,
+        response_text="  invalid   context.channel  ",
+        retryable=False,
+        success=False,
+    )
+
+    assert tasks._metrics_publish_error(result) == (
+        "metrics_http_422: invalid context.channel"
+    )
+
+
 @pytest.mark.asyncio
 async def test_global_publisher_scans_every_completed_workspace(
     monkeypatch: pytest.MonkeyPatch,

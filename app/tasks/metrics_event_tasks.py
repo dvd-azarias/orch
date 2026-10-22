@@ -25,6 +25,16 @@ from app.services.workspace_service import bind_workspace_context, list_complete
 logger = get_logger(__name__)
 
 
+def _metrics_publish_error(result: MetricsPublishResult) -> str:
+    base = (
+        f"metrics_http_{result.status_code}"
+        if result.status_code is not None
+        else "metrics_network_error"
+    )
+    detail = " ".join(str(result.response_text or "").split())[:500]
+    return f"{base}: {detail}" if detail else base
+
+
 @celery_app.task(
     name="app.tasks.metrics_events.publish_pending",
     ignore_result=True,
@@ -152,11 +162,7 @@ async def _publish_pending_metrics_events() -> dict[str, int]:
                                 retry_delay_seconds=delay_seconds,
                                 max_attempts=settings.orch_metrics_events_max_attempts,
                                 http_status=result.status_code,
-                                error=(
-                                    f"metrics_http_{result.status_code}"
-                                    if result.status_code is not None
-                                    else "metrics_network_error"
-                                ),
+                                error=_metrics_publish_error(result),
                             )
                             counters["retried"] += retried
                             counters["dead"] += dead
