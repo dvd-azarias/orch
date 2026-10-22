@@ -126,6 +126,14 @@ no publicador em lote. Essa separação preserva o contrato já usado pelo card
 BOT no Target Core e não altera a retomada M2 nem o card
 `send_whatsapp_template`.
 
+Antes do POST singular, o adaptador replica as duas etapas do Target Core:
+completa o envelope canônico (`event_id`, `source`, `billing`, `trace`,
+`labels`, `context.mode` e `context.workspace_id`) e sanitiza
+`context.channel`. Canais fora do enum da Metrics, como o fallback interno
+`OTHER`, tornam-se `WEBHOOK`, exatamente como no publicador BOT. Respostas de
+erro da Metrics ficam truncadas na outbox para diagnóstico, sem registrar
+headers nem a chave de API.
+
 ### Gate M3 — dispatches digitais
 
 - [x] WhatsApp: `sent`, `delivered`, `read`, `failed` e primeira resposta

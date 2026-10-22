@@ -3321,8 +3321,7 @@ execução de cards ou seleção de Supplier.
 
 Corrigir a entrega do card `emit_metrics` no M2 após callback real de WhatsApp.
 Classificação `ALPHA_FIX_REQUIRED`: o card e a retomada estavam corretos, mas
-os eventos `metric.custom.emitted.v1` recebiam HTTP 422 ao serem publicados no
-contrato de jornada em lote.
+os eventos `metric.custom.emitted.v1` recebiam HTTP 422 no destino Metrics.
 
 ### CAUSA / CHANGE
 
@@ -3332,12 +3331,21 @@ contrato de jornada em lote.
   wrapper `{"events": [...]}`, reservado aos eventos de jornada;
 - o worker Metrics agora particiona somente `metric.custom.*` e o envia no
   contrato singular. Eventos de jornada continuam no publicador batch atual;
+- a correção singular inicial ainda removia `event_id`, `source`, `billing`,
+  `trace` e `labels`, sem perceber que o Target Core os completa no dispatcher
+  antes de enfileirar; além disso, o envio final do BOT sanitiza canais fora do
+  enum e converte o fallback `OTHER` em `WEBHOOK`;
+- o adaptador dedicado agora reproduz essas duas etapas, preserva a identidade
+  durável do evento e registra na outbox o detalhe truncado de rejeições HTTP;
 - não houve mudança no M2, no cursor de retomada, em
   `send_whatsapp_template`, nem nos coletores/callbacks de WhatsApp.
 
 ### VALIDATION
 
-- testes de contrato, partição do worker e M2 passaram localmente;
-- a migration da outbox passou com PostgreSQL real em schema efêmero;
+- regressão isolada do domínio Metrics e do M2 passou com PostgreSQL real:
+  `28 passed`; a regressão unitária cirúrgica passou com `14 passed`;
+- a suíte global registrou `1119 passed` e 27 falhas preexistentes/fora do
+  escopo: 26 testes chamam a assinatura antiga `trigger_orch(flow_uuid=...)`
+  e um teste herdou lock de sessão após a execução longa;
 - a validação externa final exige publicar a revisão e reprocessar somente os
   itens `metric.custom.*` mortos previamente auditados do fluxo canário.

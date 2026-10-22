@@ -65,6 +65,8 @@ class Settings:
     orch_metrics_events_allow_all_workspaces: bool
     orch_metrics_api_base_url: str | None
     orch_metrics_api_key: str | None
+    metrics_environment: str | None
+    metrics_tier: str | None
     orch_metrics_events_workspace_allowlist: tuple[str, ...]
     orch_metrics_events_http_timeout_seconds: float
     orch_metrics_events_batch_size: int
@@ -556,6 +558,8 @@ def get_settings() -> Settings:
         ),
         orch_metrics_api_base_url=_read_env_optional("METRICS_API_BASE_URL"),
         orch_metrics_api_key=_read_env_optional("METRICS_API_KEY"),
+        metrics_environment=_read_env_optional("METRICS_ENVIRONMENT"),
+        metrics_tier=_read_env_optional("METRICS_TIER"),
         orch_metrics_events_workspace_allowlist=_read_env_csv(
             "ORCH_METRICS_EVENTS_WORKSPACE_ALLOWLIST", ()
         ),

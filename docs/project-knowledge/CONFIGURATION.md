@@ -142,6 +142,8 @@ e rollout:
   `/v1/events/ingest`.
 - `METRICS_API_KEY`: segredo enviado somente no header `X-API-Key`; nunca
   registrar em log ou versionar.
+- `METRICS_ENVIRONMENT` e `METRICS_TIER`: rotulos opcionais do envelope
+  canonico; em producao devem acompanhar os valores usados pelo Target Core.
 - `CELERY_METRICS_EVENTS_QUEUE`: fila exclusiva resolvida pelo profile.
 - `CELERY_BEAT_METRICS_EVENTS_ENABLED=false`: habilitar em exatamente um Beat
   logico do ambiente. Writers e worker devem manter esta flag `false`; ela nao
