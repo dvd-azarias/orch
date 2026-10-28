@@ -239,6 +239,11 @@ conflitante falha fechado.
 O executor consome o evento uma única vez e percorre a branch normalizada do
 outcome. Há somente duas saídas sistêmicas para o hold criado na Supplier:
 
+Antes de percorrer a branch, o executor publica a fotografia auditável em
+`dialer_last_response` e `customs.dialer_last_response`. O canvas pode usar
+`terminal`, `event_id`, `attempt_id`, decisão e vigência para separar com
+segurança um outcome intermediário de um outcome terminal com o mesmo nome.
+
 - se o grafo voltar ao mesmo card, o ORCH prepara `retry_same_phone` para o
   mesmo ciclo/evento. A task pós-commit chama a rota de resolução do Target e o
   ciclo volta a `ready` sem alterar o `next_eligible_at` calculado pela Dial

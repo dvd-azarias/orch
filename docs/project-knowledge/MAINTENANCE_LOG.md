@@ -3436,3 +3436,35 @@ o segundo card de métrica.
   e zero métrica nova do flow alvo. Portanto, o runtime novo está saudável,
   mas a confirmação E2E de `disparos_com_sucesso` permanece dependente da
   próxima sessão real; nenhum evento histórico foi rearmado.
+
+## 2026-10-28 — Contexto de tentativa do novo Discador exposto ao canvas
+
+### REQUEST / CLASSIFICATION
+
+Permitir callback externo por tentativa em flows que usam
+`attempt_feedback_mode=each_attempt`. Classificação `ALPHA_FIX_REQUIRED`: um
+mesmo outcome telefônico pode ser intermediário ou terminal, mas o canvas não
+recebia esse sinal e não conseguia decidir com segurança entre rearmar o ciclo
+e encerrar a jornada.
+
+### CHANGE / SAFETY
+
+- a chave interna `dialer_last_response` permanece como autoridade, recebe os
+  metadados auditáveis também no retorno terminal e passa a ser copiada para
+  `variables.dialer_last_response` e `customs.dialer_last_response`;
+- entregas intermediárias e terminais expõem somente metadados auditáveis já
+  recebidos da Supplier: evento, ciclo, tentativa, sequência quando disponível,
+  `terminal`, decisão, motivo, vigência e instante;
+- não há migration, mudança de card, nova integração ou alteração na decisão
+  da Dial Rule. Flows existentes que não consultam o novo contexto preservam o
+  comportamento anterior.
+
+### VALIDATION PRE-DEPLOY
+
+- `4 passed` nos testes dirigidos de decisão intermediária/terminal e exposição
+  do contexto ao template/condition;
+- `146 passed` na suíte completa da engine M2;
+- `108 passed` na regressão Supplier V2, tasks de workflow e seleção do próximo
+  canal;
+- `py_compile` e `git diff --check` passaram. Rollout e canário real com POST
+  observado na Mannu permanecem obrigatórios para encerrar a validação E2E.

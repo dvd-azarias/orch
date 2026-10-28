@@ -1029,10 +1029,13 @@ def test_supplier_v2_keeps_telephone_branch_separate_from_operational_decision()
                 "cycle_id": "11111111-1111-4111-8111-111111111111",
                 "component_ref_id": "dialer-handoff-1",
                 "terminal_delivery": {
+                    "event_id": "22222222-2222-4222-8222-222222222222",
+                    "attempt_id": "33333333-3333-4333-8333-333333333333",
                     "terminal": True,
                     "outcome": "machine",
                     "decision": "next_phone",
                     "decision_source": "dial_profile",
+                    "terminal_reason": "outcome_attempt_limit_reached",
                 },
             },
         }
@@ -1053,7 +1056,17 @@ def test_supplier_v2_keeps_telephone_branch_separate_from_operational_decision()
         "component_ref_id": "dialer-handoff-1",
         "status": "machine",
         "branch": "machine",
+        "event_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_id": "33333333-3333-4333-8333-333333333333",
+        "terminal": True,
+        "decision": "next_phone",
+        "decision_source": "dial_profile",
+        "terminal_reason": "outcome_attempt_limit_reached",
     }
+    assert runtime_variables["variables"]["dialer_last_response"]["terminal"] is True
+    assert runtime_variables["variables"]["customs"]["dialer_last_response"]["event_id"] == (
+        "22222222-2222-4222-8222-222222222222"
+    )
 
 
 def test_supplier_v2_intermediate_attempt_is_consumed_exactly_once() -> None:
@@ -1089,6 +1102,37 @@ def test_supplier_v2_intermediate_attempt_is_consumed_exactly_once() -> None:
     assert registration["intermediate_delivery"]["consumed_at"]
     assert runtime_variables["dialer_last_response"]["terminal"] is False
     assert runtime_variables["dialer_last_response"]["attempt_sequence"] == 1
+    assert runtime_variables["variables"]["dialer_last_response"]["terminal"] is False
+    assert (
+        _render_value(
+            "{{dialer_last_response.event_id}}",
+            runtime_variables["variables"],
+        )
+        == "22222222-2222-4222-8222-222222222222"
+    )
+    assert (
+        _run_condition(
+            {
+                "parameters": {
+                    "conditions": [
+                        {
+                            "id": "retry_same_phone",
+                            "match": "all",
+                            "rules": [
+                                {
+                                    "field": "dialer_last_response.terminal",
+                                    "operator": "eq",
+                                    "value": False,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+            runtime_variables,
+        )
+        == "retry_same_phone"
+    )
     assert _resolve_send_with_dialer_branch_label(component, runtime_variables) is None
 
 

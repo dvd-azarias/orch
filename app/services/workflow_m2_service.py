@@ -1711,18 +1711,31 @@ def _resolve_send_with_dialer_branch_label(
         "status": status,
         "branch": branch,
     }
-    if isinstance(delivery, dict) and delivery.get("terminal") is False:
-        last_response.update(
-            {
-                "event_id": delivery.get("event_id"),
-                "attempt_id": delivery.get("attempt_id"),
-                "attempt_sequence": delivery.get("attempt_sequence"),
-                "terminal": False,
-                "decision": delivery.get("decision"),
-                "next_eligible_at": delivery.get("next_eligible_at"),
-            }
-        )
+    if isinstance(delivery, dict):
+        for field in (
+            "event_id",
+            "cycle_id",
+            "attempt_id",
+            "attempt_sequence",
+            "terminal",
+            "decision",
+            "decision_source",
+            "terminal_reason",
+            "next_eligible_at",
+            "decision_effective_until",
+            "occurred_at",
+        ):
+            if field in delivery:
+                last_response[field] = delivery.get(field)
     runtime_variables["dialer_last_response"] = last_response
+    variables = _ensure_variables(runtime_variables)
+    canvas_response = copy.deepcopy(last_response)
+    variables["dialer_last_response"] = canvas_response
+    customs = variables.get("customs")
+    if not isinstance(customs, dict):
+        customs = {}
+        variables["customs"] = customs
+    customs["dialer_last_response"] = copy.deepcopy(canvas_response)
     return branch
 
 
