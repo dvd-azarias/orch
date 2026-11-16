@@ -57,6 +57,34 @@ Os templates em `systemctl/` ainda representam uma topologia generica antiga, co
 
 As units de billing fazem parte da baseline observada, mas continuam sendo uma familia operacional separada. Nao reinicia-las junto com workflow, FileApp ou generate-file sem que a mudanca afete explicitamente o billing.
 
+### Guard obrigatorio de concorrencia workflow
+
+Depois do incidente de 2026-11-16, a configuracao canonica dos cinco workers
+workflow e `--autoscale=8,2`: maximo agregado de 40 processos. A configuracao
+anterior `64,16` por worker podia chegar a 320 processos contra PostgreSQL com
+`max_connections=200` e nao deve ser restaurada por rollout, reinstalacao de
+unit ou copia de template generico.
+
+O Beat principal usa lote 10 e intervalo de 5 segundos para evitar rajadas
+enquanto o Alpha permanece em sustentacao. A fonte versionada dos seis
+drop-ins fica em `systemctl/production-237/`.
+
+Antes e depois de qualquer rollout que toque workflow, Celery, systemd ou o
+checkout do `.237`, executar:
+
+```bash
+scripts/prod_workflow_safety_237.sh check
+```
+
+Para reinstalar os drop-ins sem reiniciar processos:
+
+```bash
+sudo scripts/prod_workflow_safety_237.sh install
+```
+
+O instalador cria backup e executa `daemon-reload`, mas o restart permanece
+rolling e manual. Nunca usar `scripts/systemd_orch.sh install` no `.237`.
+
 Diagnosticar pela configuracao efetiva:
 
 ```bash

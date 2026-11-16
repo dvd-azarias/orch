@@ -5,6 +5,11 @@
 
 > **ATENCAO — PRODUCAO ATUAL:** o host canonico `10.1.20.237` nao usa estes arquivos literalmente. A instalacao confirmada fica em `/etc/gohp/orch`, usa `/etc/gohp/orch/.env`, workers `_01..05`, hostnames `@237_01..05`, tres beats e 19 units habilitadas. Consulte primeiro a secao `ACESSO RAPIDO A PRODUCAO — HOST 10.1.20.237` de `PROJECT_STEWARD.md`. Nao copie estes templates genericos sobre o `237`.
 
+Os drop-ins especificos e os limites de seguranca do `.237` ficam em
+`systemctl/production-237/`. Instale e valide somente por
+`scripts/prod_workflow_safety_237.sh`; nao use a instalacao generica abaixo
+nesse host.
+
 Arquivos:
 - `systemctl/orch-api.service`
 - `systemctl/orch-celery-worker.service`

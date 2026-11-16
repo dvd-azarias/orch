@@ -363,6 +363,18 @@ Sempre que possivel, o mesmo agente que implementou uma alteracao nao deve ser a
 * A UI nunca recebe acesso ao banco. O caminho permanece
   `navegador -> BFF restrito -> APIs v2 do Target Core`.
 
+## Guard de concorrencia workflow no `.237` — OBRIGATORIO
+
+* Preservar os drop-ins versionados em `systemctl/production-237/`.
+* Os cinco workers gerais devem executar com `--autoscale=8,2`, total maximo de
+  40 processos; nunca restaurar `64,16` por worker.
+* O Beat principal deve preservar `CELERY_DISPATCH_BATCH_SIZE=10` e
+  `CELERY_DISPATCH_INTERVAL_SECONDS=5` enquanto esta protecao estiver ativa.
+* Antes e depois de rollout no `.237`, executar
+  `scripts/prod_workflow_safety_237.sh check`.
+* O instalador apenas copia drop-ins e faz `daemon-reload`; restart continua
+  rolling e exige validacao de banco/filas entre workers.
+
 ## Regra canonica FileApp (Fase 7) — OBRIGATORIA
 
 * Decisao por `mapping_template` e somente por ele:
