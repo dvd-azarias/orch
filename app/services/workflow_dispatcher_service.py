@@ -121,6 +121,23 @@ async def dispatch_pending_sessions(
     return claimed
 
 
+async def release_claimed_session_after_enqueue_failure(
+    db_session: AsyncSession,
+    *,
+    session_id: int,
+) -> None:
+    safe_schema = get_current_workspace_schema().replace('"', '""')
+    tx_context = db_session.begin_nested() if db_session.in_transaction() else db_session.begin()
+    async with tx_context:
+        await db_session.execute(text(f'SET LOCAL search_path TO "{safe_schema}"'))
+        await set_session_state(
+            db_session,
+            session_id=session_id,
+            state=0,
+            only_if_not_finished=True,
+        )
+
+
 async def advance_session_once(
     db_session: AsyncSession,
     *,
