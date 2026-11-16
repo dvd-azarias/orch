@@ -658,3 +658,73 @@ conexões ou descritores.
 Não há migration nem mudança de schema. O rollback consiste em retornar o
 checkout do ORCHESTRATOR ao commit anterior validado e reiniciar somente
 `gateway_sync.service`, preservando o `.env`.
+
+## 2026-11-16 — Dispatcher republicava sessões por rollback do claim
+
+`STATUS`: CONTIDO / HOTFIX VALIDADO EM PRODUÇÃO / VERSIONAMENTO PENDENTE
+
+`SEVERITY`: critical
+
+`CLASSIFICATION`: `ALPHA_FIX_REQUIRED`
+
+### Sintoma e impacto
+
+- PostgreSQL chegou a 100% das vCPUs e todas as rotas dependentes de flows
+  ficaram extremamente lentas.
+- Os cinco workers gerais do `.237` atingiram 64 tarefas ativas cada. Em 15
+  minutos, aproximadamente 49 mil tasks `advance_session` foram recebidas.
+- Somente 110 sessões da Velox produziram 18.829 execuções de executor; várias
+  sessões individuais foram executadas 200 ou 201 vezes.
+- Outro flow produziu 19.615 execuções `session_already_terminal` e 7.354
+  falhas determinísticas `contact_member_scope_not_found` no mesmo período.
+- A carga resultante concentrava selects de contexto de contato, scans do
+  Supplier V2 e uma fila de locks sobre `orch_journey_flow_coverage`.
+
+### Causa raiz
+
+`_dispatch_pending_sessions_task` chama `list_completed_workspaces` antes do
+claim. A leitura abre uma transação externa no `AsyncSession`; por isso,
+`claim_pending_sessions` usa `begin_nested()` e confirma somente o savepoint.
+O dispatcher publicava `advance_session` no RabbitMQ, mas encerrava a sessão
+sem `commit()` da transação externa. O fechamento fazia rollback do update
+`state=0 -> state=1`, enquanto a mensagem já permanecia no broker. A cada dois
+segundos, a mesma sessão continuava elegível e era publicada novamente.
+
+O defeito entrou no commit `f0eda180` da PR ORCH `#222`, em 2026-09-29. A
+concorrência configurada de até 320 processos e schedules auxiliares duplicados
+amplificaram o incidente, mas não foram a causa primária.
+
+### Contenção
+
+- O beat principal e os cinco workers gerais foram parados.
+- O backlog duplicado de `orch_execute` foi purgado de forma direcionada; filas
+  de billing, FileApp, generate-file e Supplier dedicado foram preservadas.
+- Depois da contenção, `SELECT 1` voltou para 12–18 ms e a tempestade de locks
+  desapareceu.
+
+### Correção e validação
+
+- O claim agora recebe commit explícito antes de qualquer publicação Celery.
+- Se o enqueue falhar, a sessão é devolvida de forma durável para `state=0` e
+  continua elegível para uma tentativa posterior.
+- Métricas e alarmes do dispatcher são confirmados em transação separada.
+- Quarenta testes dirigidos passaram localmente; 21 passaram novamente no
+  próprio `.237`, além de `compileall`.
+- Um canário sem publicação comprovou por segunda conexão que o claim ficou
+  visível como `state=1`; a sessão foi restaurada imediatamente para `state=0`.
+- O canário real da sessão `42825` produziu exatamente um dispatch e uma
+  execução, terminou em `state=3` e deixou `orch_execute` vazia.
+- Na retomada limitada, 152 execuções da Velox corresponderam a 152 sessões e
+  269 falhas determinísticas do segundo flow corresponderam a 269 sessões.
+  Não houve republicação terminal. Duas sessões tiveram somente a sequência
+  legítima `session_execution_locked -> finished_by_component`.
+
+### Estado operacional temporário
+
+- O `.237` executa o beat com lote 10 a cada 5 segundos por drop-in temporário
+  `zz-incident-dispatch-safe.conf`.
+- Somente o worker 01 foi reaberto, com autoscale runtime `8/2`; os workers
+  02–05 permanecem parados até expansão controlada.
+- O hotfix está ativo por rollout cirúrgico com backup em
+  `/etc/gohp/incident-backups/`, mas ainda precisa ser integrado ao `main` para
+  não ser perdido em deploy futuro.

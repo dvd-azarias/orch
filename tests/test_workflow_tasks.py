@@ -34,6 +34,143 @@ class _DummySessionContext:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_commits_claim_before_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    session_context = _DummySessionContext(events)
+    workspace_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    flow_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            celery_dispatch_workspace_uuid=None,
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_session_factory",
+        lambda: (lambda: session_context),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "bind_workspace_context",
+        lambda value: (value, f"ws_{value}"),
+    )
+
+    async def _list_workspaces(_db):  # type: ignore[no-untyped-def]
+        return [{"workspace_uuid": workspace_uuid}]
+
+    async def _dispatch(_db):  # type: ignore[no-untyped-def]
+        events.append("claim")
+        return [
+            {
+                "id": 123,
+                "uuid": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "flow_uuid": flow_uuid,
+                "pending_since": None,
+            }
+        ]
+
+    async def _persist_metrics(*_args, **_kwargs) -> None:
+        events.append("metrics")
+
+    monkeypatch.setattr(workflow_tasks, "list_completed_workspaces", _list_workspaces)
+    monkeypatch.setattr(workflow_tasks, "dispatch_pending_sessions", _dispatch)
+    monkeypatch.setattr(workflow_tasks, "persist_session_metrics", _persist_metrics)
+    monkeypatch.setattr(
+        workflow_tasks.advance_session_task,
+        "delay",
+        lambda **_kwargs: events.append("enqueue"),
+    )
+
+    claimed_count = await workflow_tasks._dispatch_pending_sessions_task()
+
+    assert claimed_count == 1
+    assert events == ["claim", "commit", "enqueue", "metrics", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_releases_claim_when_enqueue_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    session_context = _DummySessionContext(events)
+    workspace_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    flow_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            celery_dispatch_workspace_uuid=None,
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "get_session_factory",
+        lambda: (lambda: session_context),
+    )
+    monkeypatch.setattr(
+        workflow_tasks,
+        "bind_workspace_context",
+        lambda value: (value, f"ws_{value}"),
+    )
+
+    async def _list_workspaces(_db):  # type: ignore[no-untyped-def]
+        return [{"workspace_uuid": workspace_uuid}]
+
+    async def _dispatch(_db):  # type: ignore[no-untyped-def]
+        return [
+            {
+                "id": 456,
+                "uuid": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "flow_uuid": flow_uuid,
+                "pending_since": None,
+            }
+        ]
+
+    async def _release(*_args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        events.append(f"release:{kwargs['session_id']}")
+
+    async def _persist_alarm(*_args, **_kwargs) -> None:
+        events.append("alarm")
+
+    async def _persist_metrics(*_args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        assert kwargs["metrics"][0]["stopped_reason"] == "enqueue_failed"
+        events.append("metrics")
+
+    def _enqueue(**_kwargs) -> None:
+        events.append("enqueue")
+        raise RuntimeError("broker unavailable")
+
+    monkeypatch.setattr(workflow_tasks, "list_completed_workspaces", _list_workspaces)
+    monkeypatch.setattr(workflow_tasks, "dispatch_pending_sessions", _dispatch)
+    monkeypatch.setattr(
+        workflow_tasks,
+        "release_claimed_session_after_enqueue_failure",
+        _release,
+    )
+    monkeypatch.setattr(workflow_tasks, "persist_alarm", _persist_alarm)
+    monkeypatch.setattr(workflow_tasks, "persist_session_metrics", _persist_metrics)
+    monkeypatch.setattr(workflow_tasks.advance_session_task, "delay", _enqueue)
+
+    claimed_count = await workflow_tasks._dispatch_pending_sessions_task()
+
+    assert claimed_count == 1
+    assert events == [
+        "commit",
+        "enqueue",
+        "release:456",
+        "alarm",
+        "metrics",
+        "commit",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stopped_reason", "alarm_code"),
     [

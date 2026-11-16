@@ -35,6 +35,7 @@ from app.services.workflow_dispatcher_service import (
     advance_session_once,
     dispatch_pending_sessions,
     is_terminal_failure_stop_reason,
+    release_claimed_session_after_enqueue_failure,
 )
 
 logger = get_logger(__name__)
@@ -305,6 +306,8 @@ async def _dispatch_pending_sessions_task() -> int:
                 continue
             bind_workspace_context(workspace_uuid)
             claimed = await dispatch_pending_sessions(db_session)
+            if db_session.in_transaction():
+                await db_session.commit()
             total_claimed += len(claimed)
             metrics: list[dict[str, Any]] = []
             for item in claimed:
@@ -328,6 +331,10 @@ async def _dispatch_pending_sessions_task() -> int:
                 except Exception as exc:
                     status = "error"
                     stopped_reason = "enqueue_failed"
+                    await release_claimed_session_after_enqueue_failure(
+                        db_session,
+                        session_id=session_id,
+                    )
                     await persist_alarm(
                         db_session,
                         level="error",
@@ -372,6 +379,8 @@ async def _dispatch_pending_sessions_task() -> int:
 
             if claimed:
                 await persist_session_metrics(db_session, metrics=metrics)
+                if db_session.in_transaction():
+                    await db_session.commit()
 
     total_ms = (datetime.now(timezone.utc) - task_started_at).total_seconds() * 1000
     logger.info(
