@@ -723,8 +723,14 @@ amplificaram o incidente, mas não foram a causa primária.
 
 - O `.237` executa o beat com lote 10 a cada 5 segundos por drop-in temporário
   `zz-incident-dispatch-safe.conf`.
-- Somente o worker 01 foi reaberto, com autoscale runtime `8/2`; os workers
-  02–05 permanecem parados até expansão controlada.
+- Os workers 01 e 02 foram reabertos com autoscale runtime `8/2`; os workers
+  03–05 permanecem parados até expansão controlada.
+- O `watchdog_orch.service` foi religado no `.136` e permaneceu
+  `active/running`, sem restart. Ele recriou 31 containers ORCH no `.143`,
+  incluindo o flow Loft `89213247-4797-4801-8e26-baf490dac6c2`.
+- Após a volta dos containers, `orch_dispatch` e `orch_execute` estavam vazias,
+  não havia sessão elegível acumulada, `SELECT 1` levou 15,97 ms e não havia
+  espera de lock no PostgreSQL.
 - O hotfix está ativo por rollout cirúrgico com backup em
   `/etc/gohp/incident-backups/`, mas ainda precisa ser integrado ao `main` para
   não ser perdido em deploy futuro.
