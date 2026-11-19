@@ -36,6 +36,7 @@
 | `orch_runner_session_links` | workspace | vínculo exato Runner v5 → sessão ORCH |
 | `orch_runner_tabulation_events` | workspace | receipts idempotentes da ponte Runner |
 | `orch_live_tabulation_events` | workspace | receipts idempotentes do webhook direto de voz Live |
+| `orch_fileapp_ingest_receipts` | workspace | claim por arquivo e proveniencia imutavel `file_id -> mailing_uuid` do FileApp Tipo 1 |
 | `orch_alembic_version` | workspace | controle de migrations do ORCH |
 | `target.orch_flow_aliases` | central | alias curto para workspace/flow |
 
@@ -52,7 +53,7 @@
 
 ## Migrations
 
-Lista executavel: `0001` a `0015`, depois `0018` a `0029`.
+Lista executavel: `0001` a `0015`, depois `0018` a `0030`.
 
 - `0016/0017` permanecem como arquivos historicos, mas foram retiradas do pipeline porque alteravam enum de outro sistema.
 - Todas as pendencias de um workspace rodam numa transacao.
@@ -76,6 +77,12 @@ Lista executavel: `0001` a `0015`, depois `0018` a `0029`.
   `orch_session_uuid + idempotency_key`. O payload persistido já exclui
   `ends_session`; a tabela não possui trigger nem efeito próprio sobre o
   lifecycle da sessão.
+- `0030` adiciona `mailing_uuid` ao receipt FileApp. O vinculo e escrito logo
+  apos o upload e preservado quando um receipt falho e reclamado, permitindo
+  retomar o mesmo mailing sem novo download/upload. Claims podem recuperar
+  `enqueued` apos cinco minutos. `processing` nao usa reclaim por TTL fixo:
+  a task filha marca esse estado somente ao iniciar e usa ACK tardio para que
+  perda do worker permita redelivery sem disputar com trabalho legitimo.
 - O parser SQL e simples e nao suporta genericamente dollar-quoted blocks.
 - Paths de SQL sao relativos ao diretorio de execucao.
 

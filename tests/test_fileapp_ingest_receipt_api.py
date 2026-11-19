@@ -78,3 +78,63 @@ async def test_tipo1_failed_receipt_is_claimed_and_reenqueued(monkeypatch: pytes
         receipt_id=19,
         task_id="93e65e1a-7461-48f0-91d5-33ba27491f54",
     )
+
+
+@pytest.mark.asyncio
+async def test_tipo1_claim_failure_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    db_session = _DbSession()
+    db_session.in_transaction = lambda: True  # type: ignore[method-assign]
+    enqueue = SimpleNamespace(
+        apply_async=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("sem receipt duravel nao pode enfileirar")
+        )
+    )
+    monkeypatch.setattr(orch_api, "detect_app", lambda _payload: orch_api.APP_ARQUIVOS)
+    monkeypatch.setattr(
+        orch_api,
+        "resolve_monitored_folders",
+        AsyncMock(return_value={"monitoramento/upload"}),
+    )
+    monkeypatch.setattr(
+        orch_api,
+        "is_file_event_in_monitored_folder",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        orch_api,
+        "resolve_mapping_template_uuid",
+        AsyncMock(return_value="template-123"),
+    )
+    monkeypatch.setattr(
+        orch_api,
+        "claim_fileapp_ingest_receipt",
+        AsyncMock(side_effect=RuntimeError("receipt unavailable")),
+    )
+    monkeypatch.setattr(orch_api, "ingest_fileapp_tipo1_event_task", enqueue)
+    monkeypatch.setattr(
+        orch_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            celery_enabled=True,
+            celery_fileapp_ingest_enabled=True,
+            celery_s3_files_ingest_queue="orch_fileapp_ingest_f5_local",
+        ),
+    )
+
+    with pytest.raises(orch_api.HTTPException) as exc_info:
+        await orch_api._trigger_orch_for_workspace(
+            workspace_uuid=WORKSPACE_UUID,
+            flow_uuid=UUID(FLOW_UUID),
+            payload={
+                "file": {
+                    "id": FILE_UUID,
+                    "folder_path": "monitoramento/upload",
+                    "original_name": "critical.csv",
+                }
+            },
+            db_session=db_session,  # type: ignore[arg-type]
+            validate_workspace=False,
+        )
+
+    assert exc_info.value.status_code == 503
+    db_session.rollback.assert_awaited_once()

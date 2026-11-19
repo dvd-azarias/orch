@@ -29,6 +29,9 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
     def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
         assert url == "http://target-core-api.otima.io/v2/mailings/upload"
         assert headers["authorization"] == "Bearer token-123"
+        assert headers["idempotency-key"] == (
+            "fileapp:flow-uuid-1:2f388d0f-5519-4e30-99ad-de34c96b9a59"
+        )
         assert upload.file_name == "mailing.csv"
         assert upload.description == "Carga via evento de cópia de arquivo no SFTP - mailing"
         return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
@@ -87,6 +90,9 @@ async def test_run_tipo1_manual_pipeline_executes_7_steps(monkeypatch) -> None:
         "linked_by": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
         "call_origin": "file_event",
     }
+    assert final_call["headers"]["idempotency-key"] == (
+        "fileapp:flow-uuid-1:2f388d0f-5519-4e30-99ad-de34c96b9a59"
+    )
 
 
 @pytest.mark.asyncio
@@ -157,6 +163,8 @@ async def test_run_tipo1_manual_pipeline_rejects_non_progressing_mapping_status(
         return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
 
     def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"status":"PENDING_FIELD_MAPPING"}}'
         if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
             return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
         if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
@@ -454,6 +462,334 @@ async def test_run_tipo1_manual_pipeline_recovers_transients_without_reupload(mo
     assert steps["step4_patch_mailing"]["attempts"] == 2
     assert steps["step3_field_mappings_get"]["attempts"] == 2
     assert steps["step5_put_field_mappings"]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_tipo1_manual_pipeline_resumes_receipt_mailing_without_upload(monkeypatch) -> None:
+    calls = {"upload": 0, "resolved": []}
+
+    def _unexpected_upload(**_kwargs):  # type: ignore[no-untyped-def]
+        calls["upload"] += 1
+        raise AssertionError("mailing já persistido no receipt não pode ser reenviado")
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"status":"PENDING_FIELD_MAPPING"}}'
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"is_ignored":false}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            return 200, '{"data":{"task_id":"import-task-1"}}'
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    async def _on_resolved(mailing_uuid: str) -> None:
+        calls["resolved"].append(mailing_uuid)
+
+    monkeypatch.setattr(service, "_multipart_request", _unexpected_upload)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    result = await service.run_tipo1_manual_pipeline(
+        settings=_DummySettings(),
+        workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+        flow_uuid="flow-uuid-1",
+        payload={
+            "file": {
+                "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                "original_name": "mailing.csv",
+            }
+        },
+        mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+        existing_mailing_uuid="mailing-uuid-1",
+        on_mailing_resolved=_on_resolved,
+        defer_step7_link_flow=True,
+    )
+
+    assert result["status"] == "done"
+    assert result["mailing_uuid"] == "mailing-uuid-1"
+    assert result["steps"][0] == {
+        "step": "step1_upload",
+        "status": "resumed",
+        "reason": "receipt_mailing_provenance",
+        "mailing_id": "mailing-uuid-1",
+    }
+    assert calls == {"upload": 0, "resolved": ["mailing-uuid-1"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("observed_status", "expects_conflict"),
+    [("INGESTING", True), ("READY_TO_INGEST", False)],
+)
+async def test_ambiguous_import_response_converges_or_requests_idempotent_retry(
+    monkeypatch,
+    observed_status: str,
+    expects_conflict: bool,
+) -> None:
+    status_reads = 0
+
+    def _unexpected_upload(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("mailing persistido no receipt não pode ser reenviado")
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        nonlocal status_reads
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            status_reads += 1
+            status = "PENDING_FIELD_MAPPING" if status_reads == 1 else observed_status
+            return 200, f'{{"data":{{"status":"{status}"}}}}'
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"is_ignored":false}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"status":"READY_TO_INGEST"}}'
+        if method == "POST" and url.endswith("/v2/mailings/mailing-uuid-1/import"):
+            raise TimeoutError("response lost after publish")
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_multipart_request", _unexpected_upload)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "original_name": "mailing.csv",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            existing_mailing_uuid="mailing-uuid-1",
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step6_import"
+    assert exc_info.value.details["mailing_uuid"] == "mailing-uuid-1"
+    assert exc_info.value.details["retryable_import_transport"] is (not expects_conflict)
+    assert exc_info.value.details["mailing_status"] == observed_status
+    assert (exc_info.value.details.get("status_code") == 409) is expects_conflict
+    assert status_reads == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mailing_status", ["INGESTING", "PROCESSED"])
+async def test_resume_after_import_converges_before_mutating_mailing(
+    monkeypatch,
+    mailing_status: str,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def _unexpected_upload(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("resume com mailing persistido nao pode fazer upload")
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        calls.append((method, url))
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, f'{{"data":{{"status":"{mailing_status}"}}}}'
+        raise AssertionError("mailing ativo nao pode repetir PATCH, PUT ou import")
+
+    monkeypatch.setattr(service, "_multipart_request", _unexpected_upload)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "original_name": "mailing.csv",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            existing_mailing_uuid="mailing-uuid-1",
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step6_import"
+    assert exc_info.value.details["mailing_uuid"] == "mailing-uuid-1"
+    assert exc_info.value.details["mailing_status"] == mailing_status
+    assert calls == [
+        ("GET", "http://target-core-api.otima.io/v2/mailings/mailing-uuid-1")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idempotent_upload_replay_converges_from_response_status(monkeypatch) -> None:
+    seen_headers: list[dict[str, str]] = []
+
+    def _fake_multipart_request(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        seen_headers.append(dict(headers))
+        return 200, (
+            '{"data":{"mailing_id":"mailing-uuid-1",'
+            '"status":"INGESTING","file":{"status":"existing"}}}'
+        )
+
+    def _unexpected_json_request(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("replay ativo nao pode repetir PATCH, PUT ou import")
+
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _unexpected_json_request)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "original_name": "mailing.csv",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            predownloaded_file_bytes=b"id,phone\n1,2\n",
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step6_import"
+    assert exc_info.value.details["mailing_status"] == "INGESTING"
+    assert seen_headers[0]["idempotency-key"] == (
+        "fileapp:flow-uuid-1:2f388d0f-5519-4e30-99ad-de34c96b9a59"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_upload_timeout_keeps_retryable_idempotency_key(monkeypatch) -> None:
+    seen_headers: list[dict[str, str]] = []
+
+    def _timeout_after_remote_side_effect(*, url, headers, upload, timeout_seconds):  # type: ignore[no-untyped-def]
+        seen_headers.append(dict(headers))
+        raise TimeoutError("response lost after commit")
+
+    monkeypatch.setattr(
+        service,
+        "_multipart_request",
+        _timeout_after_remote_side_effect,
+    )
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "original_name": "mailing.csv",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            predownloaded_file_bytes=b"id,phone\n1,2\n",
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step1_upload"
+    assert exc_info.value.details["error_type"] == "TimeoutError"
+    assert seen_headers[0]["idempotency-key"] == (
+        "fileapp:flow-uuid-1:2f388d0f-5519-4e30-99ad-de34c96b9a59"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provenance_failure_stops_pipeline_and_exposes_uploaded_mailing(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _fake_multipart_request(**_kwargs):  # type: ignore[no-untyped-def]
+        calls.append("upload")
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        calls.append(f"unexpected:{method}:{url}")
+        raise AssertionError("pipeline nao pode avancar sem proveniencia persistida")
+
+    async def _fail_provenance(_mailing_uuid: str) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "original_name": "mailing.csv",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            predownloaded_file_bytes=b"id,phone\n1,2\n",
+            on_mailing_resolved=_fail_provenance,
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step1_provenance"
+    assert exc_info.value.details == {
+        "mailing_uuid": "mailing-uuid-1",
+        "error_type": "RuntimeError",
+    }
+    assert calls == ["upload"]
+
+
+@pytest.mark.asyncio
+async def test_step5_conflict_preserves_exact_mailing_for_convergence(monkeypatch) -> None:
+    def _fake_multipart_request(**_kwargs):  # type: ignore[no-untyped-def]
+        return 200, '{"data":{"mailing_id":"mailing-uuid-1"}}'
+
+    def _fake_json_request(*, method, url, headers, payload, timeout_seconds):  # type: ignore[no-untyped-def]
+        if method == "GET" and url.endswith("/v2/mailings/mapping-templates"):
+            return 200, '{"data":[{"id":"719cbdca-ec3c-4213-9112-96d9a53cb68a"}]}'
+        if method == "PATCH" and url.endswith("/v2/mailings/mailing-uuid-1"):
+            return 200, '{"data":{"ok":true}}'
+        if method == "GET" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            return 200, '{"data":{"put_suggestion":{"mappings":[{"id":10,"is_ignored":false}]}}}'
+        if method == "PUT" and url.endswith("/v2/mailings/mailing-uuid-1/field-mappings"):
+            raise HTTPError(
+                url,
+                409,
+                "conflict",
+                {},
+                io.BytesIO(b'{"detail":"Source list ja esta em processo de ingestao."}'),
+            )
+        raise AssertionError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(service, "_multipart_request", _fake_multipart_request)
+    monkeypatch.setattr(service, "_json_request", _fake_json_request)
+
+    with pytest.raises(service.FileAppTipo1ManualPipelineError) as exc_info:
+        await service.run_tipo1_manual_pipeline(
+            settings=_DummySettings(),
+            workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
+            flow_uuid="flow-uuid-1",
+            payload={
+                "file": {
+                    "id": "2f388d0f-5519-4e30-99ad-de34c96b9a59",
+                    "original_name": "mailing.csv",
+                }
+            },
+            mapping_template_uuid="719cbdca-ec3c-4213-9112-96d9a53cb68a",
+            predownloaded_file_bytes=b"id,phone\n1,2\n",
+            defer_step7_link_flow=True,
+        )
+
+    assert exc_info.value.step == "step5_put_field_mappings"
+    assert exc_info.value.details["status_code"] == 409
+    assert exc_info.value.details["mailing_uuid"] == "mailing-uuid-1"
 
 
 @pytest.mark.asyncio

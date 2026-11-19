@@ -3468,3 +3468,44 @@ e encerrar a jornada.
   canal;
 - `py_compile` e `git diff --check` passaram. Rollout e canário real com POST
   observado na Mannu permanecem obrigatórios para encerrar a validação E2E.
+
+## 2026-11-19 — Convergencia idempotente do FileApp Tipo 1
+
+### REQUEST / CLASSIFICATION
+
+Eliminar a janela em que uma mesma entrega FileApp podia reenfileirar ou
+recriar mailing apos o Target Core ja ter iniciado a ingestao.
+`ALPHA_FIX_REQUIRED`, risco alto por envolver FileApp, Celery, persistencia
+multi-workspace e contrato com o Target Core.
+
+### CAUSE / CHANGE
+
+- o Target Core autorizava ingestao durante operacoes preparatorias e o ORCH
+  ainda chamava `/import`, criando autoridades concorrentes;
+- o receipt ORCH identificava `(flow_uuid, file_id)`, mas nao guardava qual
+  `mailing_uuid` havia sido criado;
+- timeout ambiguo depois do upload ou do `/import` e perda de worker podiam
+  repetir efeitos ou deixar receipt sem convergencia;
+- a migration `0030` adiciona a proveniencia; o vinculo e imutavel e
+  idempotente;
+- o upload usa chave deterministica e a API falha fechado sem receipt;
+- tasks Tipo 1 usam ACK tardio; o pai preserva `enqueued` ate publicar o filho,
+  e somente o filho em execucao marca `processing`, sem reclaim por TTL fixo;
+- retries com proveniencia pulam download/upload e continuam no mesmo mailing;
+- timeout ambiguo do `/import` consulta o estado do mesmo mailing: estado
+  ativo converge para associacao, enquanto `READY_TO_INGEST` agenda retry
+  idempotente com a mesma chave;
+- a retomada consulta o status e `INGESTING|PROCESSED`, alem de conflitos 409
+  nos steps 5/6, convergem para associacao e pos-processamento,
+  priorizando receipt, depois fallback historico e por ultimo o detalhe do
+  conflito.
+
+### VALIDATION PRE-DEPLOY
+
+- `55 passed` na regressao dirigida de pipeline, receipts e tasks;
+- `102 passed` na regressao ampliada de FileApp, incluindo API, rescue,
+  higiene, associacao, pos-processamento e migration service;
+- migration executada duas vezes em schema PostgreSQL temporario com rollback;
+- `compileall` e `git diff --check` passaram;
+- rollout e canario E2E permanecem pendentes. A ordem obrigatoria e migration
+  ORCH, Target Core, workers ORCH e somente entao o canario.

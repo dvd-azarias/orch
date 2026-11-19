@@ -736,14 +736,17 @@ async def _trigger_orch_for_workspace(
             )
             # The claim must be durable before publishing: a replay may otherwise enqueue twice.
             await db_session.commit()
-        except Exception:
-            # Receipt telemetry is fail-open: preserve the established immediate 202 path.
+        except Exception as exc:
             if db_session.in_transaction():
                 await db_session.rollback()
             logger.exception(
                 "fileapp tipo1 ingest receipt unavailable",
                 extra={"workspace_uuid": safe_workspace_uuid, "flow_uuid": str(flow_uuid), "file_id": file_id},
             )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Receipt idempotente do FileApp indisponível; envio não enfileirado.",
+            ) from exc
 
         if receipt is not None and not receipt["should_enqueue"]:
             logger.info(
