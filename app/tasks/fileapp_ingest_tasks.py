@@ -39,7 +39,9 @@ from app.services.fileapp_mailing_association_service import associate_mailing_t
 from app.services.orch_trigger_service import process_single_payload
 from app.repositories.workspaces_repository import fetch_workspace_otima_billing_api_key
 from app.repositories.orch_fileapp_ingest_receipts_repository import (
+    bind_fileapp_ingest_receipt_mailing_uuid,
     claim_fileapp_ingest_receipt,
+    get_fileapp_ingest_receipt_mailing_uuid,
     mark_fileapp_ingest_receipt_enqueued,
     mark_fileapp_ingest_receipt_status,
     recover_fileapp_ingest_receipt_terminal_status,
@@ -238,6 +240,46 @@ async def _mark_fileapp_ingest_receipt_enqueued(
         )
 
 
+async def _get_fileapp_ingest_receipt_mailing_uuid(
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+) -> str | None:
+    _, workspace_schema = bind_workspace_context(workspace_uuid)
+    async with get_session_factory()() as db_session:
+        await db_session.execute(
+            text(
+                f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'
+            )
+        )
+        return await get_fileapp_ingest_receipt_mailing_uuid(
+            db_session,
+            receipt_id=receipt_id,
+        )
+
+
+async def _bind_fileapp_ingest_receipt_mailing_uuid(
+    *,
+    workspace_uuid: str,
+    receipt_id: int,
+    mailing_uuid: str,
+) -> str:
+    _, workspace_schema = bind_workspace_context(workspace_uuid)
+    async with get_session_factory()() as db_session:
+        await db_session.execute(
+            text(
+                f'SET LOCAL search_path TO "{workspace_schema.replace(chr(34), chr(34) * 2)}"'
+            )
+        )
+        bound = await bind_fileapp_ingest_receipt_mailing_uuid(
+            db_session,
+            receipt_id=receipt_id,
+            mailing_uuid=mailing_uuid,
+        )
+        await db_session.commit()
+        return bound
+
+
 async def _claim_fileapp_ingest_receipt_for_worker(
     *,
     workspace_uuid: str,
@@ -319,9 +361,11 @@ def _is_retryable_step1_upload_failure(result: dict[str, Any]) -> bool:
 
 
 def _is_retryable_step6_import_conflict(result: dict[str, Any]) -> bool:
+    """Recognize step 5/6 conflicts that must converge without a second upload."""
     if str(result.get("status") or "").strip().lower() != "failed":
         return False
-    if str(result.get("reason") or "").strip().lower() != "step6_import":
+    failed_step = str(result.get("reason") or "").strip().lower()
+    if failed_step not in {"step5_put_field_mappings", "step6_import"}:
         return False
     details = result.get("details")
     status_code: int | None = None
@@ -336,7 +380,21 @@ def _is_retryable_step6_import_conflict(result: dict[str, Any]) -> bool:
     if status_code != 409:
         return False
     lowered = response_body.lower()
-    return "processo de ingest" in lowered or "already ingest" in lowered or not lowered
+    return "ingest" in lowered or "import" in lowered or not lowered
+
+
+def _is_retryable_step6_import_transport_failure(result: dict[str, Any]) -> bool:
+    """Recognize an ambiguous import response that is safe to retry by mailing UUID."""
+    if str(result.get("status") or "").strip().lower() != "failed":
+        return False
+    if str(result.get("reason") or "").strip().lower() != "step6_import":
+        return False
+    details = result.get("details")
+    return bool(
+        isinstance(details, dict)
+        and details.get("retryable_import_transport") is True
+        and str(details.get("mailing_uuid") or "").strip()
+    )
 
 
 def _extract_step6_mailing_uuid(result: dict[str, Any]) -> str | None:
@@ -532,6 +590,7 @@ async def _handle_step6_import_conflict_without_reupload(
     payload: dict[str, Any],
     mapping_template_uuid: str,
     result: dict[str, Any],
+    receipt_mailing_uuid: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     session_factory = get_session_factory()
@@ -542,19 +601,22 @@ async def _handle_step6_import_conflict_without_reupload(
     file_name = str(payload_file.get("original_name") or "").strip()
     folder_path = str(payload_file.get("folder_path") or "").strip()
 
-    mailing_uuid = mailing_uuid_from_conflict
+    mailing_uuid = str(receipt_mailing_uuid or "").strip()
     canonical_mailing_uuid: str | None = None
-    async with session_factory() as db_session:
-        _, workspace_schema = bind_workspace_context(workspace_uuid)
-        canonical_mailing_uuid = await _resolve_canonical_mailing_uuid_for_file(
-            db_session,
-            workspace_schema=workspace_schema,
-            file_id=file_id,
-            file_name=file_name,
-            monitored_folder=folder_path,
-        )
-    if canonical_mailing_uuid:
-        mailing_uuid = canonical_mailing_uuid
+    if not mailing_uuid:
+        async with session_factory() as db_session:
+            _, workspace_schema = bind_workspace_context(workspace_uuid)
+            canonical_mailing_uuid = await _resolve_canonical_mailing_uuid_for_file(
+                db_session,
+                workspace_schema=workspace_schema,
+                file_id=file_id,
+                file_name=file_name,
+                monitored_folder=folder_path,
+            )
+        if canonical_mailing_uuid:
+            mailing_uuid = canonical_mailing_uuid
+        else:
+            mailing_uuid = mailing_uuid_from_conflict
 
     association_status: dict[str, Any] = {"status": "skipped", "reason": "mailing_uuid_not_available"}
     if mailing_uuid:
@@ -620,6 +682,7 @@ async def _handle_step6_import_conflict_without_reupload(
                 "mapping_template_uuid": mapping_template_uuid,
                 "mailing_uuid": mailing_uuid,
                 "mailing_uuid_from_conflict": mailing_uuid_from_conflict,
+                "mailing_uuid_from_receipt": receipt_mailing_uuid,
                 "mailing_uuid_canonical": canonical_mailing_uuid,
                 "retry_strategy": "association_only_no_reupload",
                 "association_status": association_status,
@@ -634,9 +697,10 @@ async def _handle_step6_import_conflict_without_reupload(
         )
 
     final_status = "done" if association_status.get("status") in {"queued", "done"} else "failed"
+    failed_step = str(result.get("reason") or "step6_import").strip() or "step6_import"
     return {
         "status": final_status,
-        "reason": "step6_import_conflict_deferred",
+        "reason": f"{failed_step}_conflict_deferred",
         "workspace_uuid": workspace_uuid,
         "flow_uuid": flow_uuid,
         "mapping_template_uuid": mapping_template_uuid,
@@ -1530,7 +1594,13 @@ def ingest_fileapp_event_task(self, *, workspace_uuid: str, flow_uuid: str, payl
     }
 
 
-@celery_app.task(name="app.tasks.fileapp.ingest_tipo1_event", bind=True, ignore_result=True)
+@celery_app.task(
+    name="app.tasks.fileapp.ingest_tipo1_event",
+    bind=True,
+    ignore_result=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def ingest_fileapp_tipo1_event_task(
     self,
     *,
@@ -1542,8 +1612,6 @@ def ingest_fileapp_tipo1_event_task(
     ingest_origin: str = "webhook",
 ) -> dict[str, Any]:
     settings = get_settings()
-    if receipt_id is not None:
-        asyncio.run(_mark_fileapp_ingest_receipt_status(workspace_uuid=workspace_uuid, receipt_id=receipt_id, status="processing"))
     try:
         task = process_fileapp_tipo1_event_task.apply_async(
             kwargs={
@@ -1561,6 +1629,15 @@ def ingest_fileapp_tipo1_event_task(
         retries = int(self.request.retries or 0)
         countdown = _RETRY_DELAYS[min(retries, len(_RETRY_DELAYS) - 1)]
         raise self.retry(exc=exc, countdown=countdown)
+
+    if receipt_id is not None:
+        asyncio.run(
+            _mark_fileapp_ingest_receipt_enqueued(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                task_id=str(task.id),
+            )
+        )
 
     logger.info(
         "fileapp.tipo1.ingest_event.enqueued",
@@ -1595,7 +1672,14 @@ def process_fileapp_event_task(*, workspace_uuid: str, flow_uuid: str, payload: 
     )
 
 
-@celery_app.task(name="app.tasks.fileapp.process_tipo1_event", bind=True, ignore_result=True, max_retries=6)
+@celery_app.task(
+    name="app.tasks.fileapp.process_tipo1_event",
+    bind=True,
+    ignore_result=True,
+    max_retries=6,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def process_fileapp_tipo1_event_task(
     self,
     *,
@@ -1606,6 +1690,14 @@ def process_fileapp_tipo1_event_task(
     receipt_id: int | None = None,
     ingest_origin: str = "webhook",
 ) -> dict[str, Any]:
+    if receipt_id is not None:
+        asyncio.run(
+            _mark_fileapp_ingest_receipt_status(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                status="processing",
+            )
+        )
     _persist_process_tipo1_rescue_flow_state(
         workspace_uuid=workspace_uuid,
         flow_uuid=flow_uuid,
@@ -1613,13 +1705,23 @@ def process_fileapp_tipo1_event_task(
         state="in_flight",
         ttl_seconds=86400,
     )
+    existing_mailing_uuid: str | None = None
     try:
+        if receipt_id is not None:
+            existing_mailing_uuid = asyncio.run(
+                _get_fileapp_ingest_receipt_mailing_uuid(
+                    workspace_uuid=workspace_uuid,
+                    receipt_id=receipt_id,
+                )
+            )
         result = asyncio.run(
             _process_fileapp_tipo1_event_task(
                 workspace_uuid=workspace_uuid,
                 flow_uuid=flow_uuid,
                 payload=payload,
                 mapping_template_uuid=mapping_template_uuid,
+                receipt_id=receipt_id,
+                existing_mailing_uuid=existing_mailing_uuid,
             )
         )
     except Exception:
@@ -1645,6 +1747,27 @@ def process_fileapp_tipo1_event_task(
     retry_alarm_message_scheduled: str | None = None
     retry_alarm_message_exhausted: str | None = None
 
+    result_details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    resolved_mailing_uuid = str(
+        result_details.get("mailing_uuid")
+        or result.get("mailing_uuid")
+        or (
+            result.get("manual_pipeline", {}).get("mailing_uuid")
+            if isinstance(result.get("manual_pipeline"), dict)
+            else ""
+        )
+        or existing_mailing_uuid
+        or ""
+    ).strip()
+    if receipt_id is not None and resolved_mailing_uuid:
+        existing_mailing_uuid = asyncio.run(
+            _bind_fileapp_ingest_receipt_mailing_uuid(
+                workspace_uuid=workspace_uuid,
+                receipt_id=receipt_id,
+                mailing_uuid=resolved_mailing_uuid,
+            )
+        )
+
     if _is_retryable_step1_upload_failure(result):
         retry_step = "step1_upload"
         retry_delays = _STEP1_UPLOAD_RETRY_DELAYS
@@ -1652,6 +1775,17 @@ def process_fileapp_tipo1_event_task(
         retry_alarm_code_exhausted = "fileapp_tipo1_step1_upload_retry_exhausted"
         retry_alarm_message_scheduled = "Falha transitória no upload (step1). Retry automático agendado."
         retry_alarm_message_exhausted = "Falha no upload (step1) após esgotar retries automáticos."
+    elif _is_retryable_step6_import_transport_failure(result):
+        retry_step = "step6_import"
+        retry_delays = _STEP6_IMPORT_RETRY_DELAYS
+        retry_alarm_code_scheduled = "fileapp_tipo1_step6_import_retry_scheduled"
+        retry_alarm_code_exhausted = "fileapp_tipo1_step6_import_retry_exhausted"
+        retry_alarm_message_scheduled = (
+            "Resposta ambígua do import (step6). Retry idempotente agendado."
+        )
+        retry_alarm_message_exhausted = (
+            "Resposta ambígua do import (step6) após esgotar retries idempotentes."
+        )
     elif _is_retryable_step6_import_conflict(result):
         handled_result = asyncio.run(
             _handle_step6_import_conflict_without_reupload(
@@ -1660,6 +1794,7 @@ def process_fileapp_tipo1_event_task(
                 payload=payload,
                 mapping_template_uuid=mapping_template_uuid,
                 result=result,
+                receipt_mailing_uuid=existing_mailing_uuid,
             )
         )
         terminal_state = "done" if str(handled_result.get("status") or "").strip().lower() == "done" else "failed"
@@ -1915,6 +2050,8 @@ async def _process_fileapp_tipo1_event_task(
     flow_uuid: str,
     payload: dict[str, Any],
     mapping_template_uuid: str,
+    receipt_id: int | None = None,
+    existing_mailing_uuid: str | None = None,
 ) -> dict[str, Any]:
     app_name = detect_app(payload)
     if app_name != APP_ARQUIVOS:
@@ -1948,11 +2085,13 @@ async def _process_fileapp_tipo1_event_task(
             mailing_description = identity.description
 
     try:
-        downloaded_file_bytes = await download_file_bytes_for_file_event(
-            settings=settings,
-            payload=payload,
-            default_workspace_uuid=safe_workspace_uuid,
-        )
+        downloaded_file_bytes = None
+        if not existing_mailing_uuid:
+            downloaded_file_bytes = await download_file_bytes_for_file_event(
+                settings=settings,
+                payload=payload,
+                default_workspace_uuid=safe_workspace_uuid,
+            )
     except FileAppTipo1ManualPipelineError as exc:
         logger.warning(
             "fileapp.tipo1.manual_pipeline.failed",
@@ -1994,6 +2133,15 @@ async def _process_fileapp_tipo1_event_task(
             "mapping_template_uuid": mapping_template_uuid,
         }
 
+    async def _persist_mailing_provenance(mailing_uuid: str) -> None:
+        if receipt_id is None:
+            return
+        await _bind_fileapp_ingest_receipt_mailing_uuid(
+            workspace_uuid=safe_workspace_uuid,
+            receipt_id=receipt_id,
+            mailing_uuid=mailing_uuid,
+        )
+
     try:
         pipeline_result = await run_tipo1_manual_pipeline(
             settings=settings,
@@ -2007,6 +2155,8 @@ async def _process_fileapp_tipo1_event_task(
             defer_step7_link_flow=True,
             predownloaded_file_bytes=downloaded_file_bytes,
             upload_file_name_override=original_name,
+            existing_mailing_uuid=existing_mailing_uuid,
+            on_mailing_resolved=_persist_mailing_provenance,
         )
     except FileAppTipo1ManualPipelineError as exc:
         logger.warning(

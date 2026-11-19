@@ -7,7 +7,7 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 from urllib import request
 from urllib.error import HTTPError, URLError
@@ -434,12 +434,21 @@ async def run_tipo1_manual_pipeline(
     defer_step7_link_flow: bool = False,
     predownloaded_file_bytes: bytes | None = None,
     upload_file_name_override: str | None = None,
+    existing_mailing_uuid: str | None = None,
+    on_mailing_resolved: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     file_data = payload.get("file")
     if not isinstance(file_data, dict):
         raise FileAppTipo1ManualPipelineError(
             step="input",
             message="Payload de FileApp inválido: campo file ausente.",
+        )
+
+    file_id = str(file_data.get("id") or "").strip()
+    if not file_id:
+        raise FileAppTipo1ManualPipelineError(
+            step="step1_upload",
+            message="Payload FileApp sem file.id para upload idempotente.",
         )
 
     file_name = str(file_data.get("original_name") or "").strip()
@@ -477,70 +486,170 @@ async def run_tipo1_manual_pipeline(
             message="Token Bearer e API key de workspace indisponíveis.",
         )
 
-    file_bytes = (
-        bytes(predownloaded_file_bytes)
-        if predownloaded_file_bytes is not None
-        else await download_file_bytes_for_file_event(
-            settings=settings,
-            payload=payload,
-            default_workspace_uuid=workspace_uuid,
-        )
-    )
-
-    upload_content_type = mime_type or mimetypes.guess_type(upload_file_name)[0] or "application/octet-stream"
     step_results: list[dict[str, Any]] = []
 
     # Step 1
-    try:
-        upload_headers = _build_target_core_headers(
-            workspace_uuid=workspace_uuid,
-            bearer_token=bearer_token,
-            workspace_api_key=fallback_workspace_api_key,
-            content_type=None,
+    mailing_uuid = str(existing_mailing_uuid or "").strip()
+    resuming_existing_mailing = bool(mailing_uuid)
+    mailing_status = ""
+    if mailing_uuid:
+        step_results.append(
+            {
+                "step": "step1_upload",
+                "status": "resumed",
+                "reason": "receipt_mailing_provenance",
+                "mailing_id": mailing_uuid,
+            }
         )
-        upload_payload = FileUploadPayload(
-            file_name=upload_file_name,
-            content_type=upload_content_type,
-            file_bytes=file_bytes,
-            description=resolved_description,
-            legal_basis=legal_basis,
+    else:
+        file_bytes = (
+            bytes(predownloaded_file_bytes)
+            if predownloaded_file_bytes is not None
+            else await download_file_bytes_for_file_event(
+                settings=settings,
+                payload=payload,
+                default_workspace_uuid=workspace_uuid,
+            )
         )
-        status_code, body = await asyncio.to_thread(
-            _multipart_request,
-            url=f"{base_url}/v2/mailings/upload",
-            headers=upload_headers,
-            upload=upload_payload,
-            timeout_seconds=settings.sync_ws_timeout_seconds,
+        upload_content_type = (
+            mime_type
+            or mimetypes.guess_type(upload_file_name)[0]
+            or "application/octet-stream"
         )
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message=f"Upload do mailing falhou (HTTP {int(exc.code)}).",
-            details={"status_code": int(exc.code), "response_body": detail},
-        ) from exc
-    except URLError as exc:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message=f"Upload do mailing falhou: {exc.reason}",
-        ) from exc
+        try:
+            upload_headers = _build_target_core_headers(
+                workspace_uuid=workspace_uuid,
+                bearer_token=bearer_token,
+                workspace_api_key=fallback_workspace_api_key,
+                content_type=None,
+            )
+            upload_headers["idempotency-key"] = f"fileapp:{flow_uuid}:{file_id}"
+            upload_payload = FileUploadPayload(
+                file_name=upload_file_name,
+                content_type=upload_content_type,
+                file_bytes=file_bytes,
+                description=resolved_description,
+                legal_basis=legal_basis,
+            )
+            status_code, body = await asyncio.to_thread(
+                _multipart_request,
+                url=f"{base_url}/v2/mailings/upload",
+                headers=upload_headers,
+                upload=upload_payload,
+                timeout_seconds=settings.sync_ws_timeout_seconds,
+            )
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise FileAppTipo1ManualPipelineError(
+                step="step1_upload",
+                message=f"Upload do mailing falhou (HTTP {int(exc.code)}).",
+                details={"status_code": int(exc.code), "response_body": detail},
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            reason = exc.reason if isinstance(exc, URLError) else str(exc)
+            raise FileAppTipo1ManualPipelineError(
+                step="step1_upload",
+                message=f"Upload do mailing falhou: {reason}",
+                details={"error_type": type(exc).__name__},
+            ) from exc
 
-    upload_response = _decode_json(body)
-    upload_data = upload_response.get("data") if isinstance(upload_response.get("data"), dict) else {}
-    mailing_uuid = str(upload_data.get("mailing_id") or "").strip()
-    if status_code >= 400 or not mailing_uuid:
-        raise FileAppTipo1ManualPipelineError(
-            step="step1_upload",
-            message="Upload do mailing não retornou mailing_id válido.",
-            details={"status_code": status_code, "response_body": body},
+        upload_response = _decode_json(body)
+        upload_data = upload_response.get("data") if isinstance(upload_response.get("data"), dict) else {}
+        mailing_uuid = str(upload_data.get("mailing_id") or "").strip()
+        mailing_status = str(
+            upload_data.get("status") or "PENDING_FIELD_MAPPING"
+        ).strip().upper()
+        if status_code >= 400 or not mailing_uuid:
+            raise FileAppTipo1ManualPipelineError(
+                step="step1_upload",
+                message="Upload do mailing não retornou mailing_id válido.",
+                details={"status_code": status_code, "response_body": body},
+            )
+        step_results.append(
+            {
+                "step": "step1_upload",
+                "status_code": status_code,
+                "mailing_id": mailing_uuid,
+            }
         )
-    step_results.append({"step": "step1_upload", "status_code": status_code, "mailing_id": mailing_uuid})
+
+    if on_mailing_resolved is not None:
+        try:
+            await on_mailing_resolved(mailing_uuid)
+        except Exception as exc:
+            raise FileAppTipo1ManualPipelineError(
+                step="step1_provenance",
+                message="Falha ao persistir proveniência file -> mailing.",
+                details={
+                    "mailing_uuid": mailing_uuid,
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
 
     json_headers = _build_target_core_headers(
         workspace_uuid=workspace_uuid,
         bearer_token=bearer_token,
         workspace_api_key=fallback_workspace_api_key,
     )
+    json_headers["idempotency-key"] = f"fileapp:{flow_uuid}:{file_id}"
+
+    request_attempts = 1
+    if resuming_existing_mailing:
+        status_code, body, request_attempts = await _json_request_with_transient_retry(
+            method="GET",
+            url=f"{base_url}/v2/mailings/{mailing_uuid}",
+            headers=json_headers,
+            payload=None,
+            timeout_seconds=settings.sync_ws_timeout_seconds,
+            step="step1_mailing_status",
+            failure_message="Consulta do estado do mailing falhou",
+        )
+        mailing_response = _decode_json(body)
+        mailing_data = (
+            mailing_response.get("data")
+            if isinstance(mailing_response.get("data"), dict)
+            else {}
+        )
+        mailing_status = str(mailing_data.get("status") or "").strip().upper()
+    else:
+        status_code = 200
+    accepted_resume_statuses = {
+        "UPLOADED",
+        "PENDING_FIELD_MAPPING",
+        "READY_TO_INGEST",
+        *_AUTO_INGEST_ACTIVE_OR_DONE_STATUSES,
+    }
+    if status_code >= 400 or mailing_status not in accepted_resume_statuses:
+        raise FileAppTipo1ManualPipelineError(
+            step="step1_mailing_status",
+            message="Mailing idempotente retornou estado inválido.",
+            details={
+                "status_code": status_code,
+                "mailing_status": mailing_status,
+                "mailing_uuid": mailing_uuid,
+                "attempts": request_attempts,
+            },
+        )
+    if resuming_existing_mailing:
+        step_results.append(
+            {
+                "step": "step1_mailing_status",
+                "status_code": status_code,
+                "mailing_status": mailing_status,
+                "attempts": request_attempts,
+            }
+        )
+    if mailing_status in _AUTO_INGEST_ACTIVE_OR_DONE_STATUSES:
+        raise FileAppTipo1ManualPipelineError(
+            step="step6_import",
+            message="Mailing já está em ingestão ou processado; convergir sem novo import.",
+            details={
+                "status_code": 409,
+                "response_body": f"mailing already ingesting: {mailing_status}",
+                "mailing_status": mailing_status,
+                "mailing_uuid": mailing_uuid,
+            },
+        )
 
     # Step 2
     status_code, body, request_attempts = await _json_request_with_transient_retry(
@@ -635,16 +744,20 @@ async def run_tipo1_manual_pipeline(
 
     # Step 5
     put_payload = {"mappings": suggested_mappings}
-    status_code, body, request_attempts = await _json_request_with_transient_retry(
-        method="PUT",
-        url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
-        headers=json_headers,
-        payload=put_payload,
-        timeout_seconds=settings.sync_ws_timeout_seconds,
-        step="step5_put_field_mappings",
-        failure_message="PUT de field-mappings falhou",
-        retry_response=_put_mappings_response_not_ready,
-    )
+    try:
+        status_code, body, request_attempts = await _json_request_with_transient_retry(
+            method="PUT",
+            url=f"{base_url}/v2/mailings/{mailing_uuid}/field-mappings",
+            headers=json_headers,
+            payload=put_payload,
+            timeout_seconds=settings.sync_ws_timeout_seconds,
+            step="step5_put_field_mappings",
+            failure_message="PUT de field-mappings falhou",
+            retry_response=_put_mappings_response_not_ready,
+        )
+    except FileAppTipo1ManualPipelineError as exc:
+        exc.details.setdefault("mailing_uuid", mailing_uuid)
+        raise
     put_response = _decode_json(body)
     put_data = put_response.get("data") if isinstance(put_response.get("data"), dict) else {}
     put_status = str(put_data.get("status") or "").strip().upper()
@@ -701,6 +814,60 @@ async def run_tipo1_manual_pipeline(
                 step="step6_import",
                 message=f"Import do mailing falhou (HTTP {int(exc.code)}).",
                 details={"status_code": int(exc.code), "response_body": detail, "mailing_uuid": mailing_uuid},
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            transport_details: dict[str, Any] = {
+                "mailing_uuid": mailing_uuid,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "retryable_import_transport": True,
+            }
+            if isinstance(exc, URLError):
+                transport_details["reason"] = str(exc.reason)
+
+            try:
+                _, status_body, status_attempts = await _json_request_with_transient_retry(
+                    method="GET",
+                    url=f"{base_url}/v2/mailings/{mailing_uuid}",
+                    headers=json_headers,
+                    payload=None,
+                    timeout_seconds=settings.sync_ws_timeout_seconds,
+                    step="step6_import_status",
+                    failure_message="Consulta após resposta ambígua do import falhou",
+                )
+                status_response = _decode_json(status_body)
+                status_data = (
+                    status_response.get("data")
+                    if isinstance(status_response.get("data"), dict)
+                    else {}
+                )
+                observed_status = str(status_data.get("status") or "").strip().upper()
+                transport_details.update(
+                    {
+                        "mailing_status": observed_status,
+                        "status_attempts": status_attempts,
+                    }
+                )
+            except FileAppTipo1ManualPipelineError as status_exc:
+                transport_details["status_lookup_error"] = status_exc.details
+                observed_status = ""
+
+            if observed_status in _AUTO_INGEST_ACTIVE_OR_DONE_STATUSES:
+                raise FileAppTipo1ManualPipelineError(
+                    step="step6_import",
+                    message="Import aceito pelo Target Core; convergir sem novo import.",
+                    details={
+                        **transport_details,
+                        "retryable_import_transport": False,
+                        "status_code": 409,
+                        "response_body": f"mailing already ingesting: {observed_status}",
+                    },
+                ) from exc
+
+            raise FileAppTipo1ManualPipelineError(
+                step="step6_import",
+                message="Resposta do import foi ambígua; retry idempotente necessário.",
+                details=transport_details,
             ) from exc
         import_response = _decode_json(body)
         import_data = import_response.get("data") if isinstance(import_response.get("data"), dict) else {}

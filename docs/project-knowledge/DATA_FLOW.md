@@ -280,8 +280,10 @@ A resolucao considera UUID de template no evento e configuracao do flow. Templat
 FileApp em pasta monitorada + mapping template resolvido
   -> API enfileira ingest_tipo1_event
   -> ingest enfileira process_tipo1_event
+  -> claim duravel por (flow_uuid, file_id)
   -> download do arquivo pela Files API
-  -> Target Core upload
+  -> Target Core upload com Idempotency-Key estavel por flow + file
+  -> persiste no receipt o mailing_uuid retornado
   -> lista/aplica mapping template
   -> GET/PUT field mappings ate READY_TO_INGEST
   -> POST import
@@ -294,6 +296,19 @@ FileApp em pasta monitorada + mapping template resolvido
 O ORCH nao persiste diretamente `persons` ou `orch_sessions` neste caminho atual. O efeito final obrigatorio depende do Target Core e permanece `UNKNOWN` sem E2E + SQL.
 
 Retries observados: ingest na falha de publicar proxima task; processo tipo 1 seletivo; associacao ate oito retries; download/move com tentativas proprias.
+
+O receipt `orch_fileapp_ingest_receipts` e a autoridade de proveniencia do
+Tipo 1. Assim que o Target Core retorna o `mailing_uuid`, o ORCH o vincula de
+forma imutavel ao par `(flow_uuid, file_id)`. Uma retomada com esse vinculo
+salta download/upload e continua no mesmo mailing. Conflitos HTTP 409 nas
+etapas 5 ou 6 convergem para associacao e pos-processamento do mailing
+persistido, sem criar um segundo upload. A busca heuristica em `source_lists`
+permanece apenas como fallback para receipts historicos sem proveniencia.
+Timeout de resposta no upload tambem reutiliza o mailing porque a mesma chave
+gera o mesmo UUID publico no Target Core. Antes de repetir mappings/import, a
+retomada consulta o estado: `INGESTING|PROCESSED` converge sem nova mutacao.
+Falha no claim do receipt responde 503 e nao publica task. Tasks Tipo 1 usam
+ACK tardio; receipts `enqueued|processing` stale possuem reclaim limitado.
 
 Divergencias canonicas conhecidas:
 

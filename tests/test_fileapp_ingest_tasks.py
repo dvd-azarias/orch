@@ -12,6 +12,7 @@ from app.tasks.fileapp_ingest_tasks import (
     _format_tipo1_failure_error,
     _handle_step6_import_conflict_without_reupload,
     _is_retryable_step6_import_conflict,
+    _is_retryable_step6_import_transport_failure,
     _is_retryable_step1_upload_failure,
     _list_files_in_folder,
     _mark_terminal_fileapp_ingest_receipt_status,
@@ -105,12 +106,15 @@ def test_ingest_tipo1_propagates_receipt_to_processing_task(monkeypatch) -> None
         captured["routing_key"] = routing_key
         return _QueuedTask()
 
-    receipt_status = AsyncMock()
+    receipt_enqueued = AsyncMock()
     monkeypatch.setattr(
         "app.tasks.fileapp_ingest_tasks.process_fileapp_tipo1_event_task.apply_async",
         _fake_apply_async,
     )
-    monkeypatch.setattr("app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_status", receipt_status)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_enqueued",
+        receipt_enqueued,
+    )
 
     result = ingest_fileapp_tipo1_event_task.run(
         workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
@@ -130,10 +134,10 @@ def test_ingest_tipo1_propagates_receipt_to_processing_task(monkeypatch) -> None
         "receipt_id": 77,
         "ingest_origin": "rescue",
     }
-    receipt_status.assert_awaited_once_with(
+    receipt_enqueued.assert_awaited_once_with(
         workspace_uuid="ba7eb0ec-e565-447c-8c11-8f870cf72a60",
         receipt_id=77,
-        status="processing",
+        task_id="process-123",
     )
 
 
@@ -485,6 +489,10 @@ def test_process_tipo1_wrapper_persists_structured_failure_with_receipt(monkeypa
         "app.tasks.fileapp_ingest_tasks._persist_tipo1_processing_failure_alarm",
         failure_alarm,
     )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._get_fileapp_ingest_receipt_mailing_uuid",
+        AsyncMock(return_value=None),
+    )
 
     result = process_fileapp_tipo1_event_task.run(
         workspace_uuid="w1",
@@ -498,13 +506,18 @@ def test_process_tipo1_wrapper_persists_structured_failure_with_receipt(monkeypa
     assert result["status"] == "failed"
     assert state_changes == ["in_flight", "failed"]
     failure_alarm.assert_awaited_once()
-    receipt_status.assert_awaited_once_with(
-        workspace_uuid="w1",
-        receipt_id=77,
-        status="failed",
-        error="reason=step4_patch_mailing status_code=503 attempts=3 "
+    assert receipt_status.await_args_list[0].kwargs == {
+        "workspace_uuid": "w1",
+        "receipt_id": 77,
+        "status": "processing",
+    }
+    assert receipt_status.await_args_list[1].kwargs == {
+        "workspace_uuid": "w1",
+        "receipt_id": 77,
+        "status": "failed",
+        "error": "reason=step4_patch_mailing status_code=503 attempts=3 "
         "message=PATCH do mailing falhou (HTTP 503).",
-    )
+    }
 
 
 def test_format_tipo1_failure_error_omits_response_body() -> None:
@@ -572,6 +585,73 @@ def test_process_tipo1_wrapper_step6_conflict_defers_without_retrying_pipeline(m
     assert result["reason"] == "step6_import_conflict_deferred"
     assert result["retry_strategy"] == "association_only_no_reupload"
     assert state_changes == ["in_flight", "done"]
+
+
+def test_process_tipo1_wrapper_reuses_receipt_mailing_without_reupload(monkeypatch) -> None:
+    process_kwargs: dict[str, object] = {}
+    terminal_updates: list[dict[str, object]] = []
+    receipt_mailing = "11111111-1111-1111-1111-111111111111"
+    receipt_status = AsyncMock()
+
+    async def _fake_process(**kwargs):  # type: ignore[no-untyped-def]
+        process_kwargs.update(kwargs)
+        return {"status": "done", "manual_pipeline": {"mailing_uuid": receipt_mailing}}
+
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._get_fileapp_ingest_receipt_mailing_uuid",
+        AsyncMock(return_value=receipt_mailing),
+    )
+    bind_mailing = AsyncMock(return_value=receipt_mailing)
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._bind_fileapp_ingest_receipt_mailing_uuid",
+        bind_mailing,
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._process_fileapp_tipo1_event_task",
+        _fake_process,
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._mark_terminal_fileapp_ingest_receipt_status",
+        lambda **kwargs: terminal_updates.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._mark_fileapp_ingest_receipt_status",
+        receipt_status,
+    )
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._persist_process_tipo1_rescue_flow_state",
+        lambda **_kwargs: None,
+    )
+
+    result = process_fileapp_tipo1_event_task.run(
+        workspace_uuid="w1",
+        flow_uuid="flow-1",
+        payload={"file": {"id": "f-1", "original_name": "x.csv"}},
+        mapping_template_uuid="tmpl-1",
+        receipt_id=77,
+    )
+
+    assert result["status"] == "done"
+    assert process_kwargs["existing_mailing_uuid"] == receipt_mailing
+    assert process_kwargs["receipt_id"] == 77
+    bind_mailing.assert_awaited_once_with(
+        workspace_uuid="w1",
+        receipt_id=77,
+        mailing_uuid=receipt_mailing,
+    )
+    assert terminal_updates[-1]["status"] == "completed"
+    receipt_status.assert_awaited_once_with(
+        workspace_uuid="w1",
+        receipt_id=77,
+        status="processing",
+    )
+
+
+def test_tipo1_tasks_ack_only_after_processing() -> None:
+    assert ingest_fileapp_tipo1_event_task.acks_late is True
+    assert ingest_fileapp_tipo1_event_task.reject_on_worker_lost is True
+    assert process_fileapp_tipo1_event_task.acks_late is True
+    assert process_fileapp_tipo1_event_task.reject_on_worker_lost is True
 
 
 @pytest.mark.asyncio
@@ -647,6 +727,46 @@ async def test_step6_conflict_handler_prefers_canonical_mailing_uuid(monkeypatch
     assert captured["kwargs"]["mailing_uuid"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     assert captured["alarm_details"]["mailing_uuid_from_conflict"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
     assert captured["alarm_details"]["mailing_uuid_canonical"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    async def _unexpected_canonical_lookup(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("receipt persistido deve prevalecer sem heuristica")
+
+    monkeypatch.setattr(
+        "app.tasks.fileapp_ingest_tasks._resolve_canonical_mailing_uuid_for_file",
+        _unexpected_canonical_lookup,
+    )
+    receipt_mailing_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+    result = await _handle_step6_import_conflict_without_reupload(
+        workspace_uuid="f0d1d7cf-8ddd-4dcb-9477-d87c11e81c26",
+        flow_uuid="b049eca9-d856-4379-9c83-434b22036a1b",
+        payload={
+            "file": {
+                "id": "file-123",
+                "original_name": "carga-0012.csv",
+                "folder_path": "ACAN_CONTATOS/entrada",
+                "url": "https://sync-core-api.otima.io/files/v1/files/content/file-123",
+            }
+        },
+        mapping_template_uuid="d94523f9-33d0-42db-b5f9-cb3f2c226bfb",
+        result={
+            "status": "failed",
+            "reason": "step5_put_field_mappings",
+            "details": {
+                "status_code": 409,
+                "response_body": '{"detail":"Nao e possivel alterar o mapeamento durante a ingestao."}',
+                "mailing_uuid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+        },
+        receipt_mailing_uuid=receipt_mailing_uuid,
+    )
+
+    assert result["status"] == "done"
+    assert result["reason"] == "step5_put_field_mappings_conflict_deferred"
+    assert result["mailing_uuid"] == receipt_mailing_uuid
+    assert captured["kwargs"]["mailing_uuid"] == receipt_mailing_uuid
+    assert captured["alarm_details"]["mailing_uuid_from_receipt"] == receipt_mailing_uuid
+    assert captured["alarm_details"]["mailing_uuid_canonical"] is None
 
 
 @pytest.mark.asyncio
@@ -757,6 +877,20 @@ def test_is_retryable_step6_import_conflict_for_http_409() -> None:
     assert _is_retryable_step6_import_conflict(result) is True
 
 
+def test_step5_mapping_conflict_uses_same_no_reupload_convergence() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step5_put_field_mappings",
+        "details": {
+            "status_code": 409,
+            "response_body": '{"detail":"Não é possível alterar o mapeamento durante a ingestão."}',
+            "mailing_uuid": "11111111-1111-1111-1111-111111111111",
+        },
+    }
+
+    assert _is_retryable_step6_import_conflict(result) is True
+
+
 def test_is_retryable_step6_import_conflict_for_http_400() -> None:
     result = {
         "status": "failed",
@@ -764,6 +898,38 @@ def test_is_retryable_step6_import_conflict_for_http_400() -> None:
         "details": {"status_code": 400, "response_body": '{"detail":"Bad Request"}'},
     }
     assert _is_retryable_step6_import_conflict(result) is False
+
+
+def test_is_retryable_step6_import_transport_failure_requires_mailing_uuid() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step6_import",
+        "details": {
+            "retryable_import_transport": True,
+            "mailing_uuid": "11111111-1111-1111-1111-111111111111",
+            "error_type": "TimeoutError",
+        },
+    }
+
+    assert _is_retryable_step6_import_transport_failure(result) is True
+    result["details"]["mailing_uuid"] = ""
+    assert _is_retryable_step6_import_transport_failure(result) is False
+
+
+def test_active_mailing_after_ambiguous_import_converges_without_transport_retry() -> None:
+    result = {
+        "status": "failed",
+        "reason": "step6_import",
+        "details": {
+            "retryable_import_transport": False,
+            "mailing_uuid": "11111111-1111-1111-1111-111111111111",
+            "status_code": 409,
+            "response_body": "mailing already ingesting: INGESTING",
+        },
+    }
+
+    assert _is_retryable_step6_import_transport_failure(result) is False
+    assert _is_retryable_step6_import_conflict(result) is True
 
 
 @pytest.mark.asyncio

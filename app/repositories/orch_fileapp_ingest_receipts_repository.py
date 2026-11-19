@@ -40,7 +40,13 @@ async def claim_fileapp_ingest_receipt(
                     orch_fileapp_ingest_receipts.status = 'accepted'
                     AND orch_fileapp_ingest_receipts.updated_at < NOW() - INTERVAL '60 seconds'
                   )
-            RETURNING id, status, task_id::text AS task_id, true AS should_enqueue
+               OR (
+                    orch_fileapp_ingest_receipts.status = 'enqueued'
+                    AND orch_fileapp_ingest_receipts.updated_at < NOW() - INTERVAL '5 minutes'
+                  )
+            RETURNING id, status, task_id::text AS task_id,
+                      mailing_uuid::text AS mailing_uuid,
+                      true AS should_enqueue
             """
         ),
         {
@@ -58,7 +64,9 @@ async def claim_fileapp_ingest_receipt(
     existing = await db_session.execute(
         text(
             """
-            SELECT id, status, task_id::text AS task_id, false AS should_enqueue
+            SELECT id, status, task_id::text AS task_id,
+                   mailing_uuid::text AS mailing_uuid,
+                   false AS should_enqueue
             FROM orch_fileapp_ingest_receipts
             WHERE flow_uuid = CAST(:flow_uuid AS uuid)
               AND file_id = CAST(:file_id AS uuid)
@@ -67,6 +75,62 @@ async def claim_fileapp_ingest_receipt(
         {"flow_uuid": flow_uuid, "file_id": file_id},
     )
     return dict(existing.mappings().one())
+
+
+async def get_fileapp_ingest_receipt_mailing_uuid(
+    db_session: AsyncSession,
+    *,
+    receipt_id: int,
+) -> str | None:
+    result = await db_session.execute(
+        text(
+            """
+            SELECT mailing_uuid::text
+            FROM orch_fileapp_ingest_receipts
+            WHERE id = :receipt_id
+            """
+        ),
+        {"receipt_id": receipt_id},
+    )
+    value = result.scalar_one_or_none()
+    return str(value) if value is not None else None
+
+
+async def bind_fileapp_ingest_receipt_mailing_uuid(
+    db_session: AsyncSession,
+    *,
+    receipt_id: int,
+    mailing_uuid: str,
+) -> str:
+    result = await db_session.execute(
+        text(
+            """
+            UPDATE orch_fileapp_ingest_receipts
+            SET mailing_uuid = COALESCE(mailing_uuid, CAST(:mailing_uuid AS uuid)),
+                updated_at = NOW()
+            WHERE id = :receipt_id
+              AND (
+                    mailing_uuid IS NULL
+                    OR mailing_uuid = CAST(:mailing_uuid AS uuid)
+                  )
+            RETURNING mailing_uuid::text
+            """
+        ),
+        {"receipt_id": receipt_id, "mailing_uuid": mailing_uuid},
+    )
+    bound = result.scalar_one_or_none()
+    if bound is not None:
+        return str(bound)
+
+    existing = await get_fileapp_ingest_receipt_mailing_uuid(
+        db_session,
+        receipt_id=receipt_id,
+    )
+    if existing is None:
+        raise LookupError(f"FileApp ingest receipt {receipt_id} não encontrado.")
+    raise ValueError(
+        f"FileApp ingest receipt {receipt_id} já está vinculado ao mailing {existing}."
+    )
 
 
 async def mark_fileapp_ingest_receipt_enqueued(
@@ -81,6 +145,7 @@ async def mark_fileapp_ingest_receipt_enqueued(
             UPDATE orch_fileapp_ingest_receipts
             SET status = 'enqueued', task_id = CAST(:task_id AS uuid), enqueued_at = NOW(), updated_at = NOW()
             WHERE id = :receipt_id
+              AND status IN ('accepted', 'enqueued')
             """
         ),
         {"receipt_id": receipt_id, "task_id": task_id},

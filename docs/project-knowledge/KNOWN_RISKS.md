@@ -500,7 +500,7 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 ## R26 — Corrida no status do mapping produz falso erro Tipo 1
 
-`STATUS`: CONFIRMED RUNTIME / CORRECAO IMPLEMENTADA, ROLLOUT PENDENTE (2026-08-26)
+`STATUS`: CONFIRMED RUNTIME / CORRECAO DEFINITIVA IMPLEMENTADA, ROLLOUT PENDENTE (2026-11-19)
 
 `IMPACT`: high
 
@@ -508,13 +508,13 @@ Na validacao posterior do recibo imediato, 31 arquivos fisicos permaneceram na e
 
 `AFFECTED AREA`: FileApp tipo 1 / Target Core field mappings / pós-processamento
 
-`DESCRIPTION`: o `PUT /v2/mailings/{id}/field-mappings` do Target Core sincroniza os mappings e autoenfileira `source_list.ingest` quando existe template. Antes de o ORCH avaliar a resposta, o mailing pode avançar de `READY_TO_INGEST` para `INGESTING` ou `PROCESSED`. O ORCH exigia igualdade estrita com `READY_TO_INGEST`, registrava receipt `failed` e mantinha o arquivo na entrada até o rescue de 600 segundos, embora a entrega S3 e a ingestão Target já tivessem avançado.
+`DESCRIPTION`: o `PUT /v2/mailings/{id}/field-mappings` do Target Core sincronizava os mappings e autoenfileirava `source_list.ingest` quando existia template. O ORCH ainda publicava `/import`, de modo que uma unica entrega podia produzir dois enqueues prematuros antes da autoridade explicita. Antes de o ORCH avaliar a resposta, o mailing podia avançar de `READY_TO_INGEST` para `INGESTING` ou `PROCESSED`; um 409 nas etapas 5/6 podia cair no rescue e, sem proveniencia persistente, abrir margem para novo upload.
 
 `RUNTIME EVIDENCE`: no workspace `253148c7-a85f-42a3-bc8b-5ffd9d885efe`, arquivos `create_customer-6687-6687.csv`, `create_customer-6763-6763.csv`, `create_customer-6764-6764.csv` e um terceiro arquivo subsequente tiveram callback aceito imediatamente e falharam no step 5 com HTTP 200 mais status `PROCESSED` ou `INGESTING`. O primeiro foi retomado pelo rescue exatamente após o grace e concluído em menos de um segundo.
 
-`MITIGATION`: aceitar somente `READY_TO_INGEST`, `INGESTING` e `PROCESSED` como estados válidos. Para `INGESTING`/`PROCESSED`, não publicar um segundo import; seguir para associação assíncrona, que já possui polling/retry até o estado final. Estados desconhecidos ou regressivos permanecem fail-closed.
+`MITIGATION`: no Target Core, somente `POST /v2/mailings/{id}/import` passa a autorizar ingestao; PATCH/PUT preparatorios nao enfileiram. O upload aceita `Idempotency-Key` e deriva um UUID publico deterministico por workspace, tornando timeout de resposta e concorrencia reexecutaveis sem segunda source list. No ORCH, o receipt persiste imediatamente o `mailing_uuid` retornado e o preserva em reclaims. Retomadas saltam download/upload, consultam o estado antes de mutar e convergem `INGESTING|PROCESSED` sem novo import; timeout ambiguo do `/import` consulta o mesmo mailing e converge quando o Target ja aceitou, ou agenda retry idempotente quando ainda esta `READY_TO_INGEST`. Conflitos 409 nas etapas 5/6 seguem para associacao e pos-processamento. Claim indisponivel falha fechado com 503; tasks usam ACK tardio, o pai permanece `enqueued` ate publicar o filho e `processing` nao e reclamado por TTL fixo. Estados desconhecidos ou regressivos permanecem fail-closed. A unicidade do UUID impede segunda source list e o claim atomico impede materializacao dupla; chamadas concorrentes ainda podem deixar upload fisico orfao ou uma task redundante, risco P2 operacional a observar. Rollout seguro exige migration ORCH antes do codigo, depois Target Core e workers ORCH, seguido de canario E2E.
 
-`DETECTION`: alertar receipt Tipo 1 `failed` com `reason=step5_put_field_mappings`, HTTP 2xx e mailing status avançado; correlacionar workspace, flow, file e receipt.
+`DETECTION`: alertar receipt Tipo 1 `failed` com `reason=step5_put_field_mappings|step6_import`, HTTP 409, ou receipt sem `mailing_uuid` apos upload; correlacionar workspace, flow, file, receipt e mailing.
 
 `V2`: contrato explícito de ownership do auto-import e máquina de estados compartilhada entre ORCH e Target Core.
 
